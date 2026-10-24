@@ -1,6 +1,6 @@
 # Weather-lab
 
-This is a small, reproducible benchmark for **short-range probabilistic weather forecasting at French surface stations**. It compares Mistral's [Timestral](https://github.com/mistralai/timestral), a time-series foundation model used zero-shot with **no local fine-tuning**, against persistence, a 24 h seasonal-naive forecast, empirical-quantile climatology and **issued AROME** forecasts. All systems run on frozen case sets from real Météo-France data, and a Gradio explorer presents the saved results.
+This is a small, reproducible benchmark for **short-range probabilistic weather forecasting at French surface stations**. It compares Mistral's [Timestral](https://github.com/mistralai/timestral), a time-series foundation model used zero-shot with **no local fine-tuning**, against persistence, a 24 h seasonal-naive forecast, empirical-quantile climatology and **issued AROME** forecasts. All systems run on frozen case sets from real Météo-France data, and a Gradio app presents the saved results.
 
 **Research question.** Can Timestral improve station-level probabilistic forecasts on its own, and when it is conditioned on issued AROME predictions?
 
@@ -13,7 +13,7 @@ The repository contains code, configuration and documentation only. Data, saved 
 ```bash
 uv sync
 uv run weather-lab bootstrap                 # idempotent: fetch + verify + prepare; reuses the cache
-uv run weather-lab-app                       # explorer on http://127.0.0.1:7860 (runs the same bootstrap at startup)
+uv run weather-lab-app                       # app on http://127.0.0.1:7860 (runs the same bootstrap at startup)
 uv run pytest                                # unit tests, no downloads
 uv run pytest -m real_model                  # opt-in: real Timestral-5M inference (~21 MB)
 ```
@@ -38,6 +38,7 @@ uv run weather-lab data prepare  --config configs/arome_v2.yaml
 uv run weather-lab evaluate      --config configs/arome_v2.yaml
 uv run weather-lab score --run-dir runs/<suite>/<run-id>            # recompute scores, no model calls
 uv run weather-lab compare --freeze                                 # context-length selection (configs/context/)
+uv run weather-lab compare --export-combined runs/synop-ctxval-2023-v1/combined   # one run with all candidates, for the app
 uv run weather-lab diagnose arome-inputs --config configs/arome_v2.yaml --case <case-id>
 uv run weather-lab diagnose covariates   --config configs/arome_v2.yaml
 uv run weather-lab arome evidence | observe | refresh-suite         # availability evidence; new suite ids for new dates
@@ -45,6 +46,36 @@ uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benc
 ```
 
 `arome refresh-suite` writes a config for whatever dates are currently in the 14-day archive. If those dates differ from the base suite, it uses a **new suite id** (`arome-issued-r<first>-<last>`) and never reuses a frozen one.
+
+## The app
+
+`uv run weather-lab-app` (or the Space) opens on three tabs. *Experiment* and *Weather variable* sit above the tabs and apply to all of them.
+
+- **Overview** (landing): the research question, a large forecast chart for one forecast, and headline tiles (error of the key systems, and how often observations fall inside the shaded system's 80% range). The four primary controls are *Experiment*, *Weather variable*, *Station* and *Forecast issued*. The default forecast follows a fixed, neutral rule: the most recent forecast of the last period for the station. The chart shows 48 h of observed history by default.
+  - The **Advanced** accordion holds the systems shown (only those forecasting the selected variable; raw AROME has no wind), the system whose 80% / 90% range is shaded, the history slider, a toggle for superseded experiment versions, and the exploratory run (Timestral once on the displayed forecast with custom settings; kept in the session, never saved or scored).
+- **Benchmark**: *Score* and *Lead time* controls, sorted comparison bars with the reference system outlined, and a score-by-lead chart. *Detailed tables and downloads* and *Advanced: filters, availability, uncertainty, timings* hold the tables, CSV downloads, station/season filters, availability, paired differences and CPU cost.
+- **Methods**: a table mapping each readable system name to its exact identifier, definitions of the scores, *Runs, versions and integrity*, and the full protocol.
+
+Experiments offered (`EXPERIMENTS` in `src/weather_lab_app/labels.py`):
+
+| In the app | Suite | Status |
+|---|---|---|
+| AROME vs Timestral · Oct 2026 (default) | `arome-issued-v2` | Integration study |
+| History length · 2023 validation | `synop-ctxval-2023-v1` | Validation. Shown from a combined run of the 7 / 30 / 90-day candidates, created with `uv run weather-lab compare --export-combined runs/synop-ctxval-2023-v1/combined`. |
+| Station history · integration example | `synop-historical-v1` | Integration check |
+| AROME vs Timestral · v1 (superseded) | `arome-issued-v1` | Hidden unless *Show superseded experiment versions* is ticked in Advanced |
+
+**Names.** The UI uses readable names; exact identifiers appear in Methods and in chart hover. Identifiers ending in `-cal` mean *calendar* (hour-of-day and time-of-year inputs), **not calibration**. Main names:
+
+| In the app | Identifier |
+|---|---|
+| AROME | `arome-raw` |
+| Timestral 28M | `timestral-28m-mv-cal` |
+| Timestral 28M · no time inputs | `timestral-28m-mv` |
+| Timestral 28M + AROME (archived AROME history) | `timestral-28m-mv-cal-arome-archived` |
+| Timestral 28M + AROME (observed history): station observations stand in for past AROME, a different input | `timestral-28m-mv-cal-arome-substobs` (v1: `…-arome`) |
+| Timestral 28M + AROME (forecast only): no AROME history, ignored by the pinned model | `timestral-28m-mv-cal-arome-futureonly` (v1: `…-arome-nanpast`) |
+| Timestral 209M, Timestral 209M + AROME | `timestral-209m-mv-cal`, `timestral-209m-mv-cal-arome-archived` |
 
 ## Deployment to a Hugging Face Space (prepared, not published)
 
@@ -61,10 +92,7 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
 
 **Current deployment** ([ai-testack/weather-lab](https://huggingface.co/spaces/ai-testack/weather-lab)):
 
-- **Explorer behaviour.**
-  - One *Benchmark* selector drives the scorecard and the explorer.
-  - *Systems* lists only the systems that forecast the selected variable (raw AROME has no wind) and remembers your choices across variables, cases and benchmarks.
-  - Exploratory runs stay in the session for the displayed case and appear as toggleable systems, which can also carry the bands. They are dropped when you move to another case.
+- **App.** The layout described in [The app](#the-app); saved results are replayed only.
 - **Snapshot.** The data snapshot lives in the public Storage Bucket [`ai-testack/weather-lab-storage`](https://huggingface.co/buckets/ai-testack/weather-lab-storage). `configs/bootstrap.yaml` pins it as `hf://buckets/ai-testack/weather-lab-storage/<id>.tar.gz` with its SHA-256.
   - In the Space the bucket is attached at `/data`, so `bootstrap` reads the file from the mount. Elsewhere (locally, CI) it downloads it through the Hub API. Both paths verify the checksum.
   - Buckets are mutable and unversioned: never overwrite a snapshot file. Upload a new id (`weather-lab snapshot build --id …`, then `hf buckets cp dist/snapshot/<id>.tar.gz hf://buckets/ai-testack/weather-lab-storage/`) and update the pinned URL and SHA-256.
@@ -114,6 +142,8 @@ Selection rule, declared before running: lowest mean temperature pinball; ties w
 
 ### Issued AROME comparison, `arome-issued-v2` (12 days × 5 stations, n = 960 pairs)
 
+In short (temperature MAE): AROME 1.09 °C; Timestral 28M 2.52 °C; **Timestral 28M + AROME** (archived history) 2.19 °C, about 13% lower error than Timestral alone but about 2.0× AROME's error, with 81% of observations inside its 80% range. The observed-history variant reaches 1.51 °C with a different input; Timestral 209M + AROME reaches 1.90 °C. "mv + calendar" below is the app's *Timestral 28M*.
+
 | System | Historical AROME input | t 6 h | t 24 h | t 48 h | t all | t pinball | t cov. 80% | MSLP all | MSLP cov. 80% |
 |---|---|---|---|---|---|---|---|---|---|
 | persistence | – | 5.67 | 2.90 | 3.44 | 3.89 | – | – | 4.81 | – |
@@ -156,6 +186,13 @@ The 209M rows are integration checks on the same frozen cases. The size comparis
   - **Official mode:** downloaded SYNOP from data.gouv.fr, regenerated the frozen manifest exactly as specified, and reproduced the spec score hashes with real inference.
   - **Failure handling:** a configuration error and an unreachable snapshot server both showed the retry screen. After the server came up, **Retry setup** completed and the app restarted with full results.
 
+## Next steps
+
+1. **AROME probabilistic baseline**: give AROME an uncertainty range estimated from its historical forecast errors, so Timestral variants are compared with a probabilistic AROME rather than a deterministic one.
+2. **Timestral-based residual correction of AROME**: use Timestral to forecast AROME's error and correct it, to test whether Timestral adds information beyond AROME.
+
+The 2024 test of the frozen 90-day context also remains to be run; see [docs/roadmap.md](docs/roadmap.md).
+
 ## Design choices worth knowing
 
 - **AROME package.** The 0.025° SP1 package is used; the 0.01° surface packages carry no MSLP. Only the T2m/MSLP messages needed are fetched, byte-for-byte, with per-message SHA-256.
@@ -184,7 +221,8 @@ src/weather_lab/            science: data, suites, models, evaluation, setup
   diagnostics.py            AROME input audit and covariate sensitivity
   evidence.py               availability evidence and manual first-seen observation
 src/weather_lab_app/        app and deployment only (no benchmark logic)
-  main.py                   Gradio explorer; runs bootstrap at startup, reads saved runs only
+  main.py                   Gradio app (Overview / Benchmark / Methods); runs bootstrap at startup, reads saved runs only
+  labels.py                 readable names, descriptions and colours; experiments shown in the app
   results.py, plots.py      UI data access and figures
   space.py, space.yaml      Hugging Face Space build (generated front matter + root launcher)
   cli.py                    `weather-lab-app [serve|build-space]`
@@ -193,4 +231,4 @@ docs/                       methods, sources, availability evidence, diagnostics
 tests/                      unit tests; test_real_timestral.py is opt-in
 ```
 
-**Adding a model.** Subclass `Adapter` in `forecast.py`: declare `output` and `inputs`, return a `ForecastBatch`, and register its `kind` in `evaluate.build_adapters`. Scoring and the UI pick it up unchanged.
+**Adding a model.** Subclass `Adapter` in `forecast.py`: declare `output` and `inputs`, return a `ForecastBatch`, and register its `kind` in `evaluate.build_adapters`. Scoring picks it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`); `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces this.

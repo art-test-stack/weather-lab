@@ -11,47 +11,7 @@ import pandas as pd
 from weather_lab.common import ROOT, STATION_NAMES, read_json
 from weather_lab.forecast import QUANTILE_LEVELS, qcol
 
-SUITES = {
-    "synop-historical-v1": "Station history · 2023–24 (SYNOP smoke)",
-    "arome-issued-v2": "AROME comparison · Oct 2026",
-    "arome-issued-v1": "AROME comparison · Oct 2026 (v1, superseded)",
-}
-SUITE_DESCRIPTIONS = {
-    "synop-historical-v1": "Historical observation suite: 2 stations, semi-monthly origins in 2023 (validation) and "
-                           "2024 (test).",
-    "arome-issued-v2": "Issued AROME runs from the 14-day archive: 5 stations, 12 daily origins; historical AROME "
-                       "input explicit per system.",
-    "arome-issued-v1": "Earlier version of the AROME comparison, kept unchanged: its conditioned system substituted "
-                       "station observations for historical AROME.",
-}
-# Fixed entity -> colour (reference categorical palette, fixed order; colour follows the system).
-# 209M variants share their 28M counterpart's hue with a dashed line as secondary encoding.
-MODEL_STYLE = {
-    "timestral-28m-mv-cal": ("#2a78d6", "solid"),
-    "timestral-209m-mv-cal": ("#2a78d6", "dash"),
-    "arome-raw": ("#eb6834", "solid"),
-    "timestral-28m-mv-cal-arome": ("#1baf7a", "solid"),
-    "climatology": ("#eda100", "dot"),
-    "persistence": ("#e87ba4", "dash"),
-    "seasonal-naive-24h": ("#008300", "dashdot"),
-    "timestral-28m-mv": ("#6250d6", "solid"),
-    "timestral-28m-t": ("#e34948", "solid"),
-    "timestral-28m-mv-cal-arome-nanpast": ("#8a8984", "longdash"),
-    "timestral-28m-mv-cal-arome-archived": ("#1baf7a", "solid"),
-    "timestral-209m-mv-cal-arome-archived": ("#1baf7a", "dash"),
-    "timestral-28m-mv-cal-arome-futureonly": ("#6250d6", "dash"),
-    "timestral-28m-mv-cal-arome-substobs": ("#e34948", "dot"),
-}
-EXPLORATORY_STYLE = ("#52514e", "dot")
-
-
-EXPLORATORY_SIZE_STYLE = {"5M": ("#a3a29c", "dot"), "28M": ("#6b6a65", "dash"), "209M": ("#3d3c39", "longdashdot")}
-
-
-def style(model: str) -> tuple[str, str]:
-    if model.startswith("exploratory"):   # session-only runs: neutral greys, by checkpoint size
-        return next((v for k, v in EXPLORATORY_SIZE_STYLE.items() if f"-{k} " in model), EXPLORATORY_STYLE)
-    return MODEL_STYLE.get(model, EXPLORATORY_STYLE)
+from weather_lab_app.labels import EXPERIMENT_ORDER, EXPERIMENTS, model_name
 
 
 def training_status(model: str) -> str:
@@ -109,9 +69,11 @@ def _parquet(path: Path) -> pd.DataFrame:
 
 
 def find_run(suite: str, prefer_local: bool = True) -> Path | None:
-    local = sorted((ROOT / "runs" / suite).glob("*/run.json"))
+    """Latest local run of a benchmark (a combined multi-candidate run wins), else the installed example."""
+    local = [p.parent for p in (ROOT / "runs" / suite).glob("*/run.json")]
     if prefer_local and local:
-        return local[-1].parent
+        combined = [d for d in local if "combined_from" in read_json(d / "run.json")]
+        return sorted(combined or local)[-1]
     example = ROOT / "data" / "examples" / suite
     return example if (example / "run.json").exists() else None
 
@@ -134,11 +96,28 @@ def load_run(path: Path) -> Run:
 
 def available_runs(prefer_local: bool = True) -> dict[str, Run]:
     out = {}
-    for suite in SUITES:
+    for suite in EXPERIMENT_ORDER:
         p = find_run(suite, prefer_local)
         if p is not None:
             out[suite] = load_run(p)
     return out
+
+
+def headline(run: Run, variable: str, split: str | None = None) -> pd.DataFrame:
+    """All-lead, all-station scores of the experiment's headline systems (from the saved score tables)."""
+    exp = EXPERIMENTS.get(run.suite, {})
+    point, prob = run.tables["metrics_point"], run.tables["metrics_probabilistic"]
+    split = split or run.splits[-1]
+    sel = lambda d: d[(d["split"] == split) & (d["variable"] == variable) & (d["station"] == "ALL")  # noqa: E731
+                      & (d["season"] == "ALL") & d["lead_h"].isna()]
+    pt = sel(point).set_index("model")
+    pr = sel(prob).set_index("model")
+    rows = []
+    for m in exp.get("headline", []):
+        if m in pt.index:
+            rows.append({"model": m, "name": model_name(m), "mae": pt.loc[m, "mae"], "n": int(pt.loc[m, "n"]),
+                         "coverage80": pr.loc[m, "coverage80"] if m in pr.index else None})
+    return pd.DataFrame(rows)
 
 
 def station_label(sid: str) -> str:

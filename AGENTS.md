@@ -21,7 +21,7 @@ uv run weather-lab data fetch|prepare --config configs/<cfg>.yaml
 uv run weather-lab evaluate --config configs/<cfg>.yaml
 uv run weather-lab score --run-dir runs/<suite>/<run-id>   # must report "byte-for-byte"
 uv run weather-lab bootstrap       # idempotent setup (official or snapshot mode)
-uv run weather-lab-app            # explorer (weather-lab-app build-space: Space content)
+uv run weather-lab-app            # app: Overview / Benchmark / Methods (weather-lab-app build-space: Space content)
 ```
 
 ## Conventions
@@ -31,5 +31,6 @@ uv run weather-lab-app            # explorer (weather-lab-app build-space: Space
 - Timestral is pinned to commit `a534bdb` and the checkpoint revisions in `configs/*.yaml` / `forecast.CHECKPOINTS`. Bump them deliberately and record the change in `docs/sources.md`.
 - Bulk data (`data/raw`, `data/processed`), `runs/`, `data/examples/*/`, `data/evidence/`, `dist/` and weights are git-ignored. Refresh the offline replay with `weather-lab export-example`, then publish it with `weather-lab snapshot build` (record the URL + SHA-256 in `configs/bootstrap.yaml`).
 - Keep scientific logic (data, suites, models, evaluation, setup) in `src/weather_lab/`. The app and deployment live in `src/weather_lab_app/`, which may import `weather_lab`, never the reverse. UI callbacks only read saved results. On ZeroGPU only the exploratory forecast may hold a GPU (`zerogpu.gpu`); import `weather_lab_app.zerogpu` before torch/gradio. The exploratory panel never writes to `runs/`.
+- **Readable names in the app.** Every system id in `configs/` needs a readable name and description (`MODELS`) and a colour/line style (`STYLE`) in `src/weather_lab_app/labels.py`; `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces it. Keep colours within the system's family (Timestral blues, Timestral + AROME teal, AROME orange, references greys). New experiments shown in the app go in `labels.EXPERIMENTS`. Identifiers ending in `-cal` mean calendar inputs, never calibration; do not name them otherwise in the UI or docs.
 - Station ids are 5-character strings. Quote them in YAML.
 - Download budget: about 500 MiB for initialization. Report needs that exceed it instead of fetching silently.

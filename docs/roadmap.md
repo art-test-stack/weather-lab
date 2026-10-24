@@ -2,6 +2,20 @@
 
 Each step keeps the frozen suites and adds a **new suite version** whenever dates, sampling or preprocessing change. New systems join through the adapter contract in `src/weather_lab/forecast.py` (`Adapter.predict(CaseBatch) -> ForecastBatch`). Scoring and UI code need no changes.
 
+## 0. Next: does Timestral add information beyond AROME? (agreed next experiment)
+
+Current state (arome-issued-v2, temperature, 960 pairs):
+- AROME 1.09 °C.
+- Timestral 28M 2.52 °C.
+- Timestral 28M + archived AROME history 2.19 °C. That is about 13% better than Timestral alone but about 2× AROME's error, with 81% of observations inside its 80% range.
+
+Two steps, in order, on the same frozen cases (and on a longer AROME suite once one exists):
+
+1. **Probabilistic AROME baseline.** Turn the deterministic AROME forecast into a distribution, using the empirical distribution of past AROME errors by station, variable and lead, fitted only on errors observable before each origin. Score it with pinball loss and 80%/90% coverage next to the Timestral systems. Without it, Timestral's probabilistic scores have no AROME-based reference.
+2. **Timestral residual correction.** Forecast the AROME error (observation − AROME) with Timestral, from the history of past AROME errors (archived runs, vintage-checked), and add it back to the issued AROME forecast. Compare against raw AROME and the probabilistic AROME baseline on matching cases. This tests directly whether Timestral improves on AROME, rather than replacing it.
+
+Both are post-processing of AROME. Neither is WeatherGenerator training, and neither involves local fine-tuning of Timestral.
+
 ## 1. Complete the historical benchmark
 
 - **Done (2026-10-24): context-length validation on 2023.** 90 days was selected under the pre-declared rule; see `docs/experiments/context_length_2023.md` and `configs/frozen/context-selection-2023.yaml`.

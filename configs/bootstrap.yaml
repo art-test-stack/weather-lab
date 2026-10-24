@@ -5,11 +5,11 @@ bootstrap:
   # auto = snapshot when snapshot.url is set (or WEATHER_LAB_SNAPSHOT_URL), else official sources.
   mode: auto
   snapshot:
-    id: wl-snapshot-v3-20261025
+    id: wl-snapshot-v4-20261025
     # Public Hugging Face Storage Bucket. Buckets are mutable and unversioned, so integrity rests on
     # the pinned SHA-256: never overwrite a snapshot file; publish a new id instead.
-    url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v3-20261025.tar.gz
-    sha256: 56beb05b602c899b591e7ca7ac2a784acde0305a369ffae377a2b537c02061ea
+    url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v4-20261025.tar.gz
+    sha256: 1cdab235538322509da5e8d77cddfc836c7a79fbe2b3067713301865d80f24fc
     # Where the bucket is attached as a volume (the Space mounts it at /data). Used when present,
     # otherwise the file is downloaded through the Hub API. Both paths are checksum-verified.
     mounts:

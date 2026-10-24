@@ -39,7 +39,7 @@ Timestral and WeatherGenerator are separate models. Nothing here runs, implement
 ### `synop-historical-v1`: historical observation benchmark
 
 - Chronological protocol: fitting/baselines 2018–2022, validation 2023, held-out test 2024 (`configs/benchmark.yaml`).
-- **Context-length validation** (`synop-ctxval-2023-v1`, three configs in `configs/context/`): 2023 validation only, 1,809 eligible cases. Under the pre-declared rule (temperature pinball, ties within 0.005 °C go to the shorter context), 90 days was selected and frozen in `configs/frozen/context-selection-2023.yaml`. See [the experiment](experiments/context_length_2023.md). The full 2024 test (`configs/benchmark_test_frozen.yaml`) has not been run.
+- **Context-length validation** (`synop-ctxval-2023-v1`, three configs in `configs/context/`): 2023 validation only, 1,809 eligible cases. Under the pre-declared rule (temperature pinball, ties within 0.005 °C go to the shorter context), 90 days was selected and frozen in `configs/frozen/context-selection-2023.yaml`. See [the experiment](experiments/context_length_2023.md). The three candidates can be viewed in the app as *History length · 2023 validation*, from a combined run created with `uv run weather-lab compare --export-combined runs/synop-ctxval-2023-v1/combined` (candidates run separately on one frozen manifest, baselines verified identical, re-scored with the standard scorer). The full 2024 test (`configs/benchmark_test_frozen.yaml`) has not been run.
 - **Smoke variant** (`configs/smoke.yaml`): baselines fitted on 2022 only; two stations (Toulouse, Paris-Orly); origins at 00 UTC on days 1 and 15 of each month in 2023 (validation) and 2024 (test). That gives 96 cases, all eligible.
 - Every target window (origin + 3 h … + 48 h) lies wholly inside its split. History may extend into the preceding period.
 - The **smoke scores are integration checks**, not benchmark evidence.
@@ -78,6 +78,10 @@ Both versions use the same cases. v2 makes the historical segment of the AROME c
 | `timestral-28m-mv-cal-arome` (v1) = `…-arome-substobs` (v2) | as `mv-cal`, plus AROME `t` and `pmer` as known-future covariate rows. Over the horizon: the issued forecast. Over the history: **station observations substituted for AROME** (not AROME values). | quantiles |
 | `timestral-28m-mv-cal-arome-futureonly` (v2, = v1 `…-nanpast`) | AROME rows missing (NaN) over the history | quantiles |
 | `timestral-28m-mv-cal-arome-archived` (v2) | AROME rows over the history hold **archived AROME forecasts** from earlier runs available before the origin and before each value's valid time; missing where none qualifies (18% history coverage on average) | quantiles |
+
+### Names used in the app
+
+The app shows readable names; exact identifiers are listed in its Methods tab and in chart hover. **`-cal` means calendar** (sin/cos hour-of-day and day-of-year inputs), **not calibration**; no system here is calibrated. `timestral-28m-mv-cal` is shown as *Timestral 28M*, `timestral-28m-mv` as *Timestral 28M · no time inputs*, `…-arome-archived` as *Timestral 28M + AROME*, `…-arome-substobs` (v1 `…-arome`) as *Timestral 28M + AROME (observed history)*, and `…-arome-futureonly` (v1 `…-arome-nanpast`) as *Timestral 28M + AROME (forecast only)*. The mapping lives in `src/weather_lab_app/labels.py`.
 
 ### Historical AROME inputs
 

@@ -130,6 +130,11 @@ def cmd_arome_observe(args) -> None:
 def cmd_compare(args) -> None:
     from weather_lab.compare import compare, freeze_selection
 
+    if args.export_combined:
+        from weather_lab.compare import export_combined
+
+        export_combined(Path(args.rule), Path(args.export_combined))
+        return
     res = compare(Path(args.rule))
     if args.freeze:
         for p in freeze_selection(res, Path(args.rule)):
@@ -208,6 +213,7 @@ def main(argv: list[str] | None = None) -> None:
     cp = sub.add_parser("compare", help="score candidate runs on one common set and apply a pre-declared rule")
     cp.add_argument("--rule", default="configs/context/selection_rule.yaml")
     cp.add_argument("--freeze", action="store_true", help="write configs/frozen/... and the frozen test config")
+    cp.add_argument("--export-combined", metavar="DIR", help="write one run directory with all candidates (for the app)")
     cp.set_defaults(func=cmd_compare)
     args = p.parse_args(argv)
     args.func(args)

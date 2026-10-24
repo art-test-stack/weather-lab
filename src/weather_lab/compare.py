@@ -111,3 +111,50 @@ def freeze_selection(result: dict, rule_path: Path) -> tuple[Path, Path]:
                 "# NOT run yet. Run once; do not tune on its results.\n")
         yaml.safe_dump(base, f, sort_keys=False, allow_unicode=True)
     return frozen, test_cfg
+
+
+def export_combined(rule_path: Path, out_dir: Path, log=print) -> Path:
+    """One run directory holding the shared baselines and every candidate (for the app and the snapshot).
+
+    The candidates were run separately on one frozen manifest; here their predictions are
+    concatenated (baselines once, verified identical) and re-scored with the standard scorer.
+    """
+    import shutil
+
+    from weather_lab.evaluate import score_run
+
+    rule = yaml.safe_load(open(rule_path))
+    cands = rule["candidates"]
+    runs = {k: latest_run(load_config(ROOT / c["config"])) for k, c in cands.items()}
+    longest = max(cands, key=lambda k: cands[k]["context_days"])
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True)
+    preds = {k: pd.read_parquet(r / "predictions.parquet") for k, r in runs.items()}
+    base = preds[longest][~preds[longest]["model"].str.startswith("timestral")]
+    for p in preds.values():
+        b = p[~p["model"].str.startswith("timestral")].reset_index(drop=True)
+        pd.testing.assert_frame_equal(b.drop(columns="run_id"), base.reset_index(drop=True).drop(columns="run_id"))
+    combined = pd.concat([base] + [p[p["model"] == cands[k]["model"]] for k, p in preds.items()], ignore_index=True)
+    combined["run_id"] = "combined:" + "+".join(r.name for r in runs.values())
+    combined.to_parquet(out_dir / "predictions.parquet", index=False)
+    for f in ("targets.parquet", "manifest.json", "tail_thresholds.json", "observation_windows.parquet"):
+        shutil.copy(runs[longest] / f, out_dir / f)
+    cfg = yaml.safe_load(open(runs[longest] / "config.yaml"))
+    cfg["experiment"] = "context-length-combined"
+    cfg["models"] = cfg["models"][:3] + [{"id": cands[k]["model"], "kind": "timestral", "context_days":
+                                          cands[k]["context_days"]} for k in cands]
+    with open(out_dir / "config.yaml", "w") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+    run = read_json(runs[longest] / "run.json")
+    systems = [s for s in run["systems"] if not s["id"].startswith("timestral")]
+    for k, r in runs.items():
+        systems += [s for s in read_json(r / "run.json")["systems"] if s["id"] == cands[k]["model"]]
+    run.update(run_id=combined["run_id"].iloc[0], label="validation 2023 (history-length selection)",
+               systems=systems, combined_from={k: r.name for k, r in runs.items()},
+               selection=read_json(OUT / "selection.json") if (OUT / "selection.json").exists() else None)
+    write_json(out_dir / "run.json", run)
+    for name, df in score_run(out_dir).items():
+        df.to_csv(out_dir / f"{name}.csv", index=False)
+    log(f"combined run {out_dir} ({len(combined)} prediction rows)")
+    return out_dir

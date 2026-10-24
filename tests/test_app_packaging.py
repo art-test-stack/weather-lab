@@ -106,19 +106,32 @@ def test_explorer_systems_persist_across_variables_and_exploratory_runs(monkeypa
         def predictions(self):
             return preds
 
-    monkeypatch.setattr(app, "RUNS", {"s": FakeRun()})
+    s_id = "arome-issued-v2"                       # defaults: AROME, Timestral 28M (+ archived, absent here)
+    monkeypatch.setattr(app, "RUNS", {s_id: FakeRun()})
     extra = app.keep_extra_for_case("c1", app.EMPTY_EXTRA)
-    s, b = app.systems_update("s", "c1", "t", None, None, extra)
-    assert s["value"] == ["persistence", "arome-raw", "timestral-28m-mv-cal"] and b["value"] == "timestral-28m-mv-cal"
-    pref = app.update_pref("s", "c1", "t", ["arome-raw", "timestral-209m-mv-cal"], None, extra)
-    s, _ = app.systems_update("s", "c1", "u", pref, None, extra)           # no AROME wind
-    assert "arome-raw" not in s["choices"] and s["value"] == ["timestral-209m-mv-cal"]
-    s, _ = app.systems_update("s", "c1", "t", pref, None, extra)           # preference restored
+    s, b = app.systems_update(s_id, "c1", "t", {}, None, extra)
+    assert s["value"] == ["arome-raw", "timestral-28m-mv-cal"] and b["value"] == "timestral-28m-mv-cal"
+    assert ("AROME", "arome-raw") in s["choices"]                      # readable names, exact ids as values
+    pref = app.update_pref(s_id, "c1", "t", ["arome-raw", "timestral-209m-mv-cal"], {}, extra)
+    s, _ = app.systems_update(s_id, "c1", "u", pref, None, extra)       # no AROME wind
+    assert "arome-raw" not in [v for _, v in s["choices"]] and s["value"] == ["timestral-209m-mv-cal"]
+    s, _ = app.systems_update(s_id, "c1", "t", pref, None, extra)       # preference restored
     assert s["value"] == ["arome-raw", "timestral-209m-mv-cal"]
-    extra = {"case": "c1", "runs": {"exploratory Timestral-209M ctx14d [cpu]": pd.DataFrame()}}
-    pref = pref + ["exploratory Timestral-209M ctx14d [cpu]"]
-    pref = app.update_pref("s", "c1", "t", ["exploratory Timestral-209M ctx14d [cpu]"], pref, extra)  # drop saved ones
-    s, b = app.systems_update("s", "c1", "t", pref, "timestral-209m-mv-cal", extra)
-    assert s["value"] == ["exploratory Timestral-209M ctx14d [cpu]"]
-    assert b["value"] == "exploratory Timestral-209M ctx14d [cpu]"        # band follows the selected systems
-    assert app.keep_extra_for_case("c2", extra)["runs"] == {}              # another case starts fresh
+    mid = "exploratory Timestral-209M ctx14d [cpu]"
+    extra = {"case": "c1", "runs": {mid: pd.DataFrame()}}
+    pref = {s_id: pref[s_id] + [mid]}
+    pref = app.update_pref(s_id, "c1", "t", [mid], pref, extra)         # untick the saved systems
+    s, b = app.systems_update(s_id, "c1", "t", pref, "timestral-209m-mv-cal", extra)
+    assert s["value"] == [mid] and b["value"] == mid                    # band follows the selected systems
+    assert app.keep_extra_for_case("c2", extra)["runs"] == {}           # another case starts fresh
+
+
+def test_labels_cover_every_configured_system():
+    import glob
+
+    from weather_lab_app.labels import MODELS, STYLE
+
+    ids = {m["id"] for p in glob.glob(str(ROOT / "configs" / "**" / "*.yaml"), recursive=True)
+           for m in (yaml.safe_load(open(p)) or {}).get("models", []) or []}
+    missing = sorted(i for i in ids if i not in MODELS or i not in STYLE)
+    assert not missing, f"systems without a readable name or colour: {missing}"
