@@ -1,4 +1,4 @@
-"""weather-lab command line: data fetch / data prepare / evaluate / score / export-example."""
+"""weather-lab command line: data, evaluation, specs, bootstrap, snapshots, diagnostics and evidence."""
 
 from __future__ import annotations
 
@@ -68,12 +68,6 @@ def cmd_snapshot_build(args) -> None:
     from weather_lab.bootstrap import build_snapshot
 
     build_snapshot(Path(args.out), args.id)
-
-
-def cmd_deploy_build(args) -> None:
-    from weather_lab.bootstrap import build_space
-
-    build_space(Path(args.out))
 
 
 def cmd_arome_refresh(args) -> None:
@@ -159,7 +153,7 @@ def main(argv: list[str] | None = None) -> None:
     bs.add_argument("--mode", choices=["auto", "official", "snapshot"], default="auto")
     bs.add_argument("--snapshot-url")
     bs.add_argument("--snapshot-sha256")
-    bs.add_argument("--suite", action="append", help="config path(s); default: configs/deploy.yaml")
+    bs.add_argument("--suite", action="append", help="config path(s); default: configs/bootstrap.yaml")
     bs.add_argument("--no-weights", action="store_true")
     bs.set_defaults(func=cmd_bootstrap)
     spec = sub.add_parser("spec", help="committed YAML specs of frozen suites")
@@ -175,11 +169,6 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--out", default="dist/snapshot")
     sb.add_argument("--id", required=True)
     sb.set_defaults(func=cmd_snapshot_build)
-    dep = sub.add_parser("deploy", help="deployment output (Space content with generated front matter)")
-    dsub2 = dep.add_subparsers(dest="deploy_command", required=True)
-    db = dsub2.add_parser("build")
-    db.add_argument("--out", default="dist/space")
-    db.set_defaults(func=cmd_deploy_build)
     ar = sub.add_parser("arome", help="AROME archive utilities")
     asub = ar.add_subparsers(dest="arome_command", required=True)
     rf = asub.add_parser("refresh-suite", help="write a NEW suite config for the dates now in the 14-day archive")

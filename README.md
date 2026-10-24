@@ -1,4 +1,4 @@
-# Timestral Weather Lab
+# Weather-lab
 
 This is a small, reproducible benchmark for **short-range probabilistic weather forecasting at French surface stations**. It compares Mistral's [Timestral](https://github.com/mistralai/timestral), a time-series foundation model used zero-shot with **no local fine-tuning**, against persistence, a 24 h seasonal-naive forecast, empirical-quantile climatology and **issued AROME** forecasts. All systems run on frozen case sets from real Météo-France data, and a Gradio explorer presents the saved results.
 
@@ -13,19 +13,19 @@ The repository contains code, configuration and documentation only. Data, saved 
 ```bash
 uv sync
 uv run weather-lab bootstrap                 # idempotent: fetch + verify + prepare; reuses the cache
-uv run python app.py                         # explorer on http://127.0.0.1:7860 (runs the same bootstrap at startup)
+uv run weather-lab-app                       # explorer on http://127.0.0.1:7860 (runs the same bootstrap at startup)
 uv run pytest                                # unit tests, no downloads
 uv run pytest -m real_model                  # opt-in: real Timestral-5M inference (~21 MB)
 ```
 
-`bootstrap` has two modes, selected with `--mode` or by `configs/deploy.yaml`:
+`bootstrap` has two modes, selected with `--mode` or by `configs/bootstrap.yaml`:
 
 | Mode | Source | Use |
 |---|---|---|
 | `official` | data.gouv.fr SYNOP files, the Météo-France 14-day AROME archive, and the Hugging Face Hub (pinned revision, SHA-256 checked) | Regenerates each suite's manifest and checks it against its committed spec in `benchmarks/specs/`. Reproduces saved results with real inference and checks the score hashes. AROME runs that have left the 14-day archive make this mode fail fast, with an explanation. |
 | `snapshot` | One immutable archive (URL + SHA-256) holding manifests, prepared data, the AROME station extract, saved runs and evidence files | Verifies every member against its index. Needed for the AROME suites once their runs have rolled out of the archive. |
 
-`auto` (the default) uses `snapshot` when a snapshot URL is configured (`bootstrap.snapshot` in `configs/deploy.yaml`, or `WEATHER_LAB_SNAPSHOT_URL` / `WEATHER_LAB_SNAPSHOT_SHA256`), and `official` otherwise. Progress is printed step by step. Failures name the step and say whether a retry can help. The app shows a **Retry setup** screen instead of crashing.
+`auto` (the default) uses `snapshot` when a snapshot URL is configured (`bootstrap.snapshot` in `configs/bootstrap.yaml`, or `WEATHER_LAB_SNAPSHOT_URL` / `WEATHER_LAB_SNAPSHOT_SHA256`), and `official` otherwise. Progress is printed step by step. Failures name the step and say whether a retry can help. The app shows a **Retry setup** screen instead of crashing.
 
 ### Pipeline commands
 
@@ -46,17 +46,29 @@ uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benc
 
 `arome refresh-suite` writes a config for whatever dates are currently in the 14-day archive. If those dates differ from the base suite, it uses a **new suite id** (`arome-issued-r<first>-<last>`) and never reuses a frozen one.
 
-## Deployment (prepared, not published)
+## Deployment to a Hugging Face Space (prepared, not published)
+
+The Space is built from this repository. It is not a plain mirror, because its README needs Spaces front matter and its root needs an `app_file`:
 
 ```bash
-uv run weather-lab snapshot build --id <snapshot-id>   # dist/snapshot/<id>.tar.gz + .sha256 (byte-reproducible)
-uv run weather-lab deploy build                        # dist/space/: code + README with generated Spaces metadata
+uv run weather-lab snapshot build --id <snapshot-id>      # dist/snapshot/<id>.tar.gz + .sha256 (byte-reproducible)
+uv run weather-lab-app build-space --out dist/space       # code + generated README front matter + root app.py launcher
 ```
 
-- The Hugging Face Spaces front matter is generated only into `dist/space/README.md`, from the `space:` block of `configs/deploy.yaml`.
-- The Space content contains no data and no weights. At startup the app runs `bootstrap`, which downloads the snapshot and the pinned 28M weights (111 MB), verifies both, and reuses them after a restart.
-- **Missing piece:** an immutable remote location for the snapshot. `bootstrap.snapshot.url` and `.sha256` are `null`. To fill them, upload `dist/snapshot/<id>.tar.gz` to a versioned location and record the URL and SHA-256 in `configs/deploy.yaml`. Suitable locations are a Hugging Face Dataset repository addressed by commit (`…/resolve/<commit>/<id>.tar.gz`) or a GitHub release asset.
-- Per the [Spaces overview](https://huggingface.co/docs/hub/spaces-overview), creating a Gradio Space requires a paid HF plan.
+- The front matter comes from `src/weather_lab_app/space.yaml`. The launcher only adds `src/` to the path and calls `weather_lab_app.main:main`.
+- No data or weights are uploaded. At startup the app runs `bootstrap`, which downloads the snapshot and the pinned 28M weights (111 MB), verifies both, and reuses them after a restart.
+- `.github/workflows/deploy-space.yml` automates the build and upload. It runs on manual dispatch or a `space-v*` tag, uses the GitHub environment `huggingface-space` (secret `HF_TOKEN`, variable `HF_SPACE_ID`), runs the unit tests, builds `dist/space`, and uploads it with `hf upload --repo-type space --delete "*"`. That makes the Space an exact copy of the build; `.gitattributes` is kept.
+
+**Next steps to publish:**
+
+1. **Host the data snapshot immutably.** Create a Hugging Face Dataset (e.g. `<user>/weather-lab-snapshots`) and upload `dist/snapshot/<id>.tar.gz` with `hf upload <user>/weather-lab-snapshots dist/snapshot . --repo-type dataset`. Put the URL pinned to the upload commit (`https://huggingface.co/datasets/<user>/weather-lab-snapshots/resolve/<commit>/<id>.tar.gz`) and the `.sha256` value into `bootstrap.snapshot` in `configs/bootstrap.yaml`, then commit.
+2. **Create the Space** (Gradio SDK, CPU Basic) on huggingface.co. Creating Gradio Spaces requires a paid HF plan ([Spaces overview](https://huggingface.co/docs/hub/spaces-overview)).
+3. **Create a fine-grained HF token** with write access to that Space only.
+4. **On GitHub, add the environment** (Settings → Environments → `huggingface-space`): secret `HF_TOKEN`, variable `HF_SPACE_ID=<user>/weather-lab`. Optionally require a reviewer.
+5. **Push, then run the "Deploy Hugging Face Space" workflow**: from the Actions tab, or with `git tag space-v1 && git push origin space-v1`.
+6. **Check the Space build logs.** The first start downloads about 11 MB of snapshot and 111 MB of weights, then serves the explorer.
+
+Before step 1, you can rehearse locally: build the Space content, serve the snapshot with `python -m http.server`, and start `python app.py` inside `dist/space` with `WEATHER_LAB_SNAPSHOT_URL` / `WEATHER_LAB_SNAPSHOT_SHA256` set.
 
 ## Suites and versions
 
@@ -144,11 +156,10 @@ Test 2024, temperature, n = 761:
 ## Repository map
 
 ```text
-app.py                      Gradio explorer; runs bootstrap at startup, reads saved runs only
-configs/                    smoke, arome_v2 (current), arome_smoke (v1), benchmark, context/, frozen/, deploy.yaml
+configs/                    smoke, arome_v2 (current), arome_smoke (v1), benchmark, context/, frozen/, bootstrap.yaml
 benchmarks/specs/           committed YAML specs of frozen suites (manifests are generated locally)
-src/weather_lab/
-  bootstrap.py              official / snapshot setup, snapshot + Space builders
+src/weather_lab/            science: data, suites, models, evaluation, setup
+  bootstrap.py              official / snapshot setup, snapshot builder
   specs.py                  spec freeze / manifest + score validation
   data.py, arome.py         SYNOP and AROME acquisition, archived AROME history, refresh-suite
   suite.py                  origins, cases, eligibility, manifests
@@ -156,7 +167,12 @@ src/weather_lab/
   evaluate.py, compare.py   run, score, rescore; cross-run selection
   diagnostics.py            AROME input audit and covariate sensitivity
   evidence.py               availability evidence and manual first-seen observation
+src/weather_lab_app/        app and deployment only (no benchmark logic)
+  main.py                   Gradio explorer; runs bootstrap at startup, reads saved runs only
   results.py, plots.py      UI data access and figures
+  space.py, space.yaml      Hugging Face Space build (generated front matter + root launcher)
+  cli.py                    `weather-lab-app [serve|build-space]`
+.github/workflows/          deploy-space.yml (manual / tag-triggered Space deployment)
 docs/                       methods, sources, availability evidence, diagnostics, experiments, roadmap
 tests/                      unit tests; test_real_timestral.py is opt-in
 ```

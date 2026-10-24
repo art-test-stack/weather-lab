@@ -1,4 +1,4 @@
-"""Timestral Weather Lab: Gradio explorer for saved benchmark results.
+"""Weather-lab: Gradio explorer for saved benchmark results.
 
 Reads saved runs only (runs/<suite>/<latest> when present, otherwise the packaged
 offline example in data/examples/). It never runs the benchmark. The exploratory
@@ -11,15 +11,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "src"))  # lets Spaces run app.py without installing the package
+import gradio as gr
+import pandas as pd
 
-import gradio as gr  
-import pandas as pd  # noqa: E402
-
-from weather_lab import plots  # noqa: E402
-from weather_lab.common import VARIABLES  # noqa: E402
-from weather_lab.results import (SUITES, available_runs, case_forecast, filter_metrics, forecast_csv,  # noqa: E402
+from weather_lab.common import ROOT, VARIABLES
+from weather_lab_app import plots
+from weather_lab_app.results import (SUITES, available_runs, case_forecast, filter_metrics, forecast_csv,
                                  station_label, training_status)
 
 
@@ -41,9 +38,9 @@ def startup_bootstrap() -> dict | None:
         return _state()
 
 
-BOOT = startup_bootstrap()
-RUNS = available_runs()
-DEFAULT_SUITE = "synop-historical-v1" if "synop-historical-v1" in RUNS else next(iter(RUNS), None)
+BOOT: dict | None = None
+RUNS: dict = {}
+DEFAULT_SUITE: str | None = None
 STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "external NWP (issued run)", "no fitting"]
 POINT_COLS = ["model", "training", "n", "mae", "rmse", "bias", "mae_ref", "skill_mae_vs_persistence"]
 PROB_COLS = ["model", "training", "n", "pinball", "skill_pinball_vs_climatology", "coverage80", "coverage90",
@@ -270,20 +267,20 @@ def failure_ui(state: dict) -> gr.Blocks:
         threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
         return "Setup complete. Restarting the app: reload this page in a few seconds."
 
-    with gr.Blocks(title="Timestral Weather Lab: setup") as ui:
-        gr.Markdown("# Timestral Weather Lab\nThe app fetches its data snapshot and model weights at startup.")
+    with gr.Blocks(title="Weather-lab: setup") as ui:
+        gr.Markdown("# Weather-lab\nThe app fetches its data snapshot and model weights at startup.")
         status = gr.Markdown(summarize_failure(state))
         gr.Button("Retry setup", variant="primary").click(retry, None, status, concurrency_limit=1)
     return ui
 
 
 def build() -> gr.Blocks:
-    with gr.Blocks(title="Timestral Weather Lab") as demo:
+    with gr.Blocks(title="Weather-lab") as demo:
         if DEFAULT_SUITE is None:
-            gr.Markdown("# Timestral Weather Lab\nNo saved runs found. Run `uv run weather-lab evaluate --config "
+            gr.Markdown("# Weather-lab\nNo saved runs found. Run `uv run weather-lab evaluate --config "
                         "configs/smoke.yaml` or restore `data/examples/`.")
             return demo
-        gr.Markdown("# Timestral Weather Lab\nShort-range **probabilistic weather forecasting** at French SYNOP "
+        gr.Markdown("# Weather-lab\nShort-range **probabilistic weather forecasting** at French SYNOP "
                     "stations: Mistral's Timestral (zero-shot, no local fine-tuning) against persistence, "
                     "climatology and issued AROME forecasts, scored on frozen case sets.", elem_id="hero")
         suite_choices = [(SUITES[s], s) for s in RUNS]
@@ -402,10 +399,22 @@ def build() -> gr.Blocks:
     return demo
 
 
-demo = failure_ui(BOOT) if (BOOT or {}).get("status") == "failed" and not RUNS else build()
+def init(run_bootstrap: bool = True) -> gr.Blocks:
+    """Fetch/verify artifacts (unless disabled), load saved runs and build the UI."""
+    global BOOT, RUNS, DEFAULT_SUITE
+    BOOT = startup_bootstrap() if run_bootstrap else None
+    RUNS = available_runs()
+    DEFAULT_SUITE = "synop-historical-v1" if "synop-historical-v1" in RUNS else next(iter(RUNS), None)
+    return failure_ui(BOOT) if (BOOT or {}).get("status") == "failed" and not RUNS else build()
 
-if __name__ == "__main__":
+
+def main() -> None:
+    demo = init()
     demo.queue(default_concurrency_limit=4).launch(
         theme=gr.themes.Soft(primary_hue="blue", neutral_hue="stone",
                              font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"]),
         css=CSS)
+
+
+if __name__ == "__main__":
+    main()

@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 
 from weather_lab.common import VARIABLES
 from weather_lab.forecast import qcol
-from weather_lab.results import station_label, style
+from weather_lab_app.results import station_label, style
 
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb"
 FONT = "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"

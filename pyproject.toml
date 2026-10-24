@@ -1,7 +1,7 @@
 [project]
 name = "weather-lab"
 version = "0.1.0"
-description = "Timestral Weather Lab: a reproducible station-level probabilistic forecasting benchmark (Météo-France SYNOP, AROME) with a Gradio explorer"
+description = "Weather-lab: a reproducible station-level probabilistic weather forecasting benchmark (Météo-France SYNOP, AROME) with a Gradio explorer"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -20,13 +20,14 @@ dependencies = [
 
 [project.scripts]
 weather-lab = "weather_lab.cli:main"
+weather-lab-app = "weather_lab_app.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/weather_lab"]
+packages = ["src/weather_lab", "src/weather_lab_app"]
 
 [tool.uv.sources]
 # Pinned to the inspected upstream commit ("Timestral release", 2026-10-15).

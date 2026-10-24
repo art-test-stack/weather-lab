@@ -1,0 +1,49 @@
+# Build the Hugging Face Space content from this repository and upload it.
+#
+# The GitHub repository is code-only and its README has no Spaces front matter, so the
+# Space is not a plain mirror: this job generates the Space README (front matter from
+# src/weather_lab_app/space.yaml) and the root app.py launcher, then uploads that folder.
+#
+# One-time setup (see README "Deployment"):
+#   - create the Space on huggingface.co (Gradio SDK);
+#   - GitHub > Settings > Environments > new environment "huggingface-space"
+#     (optionally with required reviewers), containing
+#       secret   HF_TOKEN     a fine-grained token with write access to that Space only
+#       variable HF_SPACE_ID  e.g. <user>/weather-lab
+name: Deploy Hugging Face Space
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["space-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-space
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: huggingface-space
+      url: https://huggingface.co/spaces/${{ vars.HF_SPACE_ID }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - name: Install (locked)
+        run: uv sync --frozen
+      - name: Unit tests (no downloads)
+        run: uv run pytest -q
+      - name: Build Space content
+        run: uv run weather-lab-app build-space --out dist/space
+      - name: Upload to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: >
+          uv run hf upload "${{ vars.HF_SPACE_ID }}" dist/space .
+          --repo-type space
+          --delete "*"
+          --commit-message "Deploy ${{ github.repository }}@${{ github.sha }}"

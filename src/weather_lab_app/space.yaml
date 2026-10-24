@@ -1,0 +1,12 @@
+# Hugging Face Spaces metadata: written only into the Space build output (`weather-lab-app build-space`).
+title: Weather-lab
+emoji: 🌦️
+colorFrom: blue
+colorTo: gray
+sdk: gradio
+sdk_version: 6.30.0
+python_version: '3.12'
+app_file: app.py
+pinned: false
+license: apache-2.0
+short_description: Probabilistic weather forecasting at French stations

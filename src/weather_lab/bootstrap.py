@@ -1,4 +1,4 @@
-"""Idempotent setup shared by local use and deployment: fetch, verify, prepare, reuse cache.
+"""Idempotent data/model setup shared by local use and the app: fetch, verify, prepare, reuse cache.
 
 Two modes:
 
@@ -35,7 +35,7 @@ import yaml
 
 from weather_lab.common import ROOT, Config, load_config, now_utc, read_json, sha256_file, write_json
 
-DEPLOY_CONFIG = ROOT / "configs" / "deploy.yaml"
+BOOTSTRAP_CONFIG = ROOT / "configs" / "bootstrap.yaml"
 STATE_PATH = ROOT / "data" / "bootstrap_state.json"
 CACHE = ROOT / "data" / "cache"
 Progress = Callable[[float, str], None]
@@ -59,14 +59,14 @@ def _print_progress(frac: float, msg: str) -> None:
     print(f"[bootstrap {frac:5.0%}] {msg}", flush=True)
 
 
-def load_deploy(path: Path = DEPLOY_CONFIG) -> dict:
+def load_bootstrap_config(path: Path = BOOTSTRAP_CONFIG) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
 
 def make_plan(mode: str = "auto", snapshot_url: str | None = None, snapshot_sha256: str | None = None,
               suites: list[str] | None = None, deploy: dict | None = None) -> Plan:
-    d = (deploy or load_deploy())["bootstrap"]
+    d = (deploy or load_bootstrap_config())["bootstrap"]
     snap = dict(d.get("snapshot") or {})
     snap["url"] = snapshot_url or os.environ.get("WEATHER_LAB_SNAPSHOT_URL") or snap.get("url")
     snap["sha256"] = snapshot_sha256 or os.environ.get("WEATHER_LAB_SNAPSHOT_SHA256") or snap.get("sha256")
@@ -181,7 +181,7 @@ def build_snapshot(out_dir: Path, snapshot_id: str, log=print) -> dict:
 def install_snapshot(snap: dict, progress: Progress, lo: float, hi: float) -> dict:
     if not snap.get("url") or not snap.get("sha256"):
         raise BootstrapError("snapshot", "no immutable snapshot location configured", retryable=False,
-                             hint="set bootstrap.snapshot.url and .sha256 in configs/deploy.yaml (or "
+                             hint="set bootstrap.snapshot.url and .sha256 in configs/bootstrap.yaml (or "
                                   "WEATHER_LAB_SNAPSHOT_URL / WEATHER_LAB_SNAPSHOT_SHA256), or use --mode official")
     archive = download(snap["url"], CACHE / "snapshots" / f"{snap['sha256'][:16]}.tar.gz", snap["sha256"],
                        progress, "snapshot", lo, lo + 0.8 * (hi - lo))
@@ -339,36 +339,6 @@ def bootstrap(mode: str = "auto", snapshot_url: str | None = None, snapshot_sha2
     _save(state)
     progress(1.0, f"ready in {state['seconds']} s")
     return state
-
-
-# --------------------------------------------------------------------------- deployment output
-
-SPACE_INCLUDE = ("app.py", "requirements.txt", "pyproject.toml", "src/", "configs/", "benchmarks/specs/", "docs/",
-                 "AGENTS.md")
-
-
-def git_intended_files() -> list[str]:
-    import subprocess
-
-    out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=ROOT,
-                         capture_output=True, text=True, check=True).stdout.split()
-    return sorted(f for f in out if (ROOT / f).is_file())
-
-
-def build_space(out: Path, log=print) -> Path:
-    """Space repository content: GitHub-intended code + README with generated Spaces front matter."""
-    deploy = load_deploy()
-    if out.exists():
-        shutil.rmtree(out)
-    files = [f for f in git_intended_files() if f.startswith(SPACE_INCLUDE)]
-    for f in files:
-        (out / f).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / f, out / f)
-    front = yaml.safe_dump(deploy["space"], sort_keys=False, allow_unicode=True, width=1000).strip()
-    body = (ROOT / "README.md").read_text()
-    (out / "README.md").write_text(f"---\n{front}\n---\n\n{body}")
-    log(f"Space content in {out}: {len(files) + 1} files, no data or weights (fetched by bootstrap at startup)")
-    return out
 
 
 def summarize_failure(state: dict) -> str:
