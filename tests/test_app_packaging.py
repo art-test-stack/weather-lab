@@ -55,3 +55,20 @@ def test_score_references_are_keyed_by_environment(tmp_path):
     env_new = {"torch": "2.13.0", "machine": "x86_64", "platform": "Linux-6", "sys_platform": "linux"}
     assert environment_key(env_old) == "torch-2.14.1/darwin-arm64"
     assert environment_key(env_new) == "torch-2.13.0/linux-x86_64"
+
+
+def test_lockfile_matches_what_the_spaces_builder_installs():
+    """The builder adds `gradio[oauth,mcp]==<sdk_version>` (and torch<=2.13.0 on ZeroGPU) on top of
+    requirements.txt, so those must already be part of the locked resolution."""
+    import tomllib
+
+    meta = yaml.safe_load((ROOT / "src" / "weather_lab_app" / "space.yaml").read_text())
+    reqs = {l.split("==")[0]: l.split("==")[1].split()[0] for l in (ROOT / "requirements.txt").read_text().splitlines()
+            if "==" in l and not l.startswith(("#", " "))}
+    deps = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert reqs["gradio"] == meta["sdk_version"]
+    assert any(d.startswith("gradio[oauth,mcp]") for d in deps)
+    assert "mcp" in reqs and "authlib" in reqs                       # the extras are in the lock
+    if meta.get("suggested_hardware", "").startswith("zero"):
+        major, minor = (int(x) for x in reqs["torch"].split(".")[:2])
+        assert (major, minor) <= (2, 13)                               # ZeroGPU supports torch <= 2.13.0
