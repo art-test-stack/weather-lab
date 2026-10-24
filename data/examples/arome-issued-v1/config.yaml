@@ -1,0 +1,69 @@
+# AROME comparison suite, initialization version.
+# 12 daily origins from the public 14-day rolling archive: an INTEGRATION STUDY,
+# not evidence about seasonal or rare-event performance.
+suite: arome-issued-v1
+variant: smoke
+label: "integration study (14-day archive)"
+manifest: benchmarks/manifests/arome-issued-v1.json
+
+paths:
+  raw: data/raw
+  processed: data/processed
+  runs: runs
+
+data:
+  years: [2022, 2023, 2024, 2026]   # 2022-2024 fit baselines; 2026 supplies history + verifying obs
+  stations: ["07630", "07149", "07110", "07190", "07690"]
+
+splits:
+  fit: ["2022-01-01T00:00Z", "2024-12-31T21:00Z"]
+  test: ["2026-10-10T00:00Z", "2026-10-23T21:00Z"]
+
+origins:
+  rule: explicit
+  hour_utc: 6
+  dates: ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15",
+          "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-20", "2026-10-21"]
+  splits: [test]
+
+forecast:
+  step_hours: 3
+  horizon_steps: 16
+  context_days: 30
+  highlight_leads_h: [6, 24, 48]
+
+eligibility:
+  variable: t
+  min_context_observed_fraction: 0.8
+  require_observation_within_hours: 24
+
+variables: [t, pmer, u, v]
+
+arome:
+  # AROME 0.025 deg (EURW1S40) SP1 package: holds T2m and MSLP (the 0.01 deg SP packages carry no MSLP).
+  base_url: https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net/pnt
+  grid: "0025"
+  package: SP1
+  constant_url: https://static.data.gouv.fr/resources/champs-constant-1/20250217-090702/constant-eurw1s40.grib2
+  run_hour_utc: 3          # run used for a 06 UTC origin
+  max_lead_h: 51           # do not extrapolate beyond this
+  fields: [t, pmer]        # 2 m temperature, mean-sea-level pressure
+  # A run qualifies only if every needed file's archive Last-Modified time is <= origin.
+  availability_rule: archive_last_modified
+  context_fill: observations   # primary conditioned variant; see docs/experiment_protocol.md
+
+models:
+  - {id: persistence, kind: persistence}
+  - {id: seasonal-naive-24h, kind: seasonal_naive}
+  - {id: climatology, kind: climatology, window_days: 15, min_samples: 20}
+  - {id: arome-raw, kind: arome}
+  - {id: timestral-28m-mv-cal, kind: timestral, targets: [t, pmer, u, v], calendar: true}
+  - {id: timestral-28m-mv-cal-arome, kind: timestral, targets: [t, pmer, u, v], calendar: true, arome: observations}
+  # Secondary, pre-declared ablation: AROME rows missing (NaN) over the context.
+  - {id: timestral-28m-mv-cal-arome-nanpast, kind: timestral, targets: [t, pmer, u, v], calendar: true, arome: missing}
+
+timestral:
+  checkpoint: mistralai/Timestral-28M
+  revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+  batch_size: 32
+  max_concurrent: 1
