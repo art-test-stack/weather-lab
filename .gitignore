@@ -8,6 +8,7 @@ wheels/
 *.csv
 *.parquet
 *.json
+.env
 
 # Virtual environments
 .venv

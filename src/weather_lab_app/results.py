@@ -103,8 +103,8 @@ def available_runs(prefer_local: bool = True) -> dict[str, Run]:
     return out
 
 
-def headline(run: Run, variable: str, split: str | None = None) -> pd.DataFrame:
-    """All-lead, all-station scores of the experiment's headline systems (from the saved score tables)."""
+def headline(run: Run, variable: str, split: str | None = None, models: list[str] | None = None) -> pd.DataFrame:
+    """All-lead, all-station scores of the headline systems (default: the experiment's), from saved tables."""
     exp = EXPERIMENTS.get(run.suite, {})
     point, prob = run.tables["metrics_point"], run.tables["metrics_probabilistic"]
     split = split or run.splits[-1]
@@ -113,7 +113,7 @@ def headline(run: Run, variable: str, split: str | None = None) -> pd.DataFrame:
     pt = sel(point).set_index("model")
     pr = sel(prob).set_index("model")
     rows = []
-    for m in exp.get("headline", []):
+    for m in exp.get("headline", []) if models is None else models:
         if m in pt.index:
             rows.append({"model": m, "name": model_name(m), "mae": pt.loc[m, "mae"], "n": int(pt.loc[m, "n"]),
                          "coverage80": pr.loc[m, "coverage80"] if m in pr.index else None})

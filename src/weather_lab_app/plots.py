@@ -42,7 +42,7 @@ def _rgba(hex_color: str, alpha: float) -> str:
 # --------------------------------------------------------------------------- forecast
 
 def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, variable: str, systems: list[str],
-                    band_model: str | None, history_hours: int = 48, height: int = 520) -> go.Figure:
+                    band_model: str | None, history_hours: int = 48, height: int = 340) -> go.Figure:
     """The forecast window first: short history, shaded forecast period, readable names, ids in hover."""
     origin = pd.Timestamp(case["origin"])
     u = unit(variable)

@@ -1,6 +1,6 @@
 """Weather-lab: Gradio app presenting saved benchmark results.
 
-Overview (landing): the question, a large forecast chart and headline numbers for the selected
+Overview (landing): what is compared, a large forecast chart and headline numbers for the selected
 experiment. Benchmark: a compact comparison, details below. Methods: scope, definitions, exact
 identifiers, previous versions and integrity details. Nothing here runs the benchmark; the only
 model call is the optional exploratory forecast, labelled as such.
@@ -19,8 +19,9 @@ import pandas as pd
 
 from weather_lab.common import ROOT, VARIABLES
 from weather_lab_app import plots
-from weather_lab_app.labels import (DEFAULT_EXPERIMENT, DIFFERENT_INPUT, EXPERIMENTS, MODELS, SEASON_NAMES,
-                                    SPLIT_NAMES, model_description, model_name, model_style, unit, variable_name)
+from weather_lab_app.labels import (CHECKPOINTS, DEFAULT_EXPERIMENT, DIFFERENT_INPUT, EXPERIMENTS, MODELS,
+                                    SEASON_NAMES, SPLIT_NAMES, model_description, model_name, model_style, unit,
+                                    variable_name, with_checkpoint)
 from weather_lab_app.results import (available_runs, case_forecast, forecast_csv, headline, station_label,
                                      training_status)
 
@@ -45,23 +46,26 @@ def startup_bootstrap() -> dict | None:
 BOOT: dict | None = None
 RUNS: dict = {}
 DEFAULT_SUITE: str | None = None
-QUESTION = ("Can Mistral's general-purpose forecasting model **Timestral** predict weather at French stations "
-            "3–48 hours ahead as well as Météo-France's **AROME** weather model, and does it improve when it is "
-            "given AROME's forecast?")
+INTRO = ("Météo-France's **AROME**, the pretrained **Timestral** model (inference only) and Timestral given "
+         "AROME's forecast, at French stations 3–48 h ahead.")
+QUESTION = ("How do Timestral forecasts compare with AROME's at French stations, 3–48 h ahead, and does giving "
+            "Timestral AROME's forecast change its error?")
 STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "external NWP (issued run)", "no fitting"]
 EMPTY_EXTRA = {"case": None, "runs": {}}
 
 CSS = """
 .gradio-container {max-width: 1240px !important; margin: auto;}
-#hero h1 {font-size: 1.75rem; margin: 0 0 .25rem 0;}
-#hero p {color: #3d3c39; margin: 0; font-size: 1.02rem; max-width: 62rem;}
+#hero h1 {font-size: 1.45rem; margin: 0 0 .1rem 0;}
+#hero p {color: #3d3c39; margin: 0; font-size: .98rem;}
+.finding {font-size: 1rem; color: #0b0b0b; margin: .2rem 0;}
 .scope {font-size: .9rem; color: #52514e; line-height: 1.45;}
 .scope .status {display:inline-block; padding:1px 9px; border-radius:10px; background:#fff4e0; color:#7a4b00;
                 font-weight:600; margin-right:6px; font-size:.82rem;}
 .scope .status.validation {background:#e6f4ea; color:#0f5a2e;}
-.tiles {display:flex; flex-wrap:wrap; gap:10px; margin:.25rem 0 .5rem 0;}
-.tile {flex:1 1 170px; border:1px solid #e6e5e1; border-radius:10px; padding:10px 12px; background:#fcfcfb;}
-.tile .v {font-size:1.55rem; font-weight:650; color:#0b0b0b; line-height:1.1;}
+#scope {margin: -6px 0;}
+.tiles {display:flex; flex-wrap:wrap; gap:10px; margin:.2rem 0 0 0;}
+.tile {flex:1 1 170px; border:1px solid #e6e5e1; border-radius:10px; padding:7px 12px; background:#fcfcfb;}
+.tile .v {font-size:1.4rem; font-weight:650; color:#0b0b0b; line-height:1.1;}
 .tile .n {font-size:.86rem; color:#3d3c39; margin-top:2px;}
 .tile .d {font-size:.78rem; color:#6b6a65; margin-top:4px;}
 .tile.ref {border:2px solid #0b0b0b;}
@@ -75,7 +79,7 @@ table.mini .sw {display:inline-block; width:10px; height:10px; border-radius:2px
 /* data tables scroll inside their own box instead of widening the page */
 .gradio-container .table-wrap, .gradio-container .table-container {max-width:100%; overflow-x:auto;}
 .gradio-container {overflow-x:hidden;}
-@media (max-width: 640px) { #hero h1 {font-size:1.4rem;} .tile {flex:1 1 140px;} .tile .v {font-size:1.3rem;} }
+@media (max-width: 640px) { #hero h1 {font-size:1.3rem;} .tile {flex:1 1 140px;} .tile .v {font-size:1.3rem;} }
 """
 
 
@@ -93,8 +97,27 @@ def variable_choices(suite: str) -> list[tuple[str, str]]:
 def scope_html(suite: str) -> str:
     e, run = EXPERIMENTS[suite], RUNS[suite]
     cls = "status validation" if e["status"] == "Validation" else "status"
-    return (f"<div class='scope'><span class='{cls}'>{e['status']}</span>{e['scope']} "
-            f"<i>{e['caveat']}</i> Timestral is used as released (no local training).</div>")
+    return (f"<div class='scope'><span class='{cls}'>{e['status']}</span>{e.get('short', e['scope'])} · "
+            "scope, caveats and availability rules in <b>Methods</b></div>")
+
+
+def has_checkpoints(suite: str) -> bool:
+    """True when a headline 28M system has a saved 209M twin not already in the headline (selector shown)."""
+    models, head = set(RUNS[suite].models), EXPERIMENTS[suite]["headline"]
+    twins = [with_checkpoint(m, "209M") for m in head if m.startswith("timestral-28m-")]
+    return any(t in models and t not in head for t in twins)
+
+
+def experiment_view(suite: str, size: str | None) -> dict:
+    """The experiment's presentation with Timestral systems shown at checkpoint `size` where saved."""
+    e, models = EXPERIMENTS[suite], set(RUNS[suite].models)
+    if size not in CHECKPOINTS or not has_checkpoints(suite):    # hidden selector: the declared systems
+        return e
+    swap = lambda m: with_checkpoint(m, size) if with_checkpoint(m, size) in models else m  # noqa: E731
+    uniq = lambda ms: list(dict.fromkeys(swap(m) for m in ms))  # noqa: E731
+    compare = {swap(k): swap(v) for k, v in e.get("compare", {}).items() if swap(k) != swap(v)}
+    return {**e, "headline": uniq(e["headline"]), "default_systems": uniq(e["default_systems"]),
+            "band": swap(e["band"]), "compare": compare}
 
 
 def _saved_models(run, variable: str) -> list[str]:
@@ -135,17 +158,17 @@ def on_experiment(suite: str, variable: str | None):
     station = first_example.split("/")[1] if first_example.count("/") == 2 else stations[0][1]
     return (gr.update(choices=vchoices, value=variable), gr.update(choices=stations, value=station),
             gr.update(choices=date_choices(suite, station), value=default_case(suite, station)),
-            scope_html(suite))
+            scope_html(suite), gr.update(visible=has_checkpoints(suite)))
 
 
 def on_station(suite: str, station: str):
     return gr.update(choices=date_choices(suite, station), value=default_case(suite, station))
 
 
-def tiles_html(suite: str, variable: str) -> str:
-    """Headline numbers for the selected experiment, computed from its saved score tables."""
-    run, e = RUNS[suite], EXPERIMENTS[suite]
-    h = headline(run, variable)
+def tiles_html(suite: str, variable: str, size: str | None = None) -> str:
+    """Headline numbers for the selected experiment and checkpoint, computed from its saved score tables."""
+    run, e = RUNS[suite], experiment_view(suite, size)
+    h = headline(run, variable, models=e["headline"])
     if h.empty:
         return "<div class='note'>No headline systems for this variable.</div>"
     u = unit(variable)
@@ -182,13 +205,13 @@ def tiles_html(suite: str, variable: str) -> str:
                    f"<div class='d'>{model_name(band)} · nominal 80%</div></div>")
     n = int(h["n"].max())
     split_txt = f" · {SPLIT_NAMES.get(split, split)}" if len(run.splits) > 1 else ""
-    return (f"<div class='note'><b>Mean absolute error</b> over {n:,} forecast–observation pairs, all stations "
-            f"and lead times{split_txt}; lower is better.</div><div class='tiles'>{''.join(out)}</div>")
+    return (f"<div class='tiles'>{''.join(out)}</div><div class='note'><b>Mean absolute error</b> over {n:,} "
+            f"forecast–observation pairs, all stations and lead times{split_txt}; lower is better.</div>")
 
 
-def systems_update(suite, case_id, variable, pref_by, band, extra):
+def systems_update(suite, case_id, variable, pref_by, band, extra, size=None):
     """Systems that forecast this variable; keeps the user's choices per experiment and the band."""
-    run, e = RUNS[suite], EXPERIMENTS[suite]
+    run, e = RUNS[suite], experiment_view(suite, size)
     saved = _saved_models(run, variable)
     exploratory = list(_extra_runs(extra, case_id))
     choices = saved + exploratory
@@ -206,13 +229,22 @@ def systems_update(suite, case_id, variable, pref_by, band, extra):
             gr.update(choices=[("none", "")] + [(model_name(m), m) for m in prob], value=band))
 
 
-def update_pref(suite, case_id, variable, selected, pref_by, extra):
-    run, e = RUNS[suite], EXPERIMENTS[suite]
+def update_pref(suite, case_id, variable, selected, pref_by, extra, size=None):
+    run, e = RUNS[suite], experiment_view(suite, size)
     choices = _saved_models(run, variable) + list(_extra_runs(extra, case_id))
     pref_by = dict(pref_by or {})
     base = pref_by.get(suite, list(e["default_systems"]))
     pref_by[suite] = [m for m in base if m not in choices] + list(selected or [])
     return pref_by
+
+
+def switch_checkpoint(suite, size, pref_by):
+    """Checkpoint changed: the user's chosen Timestral systems follow it (where that variant was saved)."""
+    if not (pref_by or {}).get(suite) or not has_checkpoints(suite):
+        return pref_by
+    models = set(RUNS[suite].models)
+    swapped = [with_checkpoint(m, size) if with_checkpoint(m, size) in models else m for m in pref_by[suite]]
+    return {**pref_by, suite: list(dict.fromkeys(swapped))}
 
 
 def _extra_runs(extra: dict | None, case_id: str) -> dict:
@@ -244,10 +276,12 @@ def overview(suite, case_id, variable, systems, band_model, history_hours, extra
     origin = pd.Timestamp(case["origin"])
     arome = (f" AROME run used: {case['arome_run'][:16].replace('T', ' ')} UTC (in the archive at "
              f"{case['arome_available_at'][11:16]} UTC)." if isinstance(case.get("arome_run"), str) else "")
+    assumed = (" AROME availability is inferred retrospectively from archive timestamps."
+               if isinstance(case.get("arome_run"), str) else "")
     caption = (f"**{station_label(case['station']).split(' ', 1)[-1]}**, forecast issued "
-               f"{origin:%a %d %b %Y, %H:%M} UTC (historical replay; only data available at that time were "
-               f"used).{arome} Shaded ranges show where the probabilistic system expects the outcome 80% / 90% of "
-               "the time; AROME and the simple references give single values.")
+               f"{origin:%a %d %b %Y, %H:%M} UTC (historical replay: inputs restricted to data assumed available "
+               f"at the forecast time).{assumed}{arome} Shaded ranges show where the probabilistic system "
+               "expects the outcome 80% / 90% of the time; AROME and the simple references give single values.")
     path = Path(tempfile.gettempdir()) / f"forecast_{case_id.replace('/', '_')}_{variable}.csv"
     forecast_csv(rows, obs).to_csv(path, index=False)
     return fig, caption, this, desc, str(path), plots.station_map(run.stations(), case["station"])
@@ -262,7 +296,7 @@ def _exploratory_on_device(obs, case, size, context_days, calendar, allow_downlo
                                 allow_download=allow_download, device=zerogpu.inference_device())
 
 
-def run_exploratory(suite, case_id, size, context_days, calendar, allow_download, pref_by, extra):
+def run_exploratory(suite, case_id, size, context_days, calendar, allow_download, pref_by, extra, ckpt=None):
     run = RUNS[suite]
     _, _, case = case_forecast(run, case_id, "t")
     obs = run.observations()
@@ -281,7 +315,7 @@ def run_exploratory(suite, case_id, size, context_days, calendar, allow_download
     mid = frame["model"].iloc[0]
     extra = {"case": case_id, "runs": {**extra["runs"], mid: frame}}
     pref_by = dict(pref_by or {})
-    base = pref_by.get(suite, list(EXPERIMENTS[suite]["default_systems"]))
+    base = pref_by.get(suite, list(experiment_view(suite, ckpt)["default_systems"]))
     pref_by[suite] = base + ([mid] if mid not in base else [])
     return extra, pref_by, (f"Added **{model_name(mid)}** to the chart (outside the frozen benchmark; not saved, "
                             "not scored).")
@@ -312,8 +346,53 @@ def _select(df, split, variable, station, season, lead):
     return df[m]
 
 
-def benchmark(suite, variable, metric, lead, split, station, season, statuses):
+def finding(suite: str, variable: str, split: str | None = None) -> str:
+    """One sentence on the AROME comparison, built only from clauses the saved all-lead MAE supports."""
     run, e = RUNS[suite], EXPERIMENTS[suite]
+    if "arome-raw" not in run.models:
+        return ""
+    split = split or run.splits[-1]
+    p = run.tables["metrics_point"]
+    p = p[(p["split"] == split) & (p["variable"] == variable) & (p["station"] == "ALL") & (p["season"] == "ALL")
+          & p["lead_h"].isna()]
+    mae = p.set_index("model")["mae"]
+    mae = mae[[m for m in mae.index if m not in DIFFERENT_INPUT]]
+    if mae.empty:
+        return ""
+    clauses, diffs = [], []
+    if "arome-raw" not in mae.index:
+        clauses.append("AROME is not scored for this variable")
+    elif mae.idxmin() == "arome-raw":
+        clauses.append("AROME remains most accurate")
+    else:
+        clauses.append(f"{model_name(mae.idxmin())} is more accurate than AROME")
+    pairs = {s: (f"timestral-{s.lower()}-mv-cal", f"timestral-{s.lower()}-mv-cal-arome-archived") for s in CHECKPOINTS}
+    pairs = {s: (b, c) for s, (b, c) in pairs.items() if b in mae.index and c in mae.index}
+    better = [s for s, (b, c) in pairs.items() if mae[c] < mae[b]]
+    diffs += [abs(mae[c] - mae[b]) / mae[b] for b, c in pairs.values()]
+    if pairs:
+        if len(better) == len(pairs):
+            cond = "conditioning on AROME improves Timestral"
+        elif better:
+            cond = f"conditioning on AROME improves Timestral {', '.join(better)} only"
+        else:
+            cond = "conditioning on AROME does not improve Timestral"
+        conds = [c for _, c in pairs.values()]
+        if len(conds) == 2:
+            small, large = conds
+            diffs.append(abs(mae[large] - mae[small]) / mae[small])
+            cond += (", with the larger checkpoint performing better" if mae[large] < mae[small]
+                     else ", and the larger checkpoint does not perform better")
+        clauses.append(cond)
+    noise = (" Some of these differences are a few percent, within what this small sample can resolve; see the "
+             "paired intervals under Advanced." if diffs and min(diffs) < 0.03 else "")
+    sample = e.get("sample", "this experiment")
+    return (f"<div class='finding'><b>In {sample}</b> ({variable_name(variable, unit=False).lower()}, mean "
+            f"absolute error over all stations and lead times): {'; '.join(clauses)}.{noise}</div>")
+
+
+def benchmark(suite, variable, metric, lead, split, station, season, statuses, size=None):
+    run, e = RUNS[suite], experiment_view(suite, size)
     split = split or run.splits[-1]
     kind = plots.METRICS[metric][2]
     src = run.tables["metrics_point" if kind == "point" else "metrics_probabilistic"]
@@ -341,7 +420,8 @@ def benchmark(suite, variable, metric, lead, split, station, season, statuses):
                + (" Hatched: " + ", ".join(model_name(m) for m in sorted(hatched)) + " uses station observations "
                   "in place of past AROME values, a different input from real AROME history." if hatched else "")
                + " In the lead-time chart, click a legend entry to show or hide a system.")
-    return summary, bars, lines, *detail_tables(run, split, variable, station, season, lead, statuses)
+    return (finding(suite, variable, split), summary, bars, lines,
+            *detail_tables(run, split, variable, station, season, lead, statuses))
 
 
 def detail_tables(run, split, variable, station, season, lead, statuses):
@@ -397,7 +477,8 @@ def downloads(suite: str):
 
 def methods_md() -> str:
     exp_rows = "\n".join(
-        f"| {EXPERIMENTS[s]['name']} | {EXPERIMENTS[s]['status']} | {EXPERIMENTS[s]['scope']} | `{s}` |"
+        f"| {EXPERIMENTS[s]['name']} | {EXPERIMENTS[s]['status']} | {EXPERIMENTS[s]['scope']} | "
+        f"{EXPERIMENTS[s]['caveat']} | `{s}` |"
         for s in RUNS)
     seen = sorted({m for r in RUNS.values() for m in r.models}, key=lambda m: list(MODELS).index(m)
                   if m in MODELS else 99)
@@ -408,11 +489,16 @@ def methods_md() -> str:
 {QUESTION}
 
 Each **experiment** is a frozen set of forecast cases (stations × forecast times), scored separately and never
-pooled. Forecasts are made only from information available at the forecast time (historical replay).
+pooled. Forecasts are replayed from inputs restricted to data assumed available at the forecast time. Timestral
+is used as released (no local training).
 
-| Experiment | Status | Scope | Identifier |
-|---|---|---|---|
+| Experiment | Status | Scope | Caveat | Identifier |
+|---|---|---|---|---|
 {exp_rows}
+
+**AROME availability is an assumption.** An AROME run counts as available at a forecast time if Météo-France's
+archive file was already published then, judged from the archive's Last-Modified timestamps after the fact (a
+retrospective reconstruction, not a live record). Details: `docs/availability_evidence.md`.
 
 ## Systems
 
@@ -501,14 +587,14 @@ def build() -> gr.Blocks:
         if DEFAULT_SUITE is None:
             gr.Markdown("# Weather-lab\nNo saved results found. Run `uv run weather-lab bootstrap`.")
             return demo
-        gr.Markdown(f"# Weather-lab\n{QUESTION}", elem_id="hero")
+        gr.Markdown(f"# Weather-lab\n{INTRO}", elem_id="hero")
         if notice := fallback_notice(BOOT):
             gr.Markdown(f"**Note:** {notice}", elem_classes="note", elem_id="snapshot-fallback")
         with gr.Row(equal_height=True):
             exp = gr.Dropdown(experiment_choices(), value=DEFAULT_SUITE, label="Experiment", scale=2, min_width=240)
             var = gr.Dropdown(variable_choices(DEFAULT_SUITE), value="t", label="Weather variable", scale=1,
                               min_width=180)
-        scope = gr.HTML(scope_html(DEFAULT_SUITE))
+        scope = gr.HTML(scope_html(DEFAULT_SUITE), elem_id="scope")
         pref = gr.State({})
         extra = gr.State(EMPTY_EXTRA)
         with gr.Tabs(selected="overview"):
@@ -516,10 +602,12 @@ def build() -> gr.Blocks:
             with gr.Tab("Overview", id="overview"):
                 with gr.Row(equal_height=True):
                     station = gr.Dropdown(label="Station", choices=[], scale=1, min_width=180)
+                    ckpt = gr.Radio(list(CHECKPOINTS), value=CHECKPOINTS[0], label="Timestral model", scale=1,
+                                    min_width=160, visible=has_checkpoints(DEFAULT_SUITE))
                     date = gr.Dropdown(label="Forecast issued", choices=[], scale=2, min_width=240)
                 fplot = gr.Plot(show_label=False)
-                caption = gr.Markdown(elem_classes="note")
                 tiles = gr.HTML()
+                caption = gr.Markdown(elem_classes="note")
                 with gr.Row():
                     with gr.Column(scale=2, min_width=280):
                         this_tab = gr.HTML()
@@ -552,6 +640,7 @@ def build() -> gr.Blocks:
                     metric = gr.Dropdown(METRIC_CHOICES, value="mae", label="Score", min_width=180)
                     lead = gr.Dropdown(LEADS, value="all", label="Lead time", min_width=160)
                     split = gr.Radio([], label="Period", visible=False, min_width=200)
+                b_finding = gr.HTML()
                 b_summary = gr.Markdown(elem_classes="note")
                 bars = gr.Plot(show_label=False)
                 lines = gr.Plot(show_label=False)
@@ -584,35 +673,39 @@ def build() -> gr.Blocks:
         # ---------------- wiring
         ov_inputs = [exp, date, var, systems, band, history, extra]
         ov_outputs = [fplot, caption, this_tab, sys_desc, dl_case, smap]
-        sys_inputs = [exp, date, var, pref, band, extra]
-        b_inputs = [exp, var, metric, lead, split, b_station, b_season, statuses]
-        b_outputs = [b_summary, bars, lines, point_tab, prob_tab]
+        sys_inputs = [exp, date, var, pref, band, extra, ckpt]
+        b_inputs = [exp, var, metric, lead, split, b_station, b_season, statuses, ckpt]
+        b_outputs = [b_finding, b_summary, bars, lines, point_tab, prob_tab]
+        exp_outputs = [var, station, date, scope, ckpt]
 
         def refresh_overview(event):
             return (event.then(keep_extra_for_case, [date, extra], extra)
                     .then(systems_update, sys_inputs, [systems, band])
                     .then(overview, ov_inputs, ov_outputs)
-                    .then(tiles_html, [exp, var], tiles))
+                    .then(tiles_html, [exp, var, ckpt], tiles))
 
         def refresh_benchmark(event):
             return (event.then(benchmark, b_inputs, b_outputs)
                     .then(advanced_tables, [exp, var, split], [avail_tab, paired_tab, rt_tab, hw])
                     .then(downloads, exp, [dl_point, dl_prob, dl_manifest]))
 
-        on_exp = exp.input(on_experiment, [exp, var], [var, station, date, scope]).then(
+        on_exp = exp.input(on_experiment, [exp, var], exp_outputs).then(
             bench_controls, exp, [split, b_station, b_season])
         refresh_benchmark(refresh_overview(on_exp))
         refresh_benchmark(var.input(systems_update, sys_inputs, [systems, band])
-                          .then(overview, ov_inputs, ov_outputs).then(tiles_html, [exp, var], tiles))
+                          .then(overview, ov_inputs, ov_outputs).then(tiles_html, [exp, var, ckpt], tiles))
         refresh_overview(station.input(on_station, [exp, station], date))
         date.input(keep_extra_for_case, [date, extra], extra).then(
             systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
-        systems.input(update_pref, [exp, date, var, systems, pref, extra], pref).then(
+        refresh_benchmark(ckpt.input(switch_checkpoint, [exp, ckpt, pref], pref)
+                          .then(systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
+                          .then(tiles_html, [exp, var, ckpt], tiles))
+        systems.input(update_pref, [exp, date, var, systems, pref, extra, ckpt], pref).then(
             systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
         for c in (band, history):
             c.input(overview, ov_inputs, ov_outputs)
         show_old.input(lambda s, cur: gr.update(choices=experiment_choices(s), value=cur), [show_old, exp], exp)
-        e_btn.click(run_exploratory, [exp, date, e_size, e_ctx, e_cal, e_dl, pref, extra], [extra, pref, e_msg],
+        e_btn.click(run_exploratory, [exp, date, e_size, e_ctx, e_cal, e_dl, pref, extra, ckpt], [extra, pref, e_msg],
                     concurrency_limit=1).then(systems_update, sys_inputs, [systems, band]).then(
             overview, ov_inputs, ov_outputs)
         for c in (metric, lead, split, b_station, b_season, statuses):
@@ -620,7 +713,7 @@ def build() -> gr.Blocks:
         split.input(advanced_tables, [exp, var, split], [avail_tab, paired_tab, rt_tab, hw])
 
         refresh_benchmark(refresh_overview(
-            demo.load(on_experiment, [exp, var], [var, station, date, scope]).then(
+            demo.load(on_experiment, [exp, var], exp_outputs).then(
                 bench_controls, exp, [split, b_station, b_season])))
     return demo
 

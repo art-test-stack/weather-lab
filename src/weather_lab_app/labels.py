@@ -87,6 +87,18 @@ def model_style(mid: str) -> tuple[str, str, float]:
     return EXPLORATORY if mid.startswith("exploratory") else STYLE.get(mid, ("#52514e", "solid", 2.0))
 
 
+CHECKPOINTS = ("28M", "209M")
+
+
+def with_checkpoint(mid: str, size: str) -> str:
+    """The same Timestral variant at another checkpoint size (other systems unchanged)."""
+    for s in CHECKPOINTS:
+        prefix = f"timestral-{s.lower()}-"
+        if mid.startswith(prefix):
+            return f"timestral-{size.lower()}-" + mid[len(prefix):]
+    return mid
+
+
 def variable_name(v: str, unit: bool = True) -> str:
     name, u, _ = VARIABLE_NAMES[v]
     return f"{name} ({u})" if unit else name
@@ -101,6 +113,8 @@ EXPERIMENTS = {
     "arome-issued-v2": {
         "name": "AROME vs Timestral · Oct 2026",
         "status": "Integration study",
+        "short": "60 forecasts · 5 stations · 10–21 Oct 2026 · 3–48 h ahead",
+        "sample": "this 12-day integration study",
         "scope": "60 forecasts: 5 stations × 12 days (10–21 Oct 2026), leads 3–48 h, issued AROME runs from "
                  "Météo-France's 14-day archive.",
         "caveat": "12 autumn days: not evidence about other seasons or extremes. Run availability rests on "
@@ -114,6 +128,7 @@ EXPERIMENTS = {
     "synop-ctxval-2023-v1": {
         "name": "History length · 2023 validation",
         "status": "Validation",
+        "short": "1,809 forecasts · 5 stations · daily, 2023 · 3–48 h ahead · 90 days of history selected",
         "scope": "1,809 forecasts: 5 stations × daily origins in 2023, leads 3–48 h. Used to choose how much "
                  "history Timestral reads (90 days selected, rule declared before running).",
         "caveat": "Validation year only; the 2024 test has not been run with this choice.",
@@ -126,6 +141,7 @@ EXPERIMENTS = {
     "synop-historical-v1": {
         "name": "Station history · integration example",
         "status": "Integration check",
+        "short": "96 forecasts · Toulouse, Paris-Orly · 1st and 15th of each month, 2023–2024",
         "scope": "96 forecasts: 2 stations (Toulouse, Paris-Orly), 1st and 15th of each month, 2023–2024.",
         "caveat": "Small smoke test of the pipeline; baselines fitted on one year.",
         "headline": ["persistence", "climatology", "timestral-28m-mv-cal", "timestral-209m-mv-cal"],
@@ -137,6 +153,7 @@ EXPERIMENTS = {
     "arome-issued-v1": {
         "name": "AROME vs Timestral · v1 (superseded)",
         "status": "Superseded version",
+        "short": "Same 60 forecasts as the current AROME comparison · kept for reference",
         "scope": "Same 60 forecasts as the current AROME comparison; kept unchanged for reference.",
         "caveat": "Its conditioned system used observations in place of past AROME values.",
         "headline": ["arome-raw", "timestral-28m-mv-cal", "timestral-28m-mv-cal-arome"],

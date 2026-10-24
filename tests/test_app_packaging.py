@@ -135,3 +135,76 @@ def test_labels_cover_every_configured_system():
            for m in (yaml.safe_load(open(p)) or {}).get("models", []) or []}
     missing = sorted(i for i in ids if i not in MODELS or i not in STYLE)
     assert not missing, f"systems without a readable name or colour: {missing}"
+
+
+def _fake_v2_run(mae_by_model: dict[str, float], variable: str = "t", extra_models: tuple = ()):
+    import pandas as pd
+
+    rows = {"split": "test", "variable": variable, "station": "ALL", "season": "ALL", "lead_h": float("nan"),
+            "model": list(mae_by_model), "n": 960}
+
+    class FakeRun:
+        suite = "arome-issued-v2"
+        splits = ["test"]
+        models = list(mae_by_model) + list(extra_models)      # e.g. AROME saved, but not for this variable
+        tables = {"metrics_point": pd.DataFrame({**rows, "mae": list(mae_by_model.values())}),
+                  "metrics_probabilistic": pd.DataFrame({**rows, "coverage80": 0.8})}
+
+        def predictions(self):
+            return pd.DataFrame({"model": self.models, "variable": variable,
+                                 "output_type": ["point" if m == "arome-raw" else "quantiles" for m in self.models]})
+
+    return FakeRun()
+
+
+V2_T = {"arome-raw": 1.09, "timestral-28m-mv-cal": 2.52, "timestral-209m-mv-cal": 2.42,
+        "timestral-28m-mv-cal-arome-archived": 2.19, "timestral-209m-mv-cal-arome-archived": 1.90,
+        "timestral-28m-mv-cal-arome-substobs": 1.0}          # hatched (different input): never "most accurate"
+
+
+def test_checkpoint_selector_switches_headline_defaults_and_preferences(monkeypatch):
+    from weather_lab_app import main as app
+    from weather_lab_app.labels import with_checkpoint
+
+    assert with_checkpoint("timestral-28m-mv-cal-arome-archived", "209M") == "timestral-209m-mv-cal-arome-archived"
+    assert with_checkpoint("arome-raw", "209M") == "arome-raw"
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
+    v = app.experiment_view("arome-issued-v2", "209M")
+    assert v["headline"] == ["arome-raw", "timestral-209m-mv-cal", "timestral-209m-mv-cal-arome-archived"]
+    assert v["compare"] == {"timestral-209m-mv-cal-arome-archived": "timestral-209m-mv-cal"}
+    assert v["band"] == "timestral-209m-mv-cal-arome-archived" and app.has_checkpoints("arome-issued-v2")
+    assert app.experiment_view("arome-issued-v2", "28M")["headline"][1] == "timestral-28m-mv-cal"
+    s, b = app.systems_update("arome-issued-v2", "c1", "t", {}, None, app.EMPTY_EXTRA, "209M")
+    assert s["value"] == v["default_systems"] and b["value"] == "timestral-209m-mv-cal-arome-archived"
+    pref = {"arome-issued-v2": ["timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]}
+    out = app.switch_checkpoint("arome-issued-v2", "209M", pref)["arome-issued-v2"]
+    assert out == ["timestral-209m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]  # no 209M twin
+    assert "209M" in app.tiles_html("arome-issued-v2", "t", "209M") and "1.90" in app.tiles_html(
+        "arome-issued-v2", "t", "209M")
+
+
+def test_benchmark_finding_only_states_what_the_scores_support(monkeypatch):
+    from weather_lab_app import main as app
+
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
+    text = app.finding("arome-issued-v2", "t")
+    assert ("AROME remains most accurate; conditioning on AROME improves Timestral, with the larger checkpoint "
+            "performing better.") in text and "within what this small sample" not in text
+    wind = {k: v for k, v in V2_T.items() if k != "arome-raw"} | {"timestral-28m-mv-cal": 1.883,
+                                                                   "timestral-28m-mv-cal-arome-archived": 1.887}
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(wind, "u", extra_models=("arome-raw",))})
+    text = app.finding("arome-issued-v2", "u")
+    assert "AROME is not scored for this variable" in text and "improves Timestral 209M only" in text
+    assert "within what this small sample" in text
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run({"timestral-28m-mv-cal": 2.0})})
+    assert app.finding("arome-issued-v2", "t") == ""
+
+
+def test_checkpoint_selector_hidden_where_both_checkpoints_are_already_shown(monkeypatch):
+    from weather_lab_app import main as app
+
+    run = _fake_v2_run({"persistence": 3.0, "timestral-28m-mv-cal": 2.5, "timestral-209m-mv-cal": 2.4})
+    run.suite = "synop-historical-v1"
+    monkeypatch.setattr(app, "RUNS", {"synop-historical-v1": run})
+    assert not app.has_checkpoints("synop-historical-v1")
+    assert app.experiment_view("synop-historical-v1", "209M") is app.EXPERIMENTS["synop-historical-v1"]
