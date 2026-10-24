@@ -204,7 +204,6 @@ def test_plan_env_override_keeps_fallbacks(monkeypatch):
     assert plan.snapshot["url"] == "file:///tmp/other.tar.gz" and plan.snapshot["sha256"] == "5" * 64
     assert plan.snapshot["id"] == "other"
     assert plan.snapshot["fallbacks"] == deploy["bootstrap"]["snapshot"]["fallbacks"]
-    assert [f["id"] for f in plan.snapshot["fallbacks"]][:1] == ["wl-snapshot-v3-20261025"]
 
 
 def test_app_notice_only_for_fallback():
@@ -216,3 +215,90 @@ def test_app_notice_only_for_fallback():
                                         "primary_error": "download failed: 1 file(s) not found in bucket 'a/b': v4"}})
     assert msg.startswith("Showing data snapshot `v3` (fallback): pinned snapshot `v4` could not be fetched")
     assert "not found" in msg and msg.endswith("Results shown are from the earlier snapshot.")
+
+
+class FakeBucketApi:
+    """In-memory stand-in for the HfApi bucket calls used by weather_lab.publish."""
+
+    def __init__(self, files=None):
+        self.files = dict(files or {})        # name -> bytes
+        self.uploads = []
+
+    def get_bucket_paths_info(self, bucket, paths):
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(path=p) for p in paths if p in self.files]
+
+    def download_bucket_files(self, bucket, files, raise_on_missing_files=False, token=None):
+        for remote, local in files:
+            if remote not in self.files:
+                raise FileNotFoundError(remote)
+            Path(local).write_bytes(self.files[remote])
+
+    def batch_bucket_files(self, bucket, add=None, copy=None, delete=None, token=None):
+        for src, name in add or []:
+            self.files[name] = Path(src).read_bytes()
+            self.uploads.append(name)
+
+
+def _publish_env(tmp_path, monkeypatch):
+    import hashlib
+
+    from weather_lab import bootstrap as B
+    from weather_lab import publish as P
+
+    cfg = tmp_path / "bootstrap.yaml"
+    old = b"old snapshot"
+    old_sha = hashlib.sha256(old).hexdigest()
+    cfg.write_text(f"""bootstrap:
+  suites: [configs/smoke.yaml]
+  mode: auto
+  snapshot:
+    id: old
+    url: hf://buckets/o/b/old.tar.gz
+    sha256: {old_sha}
+    mounts:
+      o/b: /data
+    fallbacks:
+      - id: ghost
+        url: hf://buckets/o/b/ghost.tar.gz
+        sha256: {'0' * 64}
+  weights: []
+""")
+    monkeypatch.setattr(P, "ROOT", tmp_path)
+    monkeypatch.setattr(B, "ROOT", tmp_path)
+    (tmp_path / "data" / "examples" / "s").mkdir(parents=True)
+    (tmp_path / "data" / "examples" / "s" / "run.json").write_text("{}")
+    api = FakeBucketApi({"old.tar.gz": old, "old.tar.gz.sha256": f"{old_sha}  old.tar.gz\n".encode()})
+    return P, cfg, api, old_sha
+
+
+def test_publish_uploads_verifies_and_pins(tmp_path, monkeypatch):
+    P, cfg, api, old_sha = _publish_env(tmp_path, monkeypatch)
+    res = P.publish_snapshot("new", "o/b", out_dir=tmp_path / "dist", config=cfg, api=api, log=lambda *_: 0)
+    assert res["uploaded"] and api.uploads == ["new.tar.gz", "new.tar.gz.sha256"]
+    snap = yaml.safe_load(cfg.read_text())["bootstrap"]["snapshot"]
+    assert snap["id"] == "new" and snap["url"] == "hf://buckets/o/b/new.tar.gz" and snap["sha256"] == res["primary"]["sha256"]
+    assert [f["id"] for f in snap["fallbacks"]] == ["old"]           # previous primary kept; "ghost" not in bucket
+    assert snap["mounts"] == {"o/b": "/data"}
+    assert yaml.safe_load(cfg.read_text())["bootstrap"]["suites"] == ["configs/smoke.yaml"]   # rest untouched
+    assert P.check_pinned(cfg, api=api, log=lambda *_: 0)
+    # publishing the same id again with identical content is a no-op upload
+    again = P.publish_snapshot("new", "o/b", out_dir=tmp_path / "dist", config=cfg, api=api, log=lambda *_: 0)
+    assert again["uploaded"] is False and api.uploads == ["new.tar.gz", "new.tar.gz.sha256"]
+
+
+def test_publish_refuses_to_overwrite_an_existing_id(tmp_path, monkeypatch):
+    P, cfg, api, _ = _publish_env(tmp_path, monkeypatch)
+    api.files["taken.tar.gz"] = b"other"
+    api.files["taken.tar.gz.sha256"] = b"f" * 64 + b"  taken.tar.gz\n"
+    with pytest.raises(RuntimeError, match="immutable"):
+        P.publish_snapshot("taken", "o/b", out_dir=tmp_path / "dist", config=cfg, api=api, log=lambda *_: 0)
+    assert yaml.safe_load(cfg.read_text())["bootstrap"]["snapshot"]["id"] == "old"   # pin unchanged
+
+
+def test_check_pinned_fails_when_snapshot_missing(tmp_path, monkeypatch):
+    P, cfg, api, _ = _publish_env(tmp_path, monkeypatch)
+    assert P.check_pinned(cfg, api=api, log=lambda *_: 0)
+    del api.files["old.tar.gz"]
+    assert not P.check_pinned(cfg, api=api, log=lambda *_: 0)

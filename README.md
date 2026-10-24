@@ -79,6 +79,16 @@ Experiments offered (`EXPERIMENTS` in `src/weather_lab_app/labels.py`):
 
 ## Deployment to a Hugging Face Space (prepared, not published)
 
+**Publishing new data (one command, run where the data lives):**
+
+```bash
+uv run weather-lab snapshot publish --id wl-snapshot-v5-<date>   # build → upload → verify → pin
+git commit -am "Pin wl-snapshot-v5-<date>" && git push             # then run the deploy workflow
+```
+
+`snapshot publish` builds the byte-reproducible archive and uploads it with its `.sha256` to the bucket. It then downloads and hashes the remote copy, and rewrites `bootstrap.snapshot` in `configs/bootstrap.yaml`. The previous snapshot becomes the first fallback, and fallbacks that are not in the bucket are dropped. An existing id is never overwritten with different content. It needs a Hugging Face login with write access to the bucket (`hf auth login`); `--dry-run` builds without uploading. The deploy workflow runs `weather-lab snapshot check` first and stops if the pinned snapshot is not published. Only the snapshot *build* has to happen locally: its inputs (saved runs, prepared data, the AROME extract) are git-ignored, and the AROME runs are no longer in Météo-France's 14-day archive.
+
+
 The Space is built from this repository. It is not a plain mirror, because its README needs Spaces front matter and its root needs an `app_file`:
 
 ```bash

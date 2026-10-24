@@ -70,6 +70,18 @@ def cmd_spec_add_reference(args) -> None:
     add_score_reference(load_config(args.config), Path(args.run_dir))
 
 
+def cmd_snapshot_publish(args) -> None:
+    from weather_lab.publish import publish_snapshot
+
+    publish_snapshot(args.id, args.bucket, dry_run=args.dry_run)
+
+
+def cmd_snapshot_check(args) -> None:
+    from weather_lab.publish import check_pinned
+
+    sys.exit(0 if check_pinned() else 1)
+
+
 def cmd_snapshot_build(args) -> None:
     from weather_lab.bootstrap import build_snapshot
 
@@ -184,6 +196,13 @@ def main(argv: list[str] | None = None) -> None:
     sb.add_argument("--out", default="dist/snapshot")
     sb.add_argument("--id", required=True)
     sb.set_defaults(func=cmd_snapshot_build)
+    sp = snsub.add_parser("publish", help="build, upload to the bucket, verify, and pin in configs/bootstrap.yaml")
+    sp.add_argument("--id", required=True, help="new immutable snapshot id, e.g. wl-snapshot-v5-20261026")
+    sp.add_argument("--bucket", default="ai-testack/weather-lab-storage")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(func=cmd_snapshot_publish)
+    sc2 = snsub.add_parser("check", help="read-only: the pinned snapshot exists in its bucket with the pinned sha256")
+    sc2.set_defaults(func=cmd_snapshot_check)
     ar = sub.add_parser("arome", help="AROME archive utilities")
     asub = ar.add_subparsers(dest="arome_command", required=True)
     rf = asub.add_parser("refresh-suite", help="write a NEW suite config for the dates now in the 14-day archive")
