@@ -230,6 +230,10 @@ def run_exploratory(suite, case_id, variable, systems, band_model, size, context
     obs = run.observations()
     obs = obs[obs["station"] == case["station"]]
     try:
+        from weather_lab.forecast import ensure_checkpoint
+
+        # download on CPU first, so a cold 837 MB fetch never consumes the GPU window or quota
+        ensure_checkpoint(size, bool(allow_download))
         extra = _exploratory_on_device(obs, case, size, int(context_days), bool(calendar), bool(allow_download))
         msg = (f"Exploratory run **outside the frozen benchmark**: {extra['model'].iloc[0]} "
                f"(`{extra['model_revision'].iloc[0]}`). Not saved, not scored.")

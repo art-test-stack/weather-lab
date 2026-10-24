@@ -72,3 +72,19 @@ def test_lockfile_matches_what_the_spaces_builder_installs():
     if meta.get("suggested_hardware", "").startswith("zero"):
         major, minor = (int(x) for x in reqs["torch"].split(".")[:2])
         assert (major, minor) <= (2, 13)                               # ZeroGPU supports torch <= 2.13.0
+
+
+def test_checkpoint_is_fetched_before_any_gpu_work(monkeypatch):
+    import pytest
+
+    from weather_lab import forecast
+
+    calls = []
+    monkeypatch.setattr(forecast, "weights_cached", lambda c, r: False)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda repo, name, revision: calls.append((repo, name)))
+    with pytest.raises(PermissionError):
+        forecast.ensure_checkpoint("Timestral-209M", allow_download=False)
+    assert forecast.ensure_checkpoint("Timestral-209M", allow_download=True) is True
+    assert calls == [("mistralai/Timestral-209M", "config.json"), ("mistralai/Timestral-209M", "model.safetensors")]
+    monkeypatch.setattr(forecast, "weights_cached", lambda c, r: True)
+    assert forecast.ensure_checkpoint("Timestral-28M", allow_download=False) is False

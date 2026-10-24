@@ -240,6 +240,20 @@ def weights_cached(checkpoint: str, revision: str) -> bool:
     return isinstance(try_to_load_from_cache(checkpoint, "model.safetensors", revision=revision), str)
 
 
+def ensure_checkpoint(size: str, allow_download: bool) -> bool:
+    """Make the pinned checkpoint available locally (no GPU needed). Returns True if it was downloaded."""
+    from huggingface_hub import hf_hub_download
+
+    checkpoint, revision, mb = CHECKPOINTS[size]
+    if weights_cached(checkpoint, revision):
+        return False
+    if not allow_download:
+        raise PermissionError(f"{size} weights (~{mb} MB) are not cached; tick 'allow download' to fetch them")
+    for name in ("config.json", "model.safetensors"):
+        hf_hub_download(checkpoint, name, revision=revision)
+    return True
+
+
 def calendar_features(times: np.ndarray) -> np.ndarray:
     """(N, T) datetime64 -> (N, 4, T): sin/cos hour-of-day, sin/cos day-of-year. Known in advance."""
     t = pd.DatetimeIndex(times.ravel())
