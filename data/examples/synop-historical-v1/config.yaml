@@ -46,6 +46,8 @@ models:
   - {id: timestral-28m-t, kind: timestral, targets: [t]}
   - {id: timestral-28m-mv, kind: timestral, targets: [t, pmer, u, v]}
   - {id: timestral-28m-mv-cal, kind: timestral, targets: [t, pmer, u, v], calendar: true}
+  - {id: timestral-209m-mv-cal, kind: timestral, targets: [t, pmer, u, v], calendar: true,
+     checkpoint: mistralai/Timestral-209M, revision: 9874d252ab0aae16f7f7c999f98f98d6ad7d8365}
 
 timestral:
   checkpoint: mistralai/Timestral-28M

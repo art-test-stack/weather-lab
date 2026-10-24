@@ -88,3 +88,37 @@ def test_checkpoint_is_fetched_before_any_gpu_work(monkeypatch):
     assert calls == [("mistralai/Timestral-209M", "config.json"), ("mistralai/Timestral-209M", "model.safetensors")]
     monkeypatch.setattr(forecast, "weights_cached", lambda c, r: True)
     assert forecast.ensure_checkpoint("Timestral-28M", allow_download=False) is False
+
+
+def test_explorer_systems_persist_across_variables_and_exploratory_runs(monkeypatch):
+    import pandas as pd
+
+    from weather_lab_app import main as app
+
+    preds = pd.DataFrame({"model": ["persistence", "arome-raw", "timestral-28m-mv-cal", "timestral-209m-mv-cal",
+                                    "persistence", "timestral-28m-mv-cal", "timestral-209m-mv-cal"],
+                          "variable": ["t", "t", "t", "t", "u", "u", "u"],
+                          "output_type": ["point", "point", "quantiles", "quantiles", "point", "quantiles", "quantiles"]})
+
+    class FakeRun:
+        models = ["persistence", "arome-raw", "timestral-28m-mv-cal", "timestral-209m-mv-cal"]
+
+        def predictions(self):
+            return preds
+
+    monkeypatch.setattr(app, "RUNS", {"s": FakeRun()})
+    extra = app.keep_extra_for_case("c1", app.EMPTY_EXTRA)
+    s, b = app.systems_update("s", "c1", "t", None, None, extra)
+    assert s["value"] == ["persistence", "arome-raw", "timestral-28m-mv-cal"] and b["value"] == "timestral-28m-mv-cal"
+    pref = app.update_pref("s", "c1", "t", ["arome-raw", "timestral-209m-mv-cal"], None, extra)
+    s, _ = app.systems_update("s", "c1", "u", pref, None, extra)           # no AROME wind
+    assert "arome-raw" not in s["choices"] and s["value"] == ["timestral-209m-mv-cal"]
+    s, _ = app.systems_update("s", "c1", "t", pref, None, extra)           # preference restored
+    assert s["value"] == ["arome-raw", "timestral-209m-mv-cal"]
+    extra = {"case": "c1", "runs": {"exploratory Timestral-209M ctx14d [cpu]": pd.DataFrame()}}
+    pref = pref + ["exploratory Timestral-209M ctx14d [cpu]"]
+    pref = app.update_pref("s", "c1", "t", ["exploratory Timestral-209M ctx14d [cpu]"], pref, extra)  # drop saved ones
+    s, b = app.systems_update("s", "c1", "t", pref, "timestral-209m-mv-cal", extra)
+    assert s["value"] == ["exploratory Timestral-209M ctx14d [cpu]"]
+    assert b["value"] == "exploratory Timestral-209M ctx14d [cpu]"        # band follows the selected systems
+    assert app.keep_extra_for_case("c2", extra)["runs"] == {}              # another case starts fresh

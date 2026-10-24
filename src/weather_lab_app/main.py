@@ -18,8 +18,8 @@ import pandas as pd
 
 from weather_lab.common import ROOT, VARIABLES
 from weather_lab_app import plots
-from weather_lab_app.results import (SUITES, available_runs, case_forecast, filter_metrics, forecast_csv,
-                                 station_label, training_status)
+from weather_lab_app.results import (SUITE_DESCRIPTIONS, SUITES, available_runs, case_forecast, filter_metrics,
+                                     forecast_csv, station_label, training_status)
 
 
 
@@ -72,8 +72,8 @@ def suite_header(suite: str) -> str:
     run = RUNS[suite]
     m = run.manifest
     tag = "integration study" if suite.startswith("arome-issued") else "integration check (smoke)"
-    return (f"<span class='badge'>{SUITES[suite]}</span><span class='warn'>{tag}: not a performance claim</span>"
-            f"<br><small>run <code>{run.run['run_id']}</code> · {run.source} · "
+    return (f"<span class='warn'>{tag}: not a performance claim</span> {SUITE_DESCRIPTIONS.get(suite, '')}"
+            f"<br><small>benchmark id <code>{suite}</code> · run <code>{run.run['run_id']}</code> · {run.source} · "
             f"{m['n_eligible']}/{m['n_cases']} eligible cases · {len(m['protocol']['stations'])} stations · "
             f"leads 3-48 h · manifest protocol <code>{m['protocol_sha256']}</code> · local fine-tuning: none</small>")
 
@@ -159,6 +159,24 @@ def downloads(suite: str):
 
 # --------------------------------------------------------------------------- explorer callbacks
 
+DEFAULT_SYSTEMS = ("persistence", "climatology", "arome-raw", "timestral-28m-mv-cal", "timestral-28m-mv-cal-arome",
+                   "timestral-28m-mv-cal-arome-archived", "timestral-209m-mv-cal-arome-archived")
+BAND_DEFAULTS = ("timestral-28m-mv-cal-arome-archived", "timestral-28m-mv-cal-arome", "timestral-28m-mv-cal")
+EMPTY_EXTRA = {"case": None, "runs": {}}
+
+
+def _saved_models(run, variable: str) -> list[str]:
+    """Systems of the saved run that forecast `variable` (e.g. raw AROME has no wind), in run order."""
+    p = run.predictions()
+    have = set(p.loc[p["variable"] == variable, "model"])
+    return [m for m in run.models if m in have]
+
+
+def _extra_runs(extra: dict | None, case_id: str) -> dict:
+    """Exploratory runs kept for this session, only while they belong to the displayed case."""
+    return extra["runs"] if extra and extra.get("case") == case_id else {}
+
+
 def explorer_controls(suite: str, case_id: str | None = None):
     run = RUNS[suite]
     cases = run.cases()
@@ -166,20 +184,42 @@ def explorer_controls(suite: str, case_id: str | None = None):
     examples = run.manifest.get("ui_examples") or list(cases["case_id"][:1])
     case_id = case_id if case_id in set(cases["case_id"]) else examples[0]
     station = case_id.split("/")[1]
-    preds = run.predictions()
-    variables = [v for v in VARIABLES if v in set(preds["variable"])]
-    systems = run.models
-    default_sys = [m for m in systems if m in ("persistence", "climatology", "arome-raw", "timestral-28m-mv-cal",
-                                               "timestral-28m-mv-cal-arome", "timestral-28m-mv-cal-arome-archived")]
-    prob_models = [m for m in systems if (preds.loc[preds["model"] == m, "output_type"] == "quantiles").any()]
-    band_default = next((m for m in ("timestral-28m-mv-cal-arome-archived", "timestral-28m-mv-cal-arome",
-                                     "timestral-28m-mv-cal") if m in prob_models), prob_models[0])
+    variables = [v for v in VARIABLES if v in set(run.predictions()["variable"])]
     st_cases = cases[cases["station"] == station]
     return (gr.update(choices=[(station_label(s), s) for s in run.manifest["protocol"]["stations"]], value=station),
             gr.update(choices=_case_choices(st_cases, examples), value=case_id),
-            gr.update(choices=variables, value="t"),
-            gr.update(choices=systems, value=default_sys),
-            gr.update(choices=[("none", "")] + prob_models, value=band_default))
+            gr.update(choices=variables, value="t"))
+
+
+def systems_update(suite, case_id, variable, pref, band, extra):
+    """Systems available for this case/variable; keeps the user's preferred selection and band."""
+    run = RUNS[suite]
+    saved = _saved_models(run, variable)
+    exploratory = list(_extra_runs(extra, case_id))
+    choices = saved + exploratory
+    if pref is None:
+        value = [m for m in saved if m in DEFAULT_SYSTEMS] + exploratory
+    else:
+        value = [m for m in choices if m in pref]
+    preds = run.predictions()
+    prob = [m for m in saved if m in value and (preds.loc[preds["model"] == m, "output_type"] == "quantiles").any()]
+    prob += [m for m in exploratory if m in value]          # bands only for selected probabilistic systems
+    if band is None or (band != "" and band not in prob):     # None: not chosen yet; "": user chose none
+        band = next((m for m in BAND_DEFAULTS if m in prob), prob[0] if prob else "")
+    return gr.update(choices=choices, value=value), gr.update(choices=[("none", "")] + prob, value=band)
+
+
+def update_pref(suite, case_id, variable, selected, pref, extra):
+    """Remember choices across variables/cases: unavailable systems keep their previous state."""
+    run = RUNS[suite]
+    choices = _saved_models(run, variable) + list(_extra_runs(extra, case_id))
+    base = pref if pref is not None else [m for m in run.models if m in DEFAULT_SYSTEMS]
+    return [m for m in base if m not in choices] + list(selected or [])
+
+
+def keep_extra_for_case(case_id, extra):
+    """Exploratory runs belong to one case; moving to another case starts a fresh set."""
+    return extra if extra and extra.get("case") == case_id else {"case": case_id, "runs": {}}
 
 
 def _case_choices(cases: pd.DataFrame, examples: list[str]) -> list[tuple[str, str]]:
@@ -199,17 +239,23 @@ def station_changed(suite: str, station: str):
 def explore(suite, case_id, variable, systems, band_model, extra=None):
     run = RUNS[suite]
     rows, obs, case = case_forecast(run, case_id, variable)
-    if extra is not None and len(extra):
-        extra = extra[extra["variable"] == variable]
-    fig = plots.forecast_figure(rows, obs, case, variable, systems or [], band_model or None, extra=extra)
+    exploratory = [df[df["variable"] == variable] for df in _extra_runs(extra, case_id).values()]
+    if exploratory:
+        rows = pd.concat([rows, *exploratory], ignore_index=True)
+        for col in ("origin", "valid_time"):    # saved (µs) and fresh (ns) timestamps must share one dtype
+            rows[col] = pd.to_datetime(rows[col], utc=True).astype("datetime64[us, UTC]")
+    fig = plots.forecast_figure(rows, obs, case, variable, systems or [], band_model or None)
     sc = rows[rows["model"].isin(systems or [])].merge(obs.rename(columns={"time": "valid_time"}), on="valid_time")
-    sc = sc.assign(abs_err=(sc["point"] - sc["observed"]).abs()).groupby("model")["abs_err"].agg(["mean", "count"])
+    sc = sc.assign(abs_err=(sc["point"] - sc["observed"]).abs()).groupby("model", sort=False)["abs_err"].agg(
+        ["mean", "count"])
     sc = sc.rename(columns={"mean": "case MAE", "count": "verified leads"}).round(2).reset_index()
     info = (f"**Case** `{case_id}` · {case['split']} split · season {case['season']} · inputs: observations at or "
             f"before the origin" + (" + issued AROME run (known-future covariate for the conditioned system)"
                                     if isinstance(case.get("arome_run"), str) else "")
             + ". Bands are drawn only for probabilistic systems; deterministic systems (persistence, seasonal naive, "
-              "raw AROME) have none. Quantiles are marginal per lead, not coherent scenarios.")
+              "raw AROME) have none. Quantiles are marginal per lead, not coherent scenarios."
+            + (" Systems named *exploratory* were run in this session, outside the frozen benchmark."
+               if exploratory else ""))
     path = Path(tempfile.gettempdir()) / f"forecast_{case_id.replace('/', '_')}_{variable}.csv"
     forecast_csv(rows, obs).to_csv(path, index=False)
     return fig, plots.station_map(run.stations(), case["station"]), sc, info, str(path)
@@ -224,29 +270,34 @@ def _exploratory_on_device(obs, case, size, context_days, calendar, allow_downlo
                                 allow_download=allow_download, device=zerogpu.inference_device())
 
 
-def run_exploratory(suite, case_id, variable, systems, band_model, size, context_days, calendar, allow_download):
+def run_exploratory(suite, case_id, size, context_days, calendar, allow_download, pref, extra):
+    """Run once, keep the result for this case in the session, and select it as a system."""
     run = RUNS[suite]
-    _, _, case = case_forecast(run, case_id, variable)
+    _, _, case = case_forecast(run, case_id, "t")
     obs = run.observations()
     obs = obs[obs["station"] == case["station"]]
+    extra = keep_extra_for_case(case_id, extra)
     try:
         from weather_lab.forecast import ensure_checkpoint
 
         # download on CPU first, so a cold 837 MB fetch never consumes the GPU window or quota
         ensure_checkpoint(size, bool(allow_download))
-        extra = _exploratory_on_device(obs, case, size, int(context_days), bool(calendar), bool(allow_download))
-        msg = (f"Exploratory run **outside the frozen benchmark**: {extra['model'].iloc[0]} "
-               f"(`{extra['model_revision'].iloc[0]}`). Not saved, not scored.")
+        frame = _exploratory_on_device(obs, case, size, int(context_days), bool(calendar), bool(allow_download))
     except (PermissionError, ValueError) as e:
-        extra, msg = None, f"⚠️ {e}"
+        return extra, pref, f"⚠️ {e}"
     except Exception as e:  # noqa: BLE001 - e.g. ZeroGPU quota/queue errors raised from the GPU worker
-        extra, msg = None, f"⚠️ exploratory run failed: {type(e).__name__}: {e}"
-    fig, *_ = explore(suite, case_id, variable, systems, band_model, extra)
-    return fig, msg
+        return extra, pref, f"⚠️ exploratory run failed: {type(e).__name__}: {e}"
+    mid = frame["model"].iloc[0]
+    extra = {"case": case_id, "runs": {**extra["runs"], mid: frame}}
+    base = pref if pref is not None else [m for m in run.models if m in DEFAULT_SYSTEMS]
+    pref = base + ([mid] if mid not in base else [])
+    msg = (f"Exploratory run **outside the frozen benchmark**: {mid} (`{frame['model_revision'].iloc[0]}`). "
+           "Not saved, not scored; kept for this case in this session and listed under Systems.")
+    return extra, pref, msg
 
 
 def open_case(suite: str, case_id: str):
-    return (gr.Tabs(selected="explorer"), gr.update(value=suite), *explorer_controls(suite, case_id))
+    return (gr.Tabs(selected="explorer"), *explorer_controls(suite, case_id))
 
 
 # --------------------------------------------------------------------------- layout
@@ -297,13 +348,16 @@ def build() -> gr.Blocks:
         gr.Markdown("# Weather-lab\nShort-range **probabilistic weather forecasting** at French SYNOP "
                     "stations: Mistral's Timestral (zero-shot, no local fine-tuning) against persistence, "
                     "climatology and issued AROME forecasts, scored on frozen case sets.", elem_id="hero")
-        suite_choices = [(SUITES[s], s) for s in RUNS]
+        with gr.Row():
+            suite = gr.Dropdown([(SUITES[s], s) for s in RUNS], value=DEFAULT_SUITE, label="Benchmark",
+                                info="Each benchmark is a frozen set of cases, scored separately and never pooled. "
+                                     "It drives both the scorecard and the forecast explorer.", scale=2)
+            header = gr.HTML()
+        x_pref = gr.State(None)              # preferred explorer systems (None: defaults)
+        x_extra = gr.State(EMPTY_EXTRA)      # exploratory runs of the displayed case, this session only
         with gr.Tabs(selected="scorecard") as tabs:
             # ---------------- scorecard
             with gr.Tab("Benchmark scorecard", id="scorecard"):
-                with gr.Row():
-                    suite = gr.Radio(suite_choices, value=DEFAULT_SUITE, label="Suite (scored separately, never pooled)")
-                header = gr.HTML()
                 with gr.Row():
                     split = gr.Dropdown(label="Split", choices=[])
                     variable = gr.Dropdown(label="Variable", choices=[])
@@ -343,15 +397,13 @@ def build() -> gr.Blocks:
             # ---------------- explorer
             with gr.Tab("Forecast explorer", id="explorer"):
                 with gr.Row():
-                    x_suite = gr.Radio(suite_choices, value=DEFAULT_SUITE, label="Suite")
-                with gr.Row():
                     with gr.Column(scale=1, min_width=280):
                         x_map = gr.Plot(label="Stations")
                         x_station = gr.Dropdown(label="Station", choices=[])
                         x_case = gr.Dropdown(label="Historical forecast origin", choices=[])
                         x_var = gr.Dropdown(label="Variable", choices=[])
                         x_systems = gr.CheckboxGroup(label="Systems", choices=[])
-                        x_band = gr.Dropdown(label="80%/90% bands for", choices=[])
+                        x_band = gr.Dropdown(label="80%/90% bands for", choices=[], value=None)
                     with gr.Column(scale=3):
                         x_plot = gr.Plot(label="Forecast")
                         x_info = gr.Markdown()
@@ -391,25 +443,42 @@ def build() -> gr.Blocks:
             c.input(refresh_cases, [suite, split, variable], case_pick)
 
         x_outputs = [x_plot, x_map, x_scores, x_info, x_dl]
-        x_inputs = [x_suite, x_case, x_var, x_systems, x_band]
-        x_suite.input(explorer_controls, x_suite, [x_station, x_case, x_var, x_systems, x_band]).then(
-            explore, x_inputs, x_outputs)
-        x_station.input(station_changed, [x_suite, x_station], x_case).then(explore, x_inputs, x_outputs)
-        for c in (x_case, x_var, x_systems, x_band):
-            c.input(explore, x_inputs, x_outputs)
-        open_btn.click(open_case, [suite, case_pick], [tabs, x_suite, x_station, x_case, x_var, x_systems, x_band]
-                       ).then(explore, x_inputs, x_outputs)
-        e_btn.click(run_exploratory, x_inputs + [e_size, e_ctx, e_cal, e_dl], [x_plot, e_msg],
-                    concurrency_limit=1)
+        x_inputs = [suite, x_case, x_var, x_systems, x_band, x_extra]
+        sys_inputs = [suite, x_case, x_var, x_pref, x_band, x_extra]
+
+        def explorer_chain(event):
+            """After the case/variable controls change: case-scoped state -> systems -> figure."""
+            return (event.then(keep_extra_for_case, [x_case, x_extra], x_extra)
+                    .then(systems_update, sys_inputs, [x_systems, x_band])
+                    .then(explore, x_inputs, x_outputs))
+
+        explorer_chain(suite.change(scorecard_controls, suite, [split, variable, station, season, header])
+                       .then(scorecard, sc_inputs, sc_outputs)
+                       .then(downloads, suite, [dl_point, dl_prob, dl_manifest])
+                       .then(hardware_note, suite, hw_md)
+                       .then(refresh_cases, [suite, split, variable], case_pick)
+                       .then(explorer_controls, suite, [x_station, x_case, x_var]))
+        explorer_chain(x_station.input(station_changed, [suite, x_station], x_case))
+        x_case.input(keep_extra_for_case, [x_case, x_extra], x_extra).then(
+            systems_update, sys_inputs, [x_systems, x_band]).then(explore, x_inputs, x_outputs)
+        x_var.input(systems_update, sys_inputs, [x_systems, x_band]).then(explore, x_inputs, x_outputs)
+        x_systems.input(update_pref, [suite, x_case, x_var, x_systems, x_pref, x_extra], x_pref).then(
+            systems_update, sys_inputs, [x_systems, x_band]).then(explore, x_inputs, x_outputs)
+        x_band.input(explore, x_inputs, x_outputs)
+        explorer_chain(open_btn.click(open_case, [suite, case_pick], [tabs, x_station, x_case, x_var]))
+        e_btn.click(run_exploratory, [suite, x_case, e_size, e_ctx, e_cal, e_dl, x_pref, x_extra],
+                    [x_extra, x_pref, e_msg], concurrency_limit=1).then(
+            systems_update, sys_inputs, [x_systems, x_band]).then(explore, x_inputs, x_outputs)
 
         def init():
             return (*scorecard_controls(DEFAULT_SUITE),)
 
-        demo.load(init, None, [split, variable, station, season, header]).then(
-            scorecard, sc_inputs, sc_outputs).then(downloads, suite, [dl_point, dl_prob, dl_manifest]).then(
-            hardware_note, suite, hw_md).then(refresh_cases, [suite, split, variable], case_pick).then(
-            explorer_controls, x_suite, [x_station, x_case, x_var, x_systems, x_band]).then(
-            explore, x_inputs, x_outputs)
+        explorer_chain(demo.load(init, None, [split, variable, station, season, header])
+                       .then(scorecard, sc_inputs, sc_outputs)
+                       .then(downloads, suite, [dl_point, dl_prob, dl_manifest])
+                       .then(hardware_note, suite, hw_md)
+                       .then(refresh_cases, [suite, split, variable], case_pick)
+                       .then(explorer_controls, suite, [x_station, x_case, x_var]))
     return demo
 
 

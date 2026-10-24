@@ -66,6 +66,11 @@ models:
   - {id: timestral-28m-mv-cal-arome-archived, kind: timestral, targets: [t, pmer, u, v], calendar: true, arome: archived}
   # v1 behaviour, explicitly labelled: station observations substituted for historical AROME
   - {id: timestral-28m-mv-cal-arome-substobs, kind: timestral, targets: [t, pmer, u, v], calendar: true, arome: substituted_observations}
+  # Larger checkpoint (837 MB), same inputs as the 28M variants above
+  - {id: timestral-209m-mv-cal, kind: timestral, targets: [t, pmer, u, v], calendar: true,
+     checkpoint: mistralai/Timestral-209M, revision: 9874d252ab0aae16f7f7c999f98f98d6ad7d8365}
+  - {id: timestral-209m-mv-cal-arome-archived, kind: timestral, targets: [t, pmer, u, v], calendar: true, arome: archived,
+     checkpoint: mistralai/Timestral-209M, revision: 9874d252ab0aae16f7f7c999f98f98d6ad7d8365}
 
 timestral:
   checkpoint: mistralai/Timestral-28M

@@ -61,6 +61,10 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
 
 **Current deployment** ([ai-testack/weather-lab](https://huggingface.co/spaces/ai-testack/weather-lab)):
 
+- **Explorer behaviour.**
+  - One *Benchmark* selector drives the scorecard and the explorer.
+  - *Systems* lists only the systems that forecast the selected variable (raw AROME has no wind) and remembers your choices across variables, cases and benchmarks.
+  - Exploratory runs stay in the session for the displayed case and appear as toggleable systems, which can also carry the bands. They are dropped when you move to another case.
 - **Snapshot.** The data snapshot lives in the public Storage Bucket [`ai-testack/weather-lab-storage`](https://huggingface.co/buckets/ai-testack/weather-lab-storage). `configs/bootstrap.yaml` pins it as `hf://buckets/ai-testack/weather-lab-storage/<id>.tar.gz` with its SHA-256.
   - In the Space the bucket is attached at `/data`, so `bootstrap` reads the file from the mount. Elsewhere (locally, CI) it downloads it through the Hub API. Both paths verify the checksum.
   - Buckets are mutable and unversioned: never overwrite a snapshot file. Upload a new id (`weather-lab snapshot build --id …`, then `hf buckets cp dist/snapshot/<id>.tar.gz hf://buckets/ai-testack/weather-lab-storage/`) and update the pinned URL and SHA-256.
@@ -118,6 +122,8 @@ Selection rule, declared before running: lowest mean temperature pinball; ties w
 | (A) Timestral mv + calendar | no AROME row | 1.84 | 2.84 | 3.05 | 2.52 | 0.86 | 0.73 | 3.69 | 0.76 |
 | (B) + future AROME | missing | 1.83 | 2.83 | 3.05 | 2.51 | 0.86 | 0.73 | 3.69 | 0.76 |
 | (C) + future AROME | archived AROME forecasts (18% coverage) | 1.52 | 2.48 | 2.69 | 2.19 | 0.75 | 0.81 | 2.73 | 0.88 |
+| Timestral-**209M** mv + calendar | no AROME row | 1.80 | 2.71 | 2.88 | 2.42 | 0.83 | 0.75 | 3.76 | 0.78 |
+| Timestral-**209M** (C) | archived AROME forecasts | 1.35 | 2.00 | 2.15 | 1.90 | 0.66 | 0.84 | 1.91 | 0.92 |
 | + future AROME (v1 behaviour) | **substituted observations** | 1.12 | 1.60 | 1.81 | 1.51 | 0.52 | 0.67 | 0.67 | 0.56 |
 
 How to read this:
@@ -125,8 +131,9 @@ How to read this:
 1. **Raw AROME is the best point forecast** in this October sample.
 2. The conditioned variant from v1 (1.51 °C) uses station observations as the historical AROME segment. That is a different input from AROME, now labelled explicitly. Its intervals are over-confident.
 3. **(B) future-only AROME has no effect.** A +5 °C change of the future AROME temperature moves outputs by at most 1.2×10⁻⁴. The values do reach the network, but the pinned model's masking treats a covariate row with no observed history as not yet started, so it cannot influence a single-block forecast. Traced in [docs/diagnostics/arome_covariates.md](docs/diagnostics/arome_covariates.md).
-4. **(C) honest archived history** helps (2.52 → 2.19 °C), increasingly so as history coverage grows (0% → 37% across origins). It remains well behind raw AROME. Its sensitivity to the future covariate can exceed the size of the perturbation at extreme quantiles; this is recorded as an observed instability.
-5. **Availability caveat.** Run availability, and the vintage of archived history, rest on the archive's `Last-Modified` timestamps. The provider documents no publication-time semantics, so these are **retrospective results under an archive-timestamp assumption** ([evidence](docs/availability_evidence.md)). 12 days and 6 two-day blocks do not justify uncertainty intervals or seasonal conclusions.
+4. **Timestral-209M** improves on 28M most clearly with archived AROME history (t 2.19 → 1.90 °C, MSLP 2.73 → 1.91 hPa), but stays behind raw AROME. It costs about 5–7× more CPU time per case (≈ 215–240 ms vs 34–54 ms) and about 1.8 GB peak memory.
+5. **(C) honest archived history** helps (2.52 → 2.19 °C), increasingly so as history coverage grows (0% → 37% across origins). It remains well behind raw AROME. Its sensitivity to the future covariate can exceed the size of the perturbation at extreme quantiles; this is recorded as an observed instability.
+6. **Availability caveat.** Run availability, and the vintage of archived history, rest on the archive's `Last-Modified` timestamps. The provider documents no publication-time semantics, so these are **retrospective results under an archive-timestamp assumption** ([evidence](docs/availability_evidence.md)). 12 days and 6 two-day blocks do not justify uncertainty intervals or seasonal conclusions.
 
 ### Historical smoke suite (unchanged, integration check)
 
@@ -137,6 +144,9 @@ Test 2024, temperature, n = 761:
 | persistence | 1.53 | 2.60 | 3.14 | 3.21 | – | – |
 | climatology (fit 2022) | 2.65 | 3.08 | 2.87 | 3.17 | 1.09 | 0.69 |
 | Timestral-28M mv + calendar (30 d) | 1.11 | 2.32 | 2.35 | 2.15 | 0.74 | 0.82 |
+| Timestral-209M mv + calendar (30 d) | 1.02 | 2.22 | 2.20 | 2.04 | 0.71 | 0.82 |
+
+The 209M rows are integration checks on the same frozen cases. The size comparison that should inform model choice is the 2023 validation run at the frozen 90-day context, which has not been run yet (see the roadmap).
 
 ### Reproducibility checks performed (2026-10-24)
 

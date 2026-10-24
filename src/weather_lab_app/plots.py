@@ -76,23 +76,20 @@ def coverage(prob: pd.DataFrame) -> go.Figure:
 
 
 def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, variable: str, systems: list[str],
-                    band_model: str | None, history_days: int = 5, extra: pd.DataFrame | None = None) -> go.Figure:
+                    band_model: str | None, history_days: int = 5) -> go.Figure:
+    """Observations, selected systems (saved and exploratory) and nested bands for one probabilistic system."""
     name, unit = VARIABLES[variable]
     origin = pd.Timestamp(case["origin"])
     fig = go.Figure()
     sel = rows[rows["model"].isin(systems)]
-    band_sources = [(band_model, sel[sel["model"] == band_model])] if band_model else []
-    if extra is not None and not extra.empty:
-        band_sources.append((extra["model"].iloc[0], extra))
-    for model, b in band_sources:
-        if b.empty or b["output_type"].iloc[0] != "quantiles":
-            continue  # deterministic systems never get bands
-        color, _ = style(model)
+    b = sel[sel["model"] == band_model] if band_model else sel.iloc[:0]
+    if len(b) and b["output_type"].iloc[0] == "quantiles":   # deterministic systems never get bands
+        color, _ = style(band_model)
         for lo, hi, alpha, label in ((0.05, 0.95, 0.12, "90%"), (0.1, 0.9, 0.22, "80%")):
             fig.add_trace(go.Scatter(
                 x=list(b["valid_time"]) + list(b["valid_time"][::-1]),
                 y=list(b[qcol(hi)]) + list(b[qcol(lo)][::-1]), fill="toself", line={"width": 0},
-                fillcolor=_rgba(color, alpha), name=f"{model} {label} interval", hoverinfo="skip"))
+                fillcolor=_rgba(color, alpha), name=f"{band_model} {label} interval", hoverinfo="skip"))
     hist = obs[(obs["time"] > origin - pd.Timedelta(days=history_days)) & (obs["time"] <= origin)]
     fut = obs[(obs["time"] > origin) & (obs["time"] <= rows["valid_time"].max())] if len(rows) else obs.iloc[:0]
     fig.add_trace(go.Scatter(x=hist["time"], y=hist["observed"], name="observed (input history)", mode="lines",
@@ -100,22 +97,22 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
     fig.add_trace(go.Scatter(x=fut["time"], y=fut["observed"], name="observed (verification, not an input)",
                              mode="markers", marker={"color": INK, "size": 8, "symbol": "circle-open",
                                                      "line": {"width": 2}}))
-    for model, g in sel.groupby("model", sort=False):
+    for model in [m for m in systems if m in set(sel["model"])]:   # legend follows the Systems order
+        g = sel[sel["model"] == model]
         color, dash = style(model)
         fig.add_trace(go.Scatter(x=g["valid_time"], y=g["point"], name=model, mode="lines+markers",
                                  line={"color": color, "dash": dash, "width": 2}, marker={"size": 6}))
-    if extra is not None and not extra.empty:
-        color, dash = style("exploratory")
-        fig.add_trace(go.Scatter(x=extra["valid_time"], y=extra["point"], name=extra["model"].iloc[0],
-                                 mode="lines+markers", line={"color": color, "dash": dash, "width": 2}))
     fig.add_vline(x=origin, line={"color": INK2, "width": 1, "dash": "dash"})
     note = f"origin {origin:%Y-%m-%d %H:%M} UTC · historical replay"
     if isinstance(case.get("arome_run"), str):
         note += f" · AROME run {case['arome_run'][:16]}Z, in archive {case['arome_available_at'][11:16]}Z"
-    fig.add_annotation(x=origin, y=1.06, yref="paper", text=note, showarrow=False, xanchor="left",
-                       font={"size": 11, "color": INK2})
+    fig.add_annotation(x=0, xref="paper", y=1.07, yref="paper", text=note, showarrow=False, xanchor="left",
+                       font={"size": 11, "color": INK2})   # paper-anchored: never clipped, never stretches the axis
     fig.update_yaxes(title=f"{name} ({unit})")
-    fig.update_xaxes(title="valid time (UTC)")
+    # explicit range from the plotted data only
+    end = rows["valid_time"].max() if len(rows) else origin
+    fig.update_xaxes(title="valid time (UTC)", range=[origin - pd.Timedelta(days=history_days),
+                                                     pd.Timestamp(end) + pd.Timedelta(hours=3)])
     return _layout(fig, f"{station_label(case['station'])} · {name}", height=520)
 
 

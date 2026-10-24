@@ -38,6 +38,23 @@ def environment_key(env: dict) -> str:
     return f"torch-{env['torch']}/{plat}-{env['machine']}"
 
 
+def systems_key(models: list[dict]) -> str:
+    """Score files depend on which systems were run: hash the configured model list."""
+    import json
+
+    from weather_lab.common import sha256_text
+
+    return "systems-" + sha256_text(json.dumps(models, sort_keys=True))[:12]
+
+
+def reference_key(run_dir: Path) -> str:
+    """`<environment>|<systems>` for a saved run (its run.json environment and config.yaml models)."""
+    from weather_lab.common import load_config
+
+    env = environment_key(read_json(run_dir / "run.json")["environment"])
+    return f"{env}|{systems_key(load_config(run_dir / 'config.yaml')['models'])}"
+
+
 def _score_references(spec: dict) -> dict[str, dict]:
     """`expected_scores` as {environment key: {file: sha256}} (legacy flat specs are converted)."""
     exp = spec.get("expected_scores") or {}
@@ -57,7 +74,7 @@ def add_score_reference(cfg: Config, run_dir: Path, log=print) -> str:
     legacy = next(iter(refs)) if "reference_run" in spec else None
     if legacy is not None:   # fold the legacy single reference into the per-environment map
         spec.setdefault("reference_runs", {})[legacy] = spec.pop("reference_run")
-    key = environment_key(run["environment"])
+    key = reference_key(run_dir)
     refs[key] = {f: sha256_file(run_dir / f) for f in SCORE_FILES}
     spec.pop("expected_scores_environment", None)
     spec["expected_scores"] = refs
@@ -92,7 +109,7 @@ def freeze_spec(cfg: Config, run_dir: Path | None = None, note: str | None = Non
         spec["arome_extract_sha256"] = m["arome"]["sha256"]
     if run_dir is not None:
         run = read_json(run_dir / "run.json")
-        key = environment_key(run["environment"])
+        key = reference_key(run_dir)
         spec["reference_runs"] = {key: run["run_id"]}
         spec["expected_scores"] = {key: {f: sha256_file(run_dir / f) for f in SCORE_FILES}}
     spec["written_at"] = now_utc()
@@ -124,11 +141,10 @@ def check_manifest(cfg: Config, manifest: dict) -> None:
 def check_scores(cfg: Config, run_dir: Path) -> dict:
     """Exact comparison with the reference recorded for the run's environment.
 
-    Returns {file: bool}, or {} when the spec has no reference for that environment (the result
+    Returns {file: bool}, or {} when the spec has no reference for that environment and system set (the result
     is then unverified, not failed: floating-point results legitimately differ across torch
     versions and platforms at the 1e-7 level).
     """
     spec = load_spec(cfg) or {}
-    key = environment_key(read_json(run_dir / "run.json")["environment"])
-    ref = _score_references(spec).get(key, {})
+    ref = _score_references(spec).get(reference_key(run_dir), {})
     return {f: sha256_file(run_dir / f) == h for f, h in ref.items()}

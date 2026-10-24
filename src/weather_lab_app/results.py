@@ -12,13 +12,23 @@ from weather_lab.common import ROOT, STATION_NAMES, read_json
 from weather_lab.forecast import QUANTILE_LEVELS, qcol
 
 SUITES = {
-    "synop-historical-v1": "Historical observations (SYNOP 2023-2024)",
-    "arome-issued-v2": "Issued AROME comparison v2 (Oct 2026, explicit historical AROME)",
-    "arome-issued-v1": "Issued AROME comparison v1 (earlier version, substituted history)",
+    "synop-historical-v1": "Station history · 2023–24 (SYNOP smoke)",
+    "arome-issued-v2": "AROME comparison · Oct 2026",
+    "arome-issued-v1": "AROME comparison · Oct 2026 (v1, superseded)",
+}
+SUITE_DESCRIPTIONS = {
+    "synop-historical-v1": "Historical observation suite: 2 stations, semi-monthly origins in 2023 (validation) and "
+                           "2024 (test).",
+    "arome-issued-v2": "Issued AROME runs from the 14-day archive: 5 stations, 12 daily origins; historical AROME "
+                       "input explicit per system.",
+    "arome-issued-v1": "Earlier version of the AROME comparison, kept unchanged: its conditioned system substituted "
+                       "station observations for historical AROME.",
 }
 # Fixed entity -> colour (reference categorical palette, fixed order; colour follows the system).
+# 209M variants share their 28M counterpart's hue with a dashed line as secondary encoding.
 MODEL_STYLE = {
     "timestral-28m-mv-cal": ("#2a78d6", "solid"),
+    "timestral-209m-mv-cal": ("#2a78d6", "dash"),
     "arome-raw": ("#eb6834", "solid"),
     "timestral-28m-mv-cal-arome": ("#1baf7a", "solid"),
     "climatology": ("#eda100", "dot"),
@@ -28,13 +38,19 @@ MODEL_STYLE = {
     "timestral-28m-t": ("#e34948", "solid"),
     "timestral-28m-mv-cal-arome-nanpast": ("#8a8984", "longdash"),
     "timestral-28m-mv-cal-arome-archived": ("#1baf7a", "solid"),
+    "timestral-209m-mv-cal-arome-archived": ("#1baf7a", "dash"),
     "timestral-28m-mv-cal-arome-futureonly": ("#6250d6", "dash"),
     "timestral-28m-mv-cal-arome-substobs": ("#e34948", "dot"),
 }
 EXPLORATORY_STYLE = ("#52514e", "dot")
 
 
+EXPLORATORY_SIZE_STYLE = {"5M": ("#a3a29c", "dot"), "28M": ("#6b6a65", "dash"), "209M": ("#3d3c39", "longdashdot")}
+
+
 def style(model: str) -> tuple[str, str]:
+    if model.startswith("exploratory"):   # session-only runs: neutral greys, by checkpoint size
+        return next((v for k, v in EXPLORATORY_SIZE_STYLE.items() if f"-{k} " in model), EXPLORATORY_STYLE)
     return MODEL_STYLE.get(model, EXPLORATORY_STYLE)
 
 
