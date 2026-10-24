@@ -72,6 +72,10 @@ The process maximum includes data loading and scoring. The "peak RSS after" colu
 
 Downloads for this experiment: SYNOP 2018–2021, 25.8 MB. 2022–2023 were already cached, and no new weights were needed.
 
+## Environment check
+
+The decision was made with torch 2.14.1. After the pin to torch 2.13.0 (needed for ZeroGPU), all three candidates were re-run on the same frozen cases. The primary values were identical to five decimals (0.73551 / 0.65989 / 0.64607) and the selection is unchanged (`experiments/context_selection_torch-2.13.0/`).
+
 ## Caveats
 
 - This is one checkpoint and one variant: 28M, multivariate + calendar. The 209M comparison has not been run.

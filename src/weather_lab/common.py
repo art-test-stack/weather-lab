@@ -119,6 +119,7 @@ def environment() -> dict[str, Any]:
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "machine": platform.machine(),
+        "sys_platform": sys.platform,
         "processor": platform.processor(),
         "torch": torch.__version__,
         "torch_threads": torch.get_num_threads(),

@@ -15,9 +15,16 @@ source_files:
   synop_2023.csv.gz: 2cdcc76c55efedf983926878844b118a8639ced9489ae90ea16cebceef945be2
   synop_2024.csv.gz: 96741aa63452f310379970f8966561d191e39d1c42c80d6368823a3f20d12d90
 arome_extract_sha256: ef21d77eeb190c719ca0d80175e6e94aaf090389d1f8d3978dd7f83c1dcfa1a1
-reference_run: smoke-20261024T193039-756b4f03
 expected_scores:
-  metrics_point.csv: 65ddd4d7a3528841bd1b0941e062f870242117199beea4e457df02b75c370177
-  metrics_probabilistic.csv: 2e25dadc80c2e0cf9947f23d24a02a2351836e7adc1575935c8ced1a1bd79c4a
-  availability.csv: 85fb6b8de591d36c0a67e1aee523316c886a6e1119a444edbc2ce19676309edf
+  torch-2.14.1/darwin-arm64:
+    metrics_point.csv: 65ddd4d7a3528841bd1b0941e062f870242117199beea4e457df02b75c370177
+    metrics_probabilistic.csv: 2e25dadc80c2e0cf9947f23d24a02a2351836e7adc1575935c8ced1a1bd79c4a
+    availability.csv: 85fb6b8de591d36c0a67e1aee523316c886a6e1119a444edbc2ce19676309edf
+  torch-2.13.0/darwin-arm64:
+    metrics_point.csv: 4a22a21c6e2609736c5fd5be32d525fe226fefeb62fd8ede82095f3a36e9dbb2
+    metrics_probabilistic.csv: 72affcab11eb7b3cf3070225d4a0fdb2f71d01fcf45264636f9c0f0d2c1f80c9
+    availability.csv: 85fb6b8de591d36c0a67e1aee523316c886a6e1119a444edbc2ce19676309edf
 written_at: '2026-10-24T19:44:03Z'
+reference_runs:
+  torch-2.14.1/darwin-arm64: smoke-20261024T193039-756b4f03
+  torch-2.13.0/darwin-arm64: smoke-20261024T213351-756b4f03

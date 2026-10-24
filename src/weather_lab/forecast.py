@@ -210,9 +210,10 @@ _MODEL_CACHE: dict[tuple[str, str], tuple[object, dict]] = {}
 _MODEL_LOCK = threading.Lock()
 
 
-def load_timestral(checkpoint: str, revision: str, local_files_only: bool = False) -> tuple[object, dict]:
+def load_timestral(checkpoint: str, revision: str, local_files_only: bool = False,
+                   device: str = "cpu") -> tuple[object, dict]:
     """Cached `TimestralForecaster.from_pretrained`; returns (forecaster, load-timing info)."""
-    key = (checkpoint, revision)
+    key = (checkpoint, revision, device)
     with _MODEL_LOCK:
         if key not in _MODEL_CACHE:
             import torch
@@ -221,10 +222,10 @@ def load_timestral(checkpoint: str, revision: str, local_files_only: bool = Fals
 
             cached = isinstance(try_to_load_from_cache(checkpoint, "model.safetensors", revision=revision), str)
             t0 = time.perf_counter()
-            fc = TimestralForecaster.from_pretrained(checkpoint, device="cpu", revision=revision,
+            fc = TimestralForecaster.from_pretrained(checkpoint, device=device, revision=revision,
                                                      local_files_only=local_files_only)
             fc.model.eval()
-            info = {"first_load_s": round(time.perf_counter() - t0, 3), "weights_were_cached": cached,
+            info = {"first_load_s": round(time.perf_counter() - t0, 3), "weights_were_cached": cached, "device": device,
                     "torch_threads": torch.get_num_threads(),
                     "n_parameters": int(sum(p.numel() for p in fc.model.parameters())),
                     "supports_known_covariates": bool(fc.supports_known_covariates),
@@ -270,13 +271,13 @@ class Timestral(Adapter):
 
     def __init__(self, id: str, variables: list[str], targets: list[str], checkpoint: str, revision: str,
                  context_days: int = 30, calendar: bool = False, arome: str | None = None,
-                 arome_fields: list[str] | None = None, batch_size: int = 32, **p):
+                 arome_fields: list[str] | None = None, batch_size: int = 32, device: str = "cpu", **p):
         super().__init__(id, targets, calendar=calendar, arome=arome, context_days=context_days,
                          checkpoint=checkpoint, **p)
         self.checkpoint, self.revision = checkpoint, revision
         self.context_days, self.calendar, self.arome_mode = context_days, calendar, arome
         self.arome_fields = [f for f in (arome_fields or []) if f in targets]
-        self.batch_size = batch_size
+        self.batch_size, self.device = batch_size, device
         inputs = {"history"} | ({"calendar"} if calendar else set()) | ({"arome"} if arome else set())
         self.inputs = frozenset(inputs)
         if arome is not None and arome not in self.AROME_MODES:
@@ -319,7 +320,7 @@ class Timestral(Adapter):
     def predict(self, batch: CaseBatch) -> ForecastBatch:
         import torch
 
-        fc, load_info = load_timestral(self.checkpoint, self.revision)
+        fc, load_info = load_timestral(self.checkpoint, self.revision, device=self.device)
         t_ctx = self.context_steps(batch.step_hours)
         idx = [batch.variables.index(v) for v in self.variables]
         ctx, known = self.build_inputs(batch)
@@ -366,7 +367,7 @@ _EXPLORE_SEMAPHORE = threading.Semaphore(1)  # cap concurrent CPU inference requ
 
 def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str], size: str, context_days: int,
                          calendar: bool, horizon_steps: int = 16, step_hours: int = 3,
-                         allow_download: bool = False) -> pd.DataFrame:
+                         allow_download: bool = False, device: str = "cpu") -> pd.DataFrame:
     """One-off Timestral run on a single case, OUTSIDE the frozen benchmark (never saved to runs/).
 
     `obs` holds the station's observation window; only rows at or before the origin are used.
@@ -385,9 +386,9 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
                       hist.to_numpy(dtype=np.float32).T[None], np.array([origin.to_datetime64()]),
                       np.array([[(origin + (k + 1) * step).to_datetime64() for k in range(horizon_steps)]]),
                       step_hours)
-    model = Timestral(f"exploratory {size} ctx{context_days}d{' +cal' if calendar else ''}", variables,
+    model = Timestral(f"exploratory {size} ctx{context_days}d{' +cal' if calendar else ''} [{device}]", variables,
                       targets=variables, checkpoint=checkpoint, revision=revision, context_days=context_days,
-                      calendar=calendar, batch_size=1)
+                      calendar=calendar, batch_size=1, device=device)
     with _EXPLORE_SEMAPHORE:
         fb = model.predict(batch)
     fb.validate(batch)

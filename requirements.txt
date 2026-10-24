@@ -59,7 +59,9 @@ fsspec==2026.9.0
     #   huggingface-hub
     #   torch
 gradio==6.30.0
-    # via weather-lab
+    # via
+    #   spaces
+    #   weather-lab
 gradio-client==2.7.2
     # via
     #   gradio
@@ -84,6 +86,7 @@ httpx==0.28.1
     #   gradio
     #   gradio-client
     #   safehttpx
+    #   spaces
 httpx2==2.16.0
     # via huggingface-hub
 httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'
@@ -137,7 +140,7 @@ nvidia-cuda-nvrtc==13.0.88 ; sys_platform == 'linux'
     #   nvidia-cublas
 nvidia-cuda-runtime==13.0.96 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
-nvidia-cudnn-cu13==9.24.0.43 ; sys_platform == 'linux'
+nvidia-cudnn-cu13==9.20.0.48 ; sys_platform == 'linux'
     # via torch
 nvidia-cufft==12.0.0.61 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via cuda-toolkit
@@ -153,7 +156,7 @@ nvidia-cusparse==12.6.3.3 ; (platform_machine == 'aarch64' and sys_platform == '
     #   nvidia-cusolver
 nvidia-cusparselt-cu13==0.8.1 ; sys_platform == 'linux'
     # via torch
-nvidia-nccl-cu13==2.30.7 ; sys_platform == 'linux'
+nvidia-nccl-cu13==2.29.7 ; sys_platform == 'linux'
     # via torch
 nvidia-nvjitlink==13.4.92 ; (platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')
     # via
@@ -175,6 +178,7 @@ packaging==26.3
     #   gradio-client
     #   huggingface-hub
     #   plotly
+    #   spaces
 pandas==3.1.0
     # via
     #   gradio
@@ -191,6 +195,7 @@ pydantic==2.14.1
     # via
     #   fastapi
     #   gradio
+    #   spaces
 pydantic-core==2.50.1
     # via pydantic
 pydub==0.25.1
@@ -209,7 +214,9 @@ pyyaml==6.0.3
     #   huggingface-hub
     #   weather-lab
 requests==2.34.2
-    # via weather-lab
+    # via
+    #   spaces
+    #   weather-lab
 rich==15.0.0
     # via typer
 safehttpx==0.1.7
@@ -224,6 +231,8 @@ shellingham==1.5.4
     # via typer
 six==1.17.0
     # via python-dateutil
+spaces==0.51.3
+    # via weather-lab
 starlette==1.10.0
     # via
     #   fastapi
@@ -234,13 +243,13 @@ timestral @ git+https://github.com/mistralai/timestral@a534bdbd244d64f3d9d743f46
     # via weather-lab
 tomlkit==0.14.0
     # via gradio
-torch==2.14.1
+torch==2.13.0
     # via
     #   timestral
     #   weather-lab
 tqdm==4.70.1
     # via huggingface-hub
-triton==3.8.0 ; sys_platform == 'linux'
+triton==3.7.1 ; sys_platform == 'linux'
     # via torch
 truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
@@ -261,6 +270,7 @@ typing-extensions==4.16.0
     #   opentelemetry-api
     #   pydantic
     #   pydantic-core
+    #   spaces
     #   starlette
     #   torch
     #   typing-inspection

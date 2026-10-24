@@ -66,10 +66,14 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
   - Buckets are mutable and unversioned: never overwrite a snapshot file. Upload a new id (`weather-lab snapshot build --id …`, then `hf buckets cp dist/snapshot/<id>.tar.gz hf://buckets/ai-testack/weather-lab-storage/`) and update the pinned URL and SHA-256.
   - The app only reads the bucket, so attaching it **read-only** is safer.
   - The installed artifacts go to the Space's ephemeral disk (`/home/user/app/data`). They are re-extracted from the mounted snapshot at each restart, which takes seconds.
-- **Hardware: use CPU Basic.**
-  - The app runs CPU inference only, with no `@spaces.GPU`.
-  - ZeroGPU accepts only torch 2.8.0–2.13.0, and the lockfile pins 2.14.1.
-  - torch 2.13.0 was tested: forecasts differ by at most 1.9×10⁻⁶ and scores by at most 4×10⁻⁷ (float rounding). That is enough to break the specs' exact score hashes, so moving to ZeroGPU would mean re-freezing those hashes under the new environment.
+- **Hardware: ZeroGPU** (`zero-a10g`).
+  - torch is pinned to **2.13.0**, the newest version ZeroGPU supports (2.8.0–2.13.0), with Python 3.12.12.
+  - `src/weather_lab_app/zerogpu.py` imports `spaces` before torch/gradio, as ZeroGPU requires. Only the exploratory forecast runs in a `@spaces.GPU(duration=60)` function: it uses CUDA when a GPU is attached and CPU elsewhere, and its label shows the device.
+  - Saved benchmark results are only replayed, never recomputed in the app, and visitors' GPU quota is used only by exploratory runs.
+- **torch 2.14.1 → 2.13.0.** This changes forecasts by at most 1.9×10⁻⁶ and scores by at most 4×10⁻⁷.
+  - The specs now store exact score hashes **per environment** (torch version, OS, CPU). The torch-2.14.1 references are kept, and torch-2.13.0 references were added for the three app suites. An official-mode run in an environment with no reference is reported as unverified rather than failed.
+  - The context-length decision was re-run under torch 2.13.0 and is unchanged (identical pinball values to five decimals).
+  - Saved runs in the snapshot were produced with torch 2.14.1, as recorded in each `run.json`.
 - **GitHub.** The workflow uses the environment `huggingface-space`. GitHub creates it automatically on first run, and repository-level secrets and variables (`HF_TOKEN`, `HF_SPACE_ID`) are available inside it. Moving `HF_TOKEN` into the environment and adding a required reviewer or a tag-only deployment rule restricts who can trigger an upload with that write token.
 
 ## Suites and versions

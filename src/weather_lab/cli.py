@@ -64,6 +64,12 @@ def cmd_spec_freeze(args) -> None:
     freeze_spec(load_config(args.config), Path(args.run_dir) if args.run_dir else None, args.note)
 
 
+def cmd_spec_add_reference(args) -> None:
+    from weather_lab.specs import add_score_reference
+
+    add_score_reference(load_config(args.config), Path(args.run_dir))
+
+
 def cmd_snapshot_build(args) -> None:
     from weather_lab.bootstrap import build_snapshot
 
@@ -163,6 +169,10 @@ def main(argv: list[str] | None = None) -> None:
     sf.add_argument("--run-dir", help="reference run whose score files a re-evaluation must reproduce")
     sf.add_argument("--note")
     sf.set_defaults(func=cmd_spec_freeze)
+    sa = ssub.add_parser("add-reference", help="record a run's exact score hashes for its torch/platform")
+    sa.add_argument("--config", required=True)
+    sa.add_argument("--run-dir", required=True)
+    sa.set_defaults(func=cmd_spec_add_reference)
     snap = sub.add_parser("snapshot", help="immutable data snapshot for snapshot-mode bootstrap")
     snsub = snap.add_subparsers(dest="snapshot_command", required=True)
     sb = snsub.add_parser("build")

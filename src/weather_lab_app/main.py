@@ -7,6 +7,8 @@ panel runs a single labelled Timestral forecast outside the frozen benchmark.
 
 from __future__ import annotations
 
+from weather_lab_app import zerogpu  # noqa: I001 - must precede torch/gradio on ZeroGPU Spaces
+
 import sys
 import tempfile
 from pathlib import Path
@@ -213,20 +215,28 @@ def explore(suite, case_id, variable, systems, band_model, extra=None):
     return fig, plots.station_map(run.stations(), case["station"]), sc, info, str(path)
 
 
-def run_exploratory(suite, case_id, variable, systems, band_model, size, context_days, calendar, allow_download):
+@zerogpu.gpu(duration=60)
+def _exploratory_on_device(obs, case, size, context_days, calendar, allow_download):
+    """One labelled Timestral run; on ZeroGPU this function holds a GPU for its duration."""
     from weather_lab.forecast import exploratory_forecast
 
+    return exploratory_forecast(obs, case, ["t", "pmer", "u", "v"], size, context_days, calendar,
+                                allow_download=allow_download, device=zerogpu.inference_device())
+
+
+def run_exploratory(suite, case_id, variable, systems, band_model, size, context_days, calendar, allow_download):
     run = RUNS[suite]
     _, _, case = case_forecast(run, case_id, variable)
     obs = run.observations()
     obs = obs[obs["station"] == case["station"]]
     try:
-        extra = exploratory_forecast(obs, case, ["t", "pmer", "u", "v"], size, int(context_days), bool(calendar),
-                                     allow_download=bool(allow_download))
+        extra = _exploratory_on_device(obs, case, size, int(context_days), bool(calendar), bool(allow_download))
         msg = (f"Exploratory run **outside the frozen benchmark**: {extra['model'].iloc[0]} "
                f"(`{extra['model_revision'].iloc[0]}`). Not saved, not scored.")
     except (PermissionError, ValueError) as e:
         extra, msg = None, f"⚠️ {e}"
+    except Exception as e:  # noqa: BLE001 - e.g. ZeroGPU quota/queue errors raised from the GPU worker
+        extra, msg = None, f"⚠️ exploratory run failed: {type(e).__name__}: {e}"
     fig, *_ = explore(suite, case_id, variable, systems, band_model, extra)
     return fig, msg
 

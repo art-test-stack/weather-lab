@@ -15,7 +15,8 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
     "timestral",
-    "torch>=2.4",
+    "spaces>=0.51.3",
+    "torch==2.13.0",  # ZeroGPU supports torch 2.8.0-2.13.0 (Space hardware: zero-a10g)
 ]
 
 [project.scripts]

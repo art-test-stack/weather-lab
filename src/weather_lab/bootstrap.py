@@ -321,7 +321,8 @@ def official_suite(cfg: Config, progress: Progress, lo: float, hi: float, log=pr
         if ok and not all(ok.values()):
             raise BootstrapError("reproduce", f"scores differ from the spec: {ok}", retryable=False)
         export_example([run_dir], log)
-        result.update(results="recomputed", scores_match_spec=ok)
+        result.update(results="recomputed",
+                      scores_match_spec=ok or "unverified: no exact reference for this torch/platform")
     progress(hi, f"{cfg.suite}: ready")
     return result
 

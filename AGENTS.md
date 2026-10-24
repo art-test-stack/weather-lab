@@ -27,8 +27,9 @@ uv run weather-lab-app            # explorer (weather-lab-app build-space: Space
 ## Conventions
 
 - Python 3.12 with `uv`. Dependencies are pinned in `uv.lock`. Regenerate `requirements.txt` with `uv export --no-dev --no-hashes --no-emit-project -o requirements.txt` whenever `uv.lock` changes.
+- torch is pinned to 2.13.0 for ZeroGPU (supported 2.8.0–2.13.0); after changing torch, add score references with `weather-lab spec add-reference` (exact hashes are per torch/OS/CPU).
 - Timestral is pinned to commit `a534bdb` and the checkpoint revisions in `configs/*.yaml` / `forecast.CHECKPOINTS`. Bump them deliberately and record the change in `docs/sources.md`.
 - Bulk data (`data/raw`, `data/processed`), `runs/`, `data/examples/*/`, `data/evidence/`, `dist/` and weights are git-ignored. Refresh the offline replay with `weather-lab export-example`, then publish it with `weather-lab snapshot build` (record the URL + SHA-256 in `configs/bootstrap.yaml`).
-- Keep scientific logic (data, suites, models, evaluation, setup) in `src/weather_lab/`. The app and deployment live in `src/weather_lab_app/`, which may import `weather_lab`, never the reverse. UI callbacks only read saved results. The exploratory panel never writes to `runs/`.
+- Keep scientific logic (data, suites, models, evaluation, setup) in `src/weather_lab/`. The app and deployment live in `src/weather_lab_app/`, which may import `weather_lab`, never the reverse. UI callbacks only read saved results. On ZeroGPU only the exploratory forecast may hold a GPU (`zerogpu.gpu`); import `weather_lab_app.zerogpu` before torch/gradio. The exploratory panel never writes to `runs/`.
 - Station ids are 5-character strings. Quote them in YAML.
 - Download budget: about 500 MiB for initialization. Report needs that exceed it instead of fetching silently.
