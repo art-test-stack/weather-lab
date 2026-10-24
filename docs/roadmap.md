@@ -4,19 +4,17 @@ Each step keeps the frozen suites and adds a **new suite version** whenever date
 
 ## 1. Complete the historical benchmark
 
-- Fetch SYNOP 2018–2024 (about 7 MB per year) and run `configs/benchmark.yaml`: daily 00 UTC origins, five stations, baselines fitted on 2018–2022.
-- Choose the model and context **on validation 2023 only**: 28M vs 209M (837 MB, add as another `timestral` model entry), and context lengths of 7, 30 and 90 days via `context_days`. Freeze the choice, then score test 2024 once.
-- Report temporal block-bootstrap intervals for paired differences. With daily origins, set the block length from the autocorrelation of the paired loss differences. Two days is the floor imposed by the 48 h horizon overlap.
-- Keep the smoke results labelled as integration checks.
-
-**Smallest next experiment:** run the validation half of `benchmark.yaml` with 28M at 7/30/90-day context. That needs about 35 MB of SYNOP downloads and a few minutes of CPU.
+- **Done (2026-10-24): context-length validation on 2023.** 90 days was selected under the pre-declared rule; see `docs/experiments/context_length_2023.md` and `configs/frozen/context-selection-2023.yaml`.
+- **Next, smallest:** run `configs/benchmark_test_frozen.yaml` once, on 2024 test, with the frozen 90-day context. This needs SYNOP 2024 (already part of the smoke data) and about 3 CPU minutes per 1,800 cases.
+- Run 28M vs 209M on 2023 validation with the frozen context before any further test run. That needs the 837 MB checkpoint.
+- Report block-bootstrap intervals for paired differences (implemented; 182 blocks for daily 2023 origins).
 
 ## 2. Extend the AROME suite
 
 - The public archive keeps only 14 days, so it cannot give multi-year access. Options:
   - **prospective collection**: a daily job running `weather-lab data fetch --config configs/arome_smoke.yaml` with rolling dates, at about 22 MB per run for T2m + MSLP;
   - a longer issued-forecast archive obtained from Météo-France.
-- Freeze `arome-issued-v2` spanning at least one year, so it includes seasons and enough warm-tail and windstorm cases. Only runs whose files were available at each origin qualify.
+- Freeze a new AROME suite (`arome-issued-r<first>-<last>` via `weather-lab arome refresh-suite`, or a multi-month version) spanning at least one year, so it includes seasons and enough warm-tail and windstorm cases. Only runs whose files were available at each origin qualify. For evidence-backed availability, record `first_seen_available_at` with `weather-lab arome observe` at collection time (docs/availability_evidence.md).
 - Add 10 m wind (about +21 MB per run), and consider a land-only grid-point rule. Nice's nearest point is currently sea; a new rule means a new suite version.
 - Compare raw AROME, standalone Timestral and AROME-conditioned Timestral on matching cases. Also add simple post-processing baselines (e.g. bias-corrected AROME, EMOS) so that "Timestral as post-processor" is judged against standard station post-processing.
 - Label all of this as **post-processing**, not WeatherGenerator training.

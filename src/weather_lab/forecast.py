@@ -33,6 +33,11 @@ class CaseBatch:
     future_times: (N, H) valid times.
     arome:        optional (N, V, H) issued AROME forecasts at the valid times (NaN where the
                   variable is not provided), from runs available at the origin.
+    arome_history:optional (N, V, T) ARCHIVED AROME forecasts at the history times (NaN where no
+                  qualifying archived forecast exists; never filled with observations), with
+                  provenance `arome_history_run` (N, T) init times (NaT if none) and
+                  `arome_history_lead_h` (N, T) leads. Each value comes from the most recent run that
+                  was in the archive both before the origin and before the value's own valid time.
     """
 
     cases: pd.DataFrame
@@ -42,6 +47,9 @@ class CaseBatch:
     future_times: np.ndarray
     step_hours: int
     arome: np.ndarray | None = None
+    arome_history: np.ndarray | None = None
+    arome_history_run: np.ndarray | None = None
+    arome_history_lead_h: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         n, v, t = self.history.shape
@@ -52,6 +60,22 @@ class CaseBatch:
         assert (self.future_times[:, 0] == self.origins + step).all(), "first lead must be origin + 1 step"
         if self.arome is not None:
             assert self.arome.shape == (n, v, self.future_times.shape[1])
+        if self.arome_history is not None:
+            assert self.arome_history.shape == (n, v, t)
+            # claimed vintage: run init + lead must equal the history valid time
+            times = self.history_times()
+            has = ~np.isnat(self.arome_history_run)
+            implied = self.arome_history_run + (np.nan_to_num(self.arome_history_lead_h) * 3600).astype(
+                "timedelta64[s]")
+            assert (implied[has] == times[has]).all(), "archived AROME provenance does not match valid times"
+            no_run = np.broadcast_to(~has[:, None, :], self.arome_history.shape)
+            assert np.isnan(self.arome_history[no_run]).all(), "historical AROME value without a source run"
+
+    def subset(self, sl) -> "CaseBatch":
+        pick = (lambda a: None if a is None else a[sl])
+        return CaseBatch(self.cases.iloc[sl], self.variables, self.history[sl], self.origins[sl],
+                         self.future_times[sl], self.step_hours, pick(self.arome), pick(self.arome_history),
+                         pick(self.arome_history_run), pick(self.arome_history_lead_h))
 
     @property
     def horizon(self) -> int:
@@ -229,11 +253,17 @@ class Timestral(Adapter):
 
     targets  : variables forecast jointly per station (stations are independent batch items).
     calendar : add known-future cyclic hour-of-day / day-of-year covariates.
-    arome    : None, "observations" or "missing". Adds issued AROME forecasts of the AROME fields
-               as known-future covariates over the horizon. Over the context the row holds the
-               station observations ("observations": a stitched best-estimate series) or NaN
-               ("missing"). Only runs available at the origin enter the batch.
+    arome    : adds one known-future covariate row per AROME field (t, pmer). Over the horizon the
+               row holds the issued forecast of the run available at the origin. Over the context
+               (history) it holds, depending on the mode:
+               - "archived": archived AROME forecasts from earlier runs (available before the origin
+                 and before each value's valid time); NaN where none exists. No substitution.
+               - "missing": NaN everywhere (future-only covariate).
+               - "substituted_observations" (alias "observations", the v1 behaviour): the station's
+                 own observations stand in for AROME. This is NOT an AROME value.
     """
+
+    AROME_MODES = ("archived", "missing", "substituted_observations", "observations")
 
     kind = "timestral"
     output = "quantiles"
@@ -249,22 +279,30 @@ class Timestral(Adapter):
         self.batch_size = batch_size
         inputs = {"history"} | ({"calendar"} if calendar else set()) | ({"arome"} if arome else set())
         self.inputs = frozenset(inputs)
-        if arome not in (None, "observations", "missing"):
+        if arome is not None and arome not in self.AROME_MODES:
             raise ValueError(f"arome mode {arome!r}")
 
     def context_steps(self, step_hours: int) -> int:
         return self.context_days * 24 // step_hours
 
-    def predict(self, batch: CaseBatch) -> ForecastBatch:
-        import torch
+    def arome_history_rows(self, batch: CaseBatch, j: int, t_ctx: int) -> np.ndarray:
+        """(N, t_ctx) historical segment of the AROME covariate row for batch variable `j`."""
+        n = len(batch.cases)
+        if self.arome_mode == "archived":
+            if batch.arome_history is None:
+                raise ValueError(f"{self.id} needs archived historical AROME in the batch")
+            return batch.arome_history[:, j, -t_ctx:]
+        if self.arome_mode in ("substituted_observations", "observations"):
+            return batch.history[:, j, -t_ctx:]
+        return np.full((n, t_ctx), np.nan)
 
-        fc, load_info = load_timestral(self.checkpoint, self.revision)
+    def build_inputs(self, batch: CaseBatch) -> tuple[np.ndarray, np.ndarray | None]:
+        """(context (N, V, T), known covariates (N, C, T + H) or None) exactly as passed to Timestral."""
         t_ctx = self.context_steps(batch.step_hours)
         if batch.history.shape[-1] < t_ctx:
             raise ValueError(f"batch history {batch.history.shape[-1]} < context {t_ctx}")
         idx = [batch.variables.index(v) for v in self.variables]
         ctx = batch.history[:, idx, -t_ctx:].astype(np.float32)
-        h = batch.horizon
         known_rows = []
         if self.calendar:
             times = np.concatenate([batch.history_times(t_ctx), batch.future_times], axis=1)
@@ -274,11 +312,18 @@ class Timestral(Adapter):
                 raise ValueError(f"{self.id} needs issued AROME forecasts")
             for f in self.arome_fields:
                 j = batch.variables.index(f)
-                past = batch.history[:, j, -t_ctx:] if self.arome_mode == "observations" \
-                    else np.full((len(ctx), t_ctx), np.nan)
+                past = self.arome_history_rows(batch, j, t_ctx)
                 known_rows.append(np.concatenate([past, batch.arome[:, j]], axis=1)[:, None].astype(np.float32))
-        known = np.concatenate(known_rows, axis=1) if known_rows else None
+        return ctx, (np.concatenate(known_rows, axis=1) if known_rows else None)
 
+    def predict(self, batch: CaseBatch) -> ForecastBatch:
+        import torch
+
+        fc, load_info = load_timestral(self.checkpoint, self.revision)
+        t_ctx = self.context_steps(batch.step_hours)
+        idx = [batch.variables.index(v) for v in self.variables]
+        ctx, known = self.build_inputs(batch)
+        h = batch.horizon
         out = np.full((len(ctx), len(idx), h, len(fc.quantile_levels)), np.nan, dtype=np.float32)
         t0 = time.perf_counter()
         with torch.inference_mode():
@@ -299,8 +344,7 @@ class Timestral(Adapter):
 
     def latency_probe(self, batch: CaseBatch, repeats: int = 5) -> dict:
         """Warm single-case latency (median of `repeats`) on the first case of `batch`."""
-        one = CaseBatch(batch.cases.iloc[:1], batch.variables, batch.history[:1], batch.origins[:1],
-                        batch.future_times[:1], batch.step_hours, None if batch.arome is None else batch.arome[:1])
+        one = batch.subset(slice(0, 1))
         self.predict(one)  # warm-up
         times = []
         for _ in range(repeats):

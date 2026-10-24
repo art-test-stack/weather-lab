@@ -36,6 +36,12 @@ Selected stations: 07630 Toulouse-Blagnac (151 m), 07149 Paris-Orly (89 m), 0711
 | https://www.data.gouv.fr/datasets/paquets-arome-resolution-0-01deg | id `65bd1247a6238f16e864fa80` | Hourly files of about 25 MB (SP1) to 70 MB (HP1). By header scan, the 0.01° SP1/SP2/SP3 packages contain **no MSLP**. Not used. |
 | https://www.data.gouv.fr/datasets/paquets-arome-resolution-0-025deg | grid EURW1S40 (55.4N–37.5N, 12W–16E), 6-hour lead groups | The **SP1** package contains 2 m temperature (GRIB2 0/0/0, height 2 m, ~1.0 MB per message) and pressure reduced to MSL (0/3/1, level type 101, ~0.5 MB), plus 10 m u/v. CCSDS packing (template 5.42). Constant fields: `constant-eurw1s40.grib2` (model surface height `h`, land-sea mask `lsm`). |
 
+Provider documentation on timing (checked 2026-10-24):
+- Confluence page "Modèles et données de prévision" (id 621019138, version 2026-09-30T11:39Z).
+- `description-technique-paquets-arome.pdf` (data.gouv.fr resource `789a8822-72e2-4e70-ad3b-336ba51f6e7f`): 8 runs per day, leads 0–51 h, 9 lead groups at 0.025°.
+
+Neither gives publication times or explains the archive timestamps. See `docs/availability_evidence.md`.
+
 Measured availability for the 12 runs used (03Z, 2026-10-10 to 2026-10-21): each run was complete in the archive **2.64–2.80 h after initialization** (05:38–05:48Z), before its 06Z origin. The dedicated Météo-France API, which may require an account, was not used.
 
 ## WeatherGenerator (future milestone, not integrated)

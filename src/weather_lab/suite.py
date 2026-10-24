@@ -74,6 +74,13 @@ def build_cases(cfg: Config, obs: pd.DataFrame, arome_runs: list[dict] | None = 
                 reasons.append("time axis does not cover context+horizon")
             if 1 - row[f"ctx_missing_{ev}"] < e["min_context_observed_fraction"]:
                 reasons.append(f"{ev} context observed < {e['min_context_observed_fraction']:.0%}")
+            # optional: the fraction must also hold within each shorter window (common set across contexts)
+            for days in e.get("windows_days", []):
+                w = ctx.loc[origin - (days * 24 // f["step_hours"] - 1) * step: origin, ev]
+                frac = w.notna().sum() / (days * 24 // f["step_hours"])
+                row[f"ctx_observed_{ev}_{days}d"] = round(float(frac), 4)
+                if frac < e["min_context_observed_fraction"]:
+                    reasons.append(f"{ev} observed < {e['min_context_observed_fraction']:.0%} in last {days} d")
             if recent.notna().sum() == 0:
                 reasons.append(f"no {ev} observation in last {e['require_observation_within_hours']} h")
             if arome_runs is not None:
@@ -150,6 +157,9 @@ def write_manifest(cfg: Config, obs: pd.DataFrame, data_meta: dict, cases: pd.Da
         manifest["arome"]["availability_assumption"] = (
             "a run is used for an origin only if every needed file's Last-Modified time in the public archive "
             "is <= origin; leads beyond the run's 51 h are never extrapolated")
+    from weather_lab.specs import check_manifest
+
+    check_manifest(cfg, manifest)  # a clean checkout must reproduce the committed spec
     path = cfg.manifest_path
     if path.exists():
         old = read_json(path)

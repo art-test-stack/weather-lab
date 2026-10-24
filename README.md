@@ -1,149 +1,164 @@
----
-title: Timestral Weather Lab
-emoji: 🌦️
-colorFrom: blue
-colorTo: gray
-sdk: gradio
-sdk_version: 6.30.0
-python_version: "3.12"
-app_file: app.py
-pinned: false
-license: apache-2.0
-short_description: Station-level probabilistic forecasting benchmark (Timestral vs baselines vs AROME)
----
-
 # Timestral Weather Lab
 
 This is a small, reproducible benchmark for **short-range probabilistic weather forecasting at French surface stations**. It compares Mistral's [Timestral](https://github.com/mistralai/timestral), a time-series foundation model used zero-shot with **no local fine-tuning**, against persistence, a 24 h seasonal-naive forecast, empirical-quantile climatology and **issued AROME** forecasts. All systems run on frozen case sets from real Météo-France data, and a Gradio explorer presents the saved results.
 
 **Research question.** Can Timestral improve station-level probabilistic forecasts on its own, and when it is conditioned on issued AROME predictions?
 
-> **Status (2026-10-24): initialization complete, results are integration checks only.** The scores below come from a deliberately small smoke suite and a 12-day AROME sample. They show that the pipeline works end to end on real data. They are not performance claims.
+> **Status (2026-10-24).** Initialization is complete. A context-length experiment has been validated on 2023 and its choice frozen; the full 2024 test has not been run. The smoke and AROME results are integration checks under stated assumptions, not performance claims.
 
 ## Quick start
 
+The repository contains code, configuration and documentation only. Data, saved runs, manifests and weights are not committed: `weather-lab bootstrap` fetches and verifies them.
+
 ```bash
 uv sync
-uv run weather-lab data fetch    --config configs/smoke.yaml        # SYNOP 2022-2024 (~20 MB), cached once
-uv run weather-lab data prepare  --config configs/smoke.yaml        # clean, regularise, freeze manifest
-uv run weather-lab evaluate      --config configs/smoke.yaml        # baselines + Timestral-28M, saves run
-uv run weather-lab data fetch    --config configs/arome_smoke.yaml  # + SYNOP 2026 and AROME messages (see note)
-uv run weather-lab data prepare  --config configs/arome_smoke.yaml
-uv run weather-lab evaluate      --config configs/arome_smoke.yaml
-uv run weather-lab score --run-dir runs/<suite>/<run-id>            # recompute scores, no model calls
-uv run python app.py                                                # explorer on http://127.0.0.1:7860
-uv run pytest                                                       # unit tests (no downloads)
-uv run pytest -m real_model                                         # opt-in: real Timestral-5M inference
-uv run weather-lab export-example runs/<suite>/<run-id> ...         # refresh the offline UI example
+uv run weather-lab bootstrap                 # idempotent: fetch + verify + prepare; reuses the cache
+uv run python app.py                         # explorer on http://127.0.0.1:7860 (runs the same bootstrap at startup)
+uv run pytest                                # unit tests, no downloads
+uv run pytest -m real_model                  # opt-in: real Timestral-5M inference (~21 MB)
 ```
 
-**AROME note.** Météo-France's public archive keeps only 14 days. The October 2026 runs used here will be gone after early November 2026. After that, `data fetch` for `arome_smoke.yaml` reports those runs as unavailable, and `data prepare` falls back to the packaged station extract in `data/examples/arome-issued-v1/arome_station_extract.parquet`, with provenance. The frozen suite therefore stays reproducible offline.
+`bootstrap` has two modes, selected with `--mode` or by `configs/deploy.yaml`:
 
-The app works without any downloads: it replays the cached runs in `data/examples/`, and labels them as cached. Fresh Timestral inference, used only for the exploratory panel, downloads pinned weights from the Hugging Face Hub on first use. No Mistral API key is needed.
-
-## What is implemented
-
-| Area | Implemented | Not implemented (see [roadmap](docs/roadmap.md)) |
+| Mode | Source | Use |
 |---|---|---|
-| Data | SYNOP annual files resolved from data.gouv.fr metadata. Unit conversion (°C, hPa, m/s), meteorological u/v, deterministic de-duplication, 3-hourly axis with NaN gaps, provenance and checksums. | Quality control beyond what the archive provides (it has no flag columns) |
-| AROME | Byte-range download of only the T2m/MSLP GRIB2 messages needed (0.025° SP1). Availability evidence from archive `Last-Modified`. Nearest-grid-point extraction with terrain height and land-sea mask recorded. | Wind, ensembles (AROME-EPS), multi-month archive, land-only point rule |
-| Systems | Persistence, seasonal naive, climatology (21 empirical quantiles), Timestral-28M univariate / multivariate / + calendar / + issued AROME covariates, raw AROME | 209M and context comparisons (configured, not run), calibration, fine-tuning |
-| Protocol | Two versioned suites with frozen manifests, eligibility fixed before scoring, common-case paired comparison, availability accounting | Full 2018–2024 benchmark run |
-| Scoring | MAE/RMSE/bias, mean pinball, 80/90% coverage and width, skill with denominators, block-bootstrap paired differences (only with ≥ 10 blocks), warm-tail subset, CPU latency/memory | CRPS, scenario/dependence scores |
-| UI | Scorecard (default view), forecast explorer with station map and bands, case links, CSV/manifest downloads, exploratory run labelled outside the benchmark, methods page | Publishing to a Space (needs a paid HF plan; see below) |
+| `official` | data.gouv.fr SYNOP files, the Météo-France 14-day AROME archive, and the Hugging Face Hub (pinned revision, SHA-256 checked) | Regenerates each suite's manifest and checks it against its committed spec in `benchmarks/specs/`. Reproduces saved results with real inference and checks the score hashes. AROME runs that have left the 14-day archive make this mode fail fast, with an explanation. |
+| `snapshot` | One immutable archive (URL + SHA-256) holding manifests, prepared data, the AROME station extract, saved runs and evidence files | Verifies every member against its index. Needed for the AROME suites once their runs have rolled out of the archive. |
 
-## Evaluated case coverage
+`auto` (the default) uses `snapshot` when a snapshot URL is configured (`bootstrap.snapshot` in `configs/deploy.yaml`, or `WEATHER_LAB_SNAPSHOT_URL` / `WEATHER_LAB_SNAPSHOT_SHA256`), and `official` otherwise. Progress is printed step by step. Failures name the step and say whether a retry can help. The app shows a **Retry setup** screen instead of crashing.
 
-| Suite | Cases | Stations | Origins | Leads | Variables |
-|---|---|---|---|---|---|
-| `synop-historical-v1` (smoke) | 96, all eligible | 07630 Toulouse-Blagnac, 07149 Paris-Orly | 00 UTC on days 1 and 15 of each month: 24 in validation 2023, 24 in test 2024 | 3–48 h every 3 h | t, pmer, u, v |
-| `arome-issued-v1` (initialization) | 60, all eligible | the two above plus 07110 Brest, 07190 Strasbourg, 07690 Nice | 06 UTC 2026-10-10 … 10-21, each using the same day's 03 UTC run (complete in archive 2.6–2.8 h after initialization) | 3–48 h (run leads 6–51 h) | t, pmer from AROME; Timestral also forecasts u, v |
+### Pipeline commands
 
-Smoke baselines are fitted on 2022 only. AROME-suite baselines are fitted on 2022–2024. Out of 768 targets per split and variable, 761 temperature targets were observed in each smoke split. The AROME suite had no missing targets.
+```bash
+uv run weather-lab data fetch    --config configs/smoke.yaml        # SYNOP 2022-2024, cached once
+uv run weather-lab data prepare  --config configs/smoke.yaml        # clean, regularise, freeze manifest (checked against spec)
+uv run weather-lab evaluate      --config configs/smoke.yaml        # baselines + Timestral-28M; saves a run
+uv run weather-lab data fetch    --config configs/arome_v2.yaml     # + SYNOP 2026 and AROME messages (14-day archive)
+uv run weather-lab data prepare  --config configs/arome_v2.yaml
+uv run weather-lab evaluate      --config configs/arome_v2.yaml
+uv run weather-lab score --run-dir runs/<suite>/<run-id>            # recompute scores, no model calls
+uv run weather-lab compare --freeze                                 # context-length selection (configs/context/)
+uv run weather-lab diagnose arome-inputs --config configs/arome_v2.yaml --case <case-id>
+uv run weather-lab diagnose covariates   --config configs/arome_v2.yaml
+uv run weather-lab arome evidence | observe | refresh-suite         # availability evidence; new suite ids for new dates
+uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benchmarks/specs/<manifest>.yaml
+```
 
-## Integration-check results
+`arome refresh-suite` writes a config for whatever dates are currently in the 14-day archive. If those dates differ from the base suite, it uses a **new suite id** (`arome-issued-r<first>-<last>`) and never reuses a frozen one.
 
-Each table shows MAE at selected leads and over all leads, computed on the common valid set of each table. The point forecast is the median for quantile systems. Pinball loss and 80% coverage are averaged over all leads, and only for probabilistic systems. Full tables, per station, season and lead, are in the app and in `data/examples/*/metrics_*.csv`.
+## Deployment (prepared, not published)
 
-**Historical smoke suite, 2 m temperature (°C), test 2024, n = 761 (case, lead) pairs**
+```bash
+uv run weather-lab snapshot build --id <snapshot-id>   # dist/snapshot/<id>.tar.gz + .sha256 (byte-reproducible)
+uv run weather-lab deploy build                        # dist/space/: code + README with generated Spaces metadata
+```
+
+- The Hugging Face Spaces front matter is generated only into `dist/space/README.md`, from the `space:` block of `configs/deploy.yaml`.
+- The Space content contains no data and no weights. At startup the app runs `bootstrap`, which downloads the snapshot and the pinned 28M weights (111 MB), verifies both, and reuses them after a restart.
+- **Missing piece:** an immutable remote location for the snapshot. `bootstrap.snapshot.url` and `.sha256` are `null`. To fill them, upload `dist/snapshot/<id>.tar.gz` to a versioned location and record the URL and SHA-256 in `configs/deploy.yaml`. Suitable locations are a Hugging Face Dataset repository addressed by commit (`…/resolve/<commit>/<id>.tar.gz`) or a GitHub release asset.
+- Per the [Spaces overview](https://huggingface.co/docs/hub/spaces-overview), creating a Gradio Space requires a paid HF plan.
+
+## Suites and versions
+
+| Suite | Cases | What it is |
+|---|---|---|
+| `synop-historical-v1` (smoke) | 96 (Toulouse, Paris-Orly; days 1 and 15 of each month; validation 2023 and test 2024) | Integration check. Baselines fitted on 2022 only. |
+| `synop-ctxval-2023-v1` | 1,809 eligible (5 stations, daily 00 UTC, 2023 only) | Context-length validation, 7 / 30 / 90 days. Baselines fitted on 2018–2022. |
+| `arome-issued-v2` | 60 (5 stations, 06 UTC 2026-10-10…21, same-day 03 UTC run) | Current AROME comparison. The historical AROME input is explicit per system. |
+| `arome-issued-v1` | the same 60 cases | **Earlier version, kept unchanged.** Its conditioned variant substituted station observations for historical AROME. |
+
+Each suite has a committed spec (`benchmarks/specs/*.yaml`) that a regenerated manifest must reproduce. Methods are in [docs/experiment_protocol.md](docs/experiment_protocol.md).
+
+## Results
+
+All tables report MAE on each table's common valid set. Pinball loss and coverage are given for probabilistic systems only, averaged over leads 3–48 h. Units are °C for `t` and hPa for MSLP.
+
+### Context length, 2023 validation (Timestral-28M, multivariate + calendar)
+
+Selection rule, declared before running: lowest mean temperature pinball; ties within 0.005 °C go to the shorter context.
+
+| Context | t pinball (primary) | t MAE | t RMSE | t cov. 80 / 90 | t width 80 | MSLP pinball | MSLP MAE | per case (batch) | warm single case |
+|---|---|---|---|---|---|---|---|---|---|
+| 7 days (56 steps) | 0.736 | 2.097 | 2.859 | 0.83 / 0.93 | 7.74 | 1.364 | 3.944 | 10.9 ms | 28 ms |
+| 30 days (240) | 0.660 | 1.908 | 2.596 | 0.81 / 0.91 | 6.37 | 1.251 | 3.643 | 31.3 ms | 52 ms |
+| **90 days (720)** | **0.646** | **1.873** | **2.551** | 0.80 / 0.90 | 6.05 | **1.220** | **3.555** | 82.4 ms | 76 ms |
+| climatology (2018–22) | 0.875 | 2.583 | 3.289 | 0.81 / 0.91 | 8.52 | 2.236 | 6.552 | | |
+| persistence | n/a | 3.300 | 4.489 | n/a | n/a | n/a | 4.120 | | |
+
+- Counts: 28,708 temperature (case, lead) pairs for the probabilistic metrics; 28,499 for MAE and RMSE.
+- **90 days is selected**: ctx90 − ctx30 = −0.0138 °C, 95% block-bootstrap CI [−0.021, −0.006]. The choice is frozen in `configs/frozen/context-selection-2023.yaml`.
+- The 2024 test (`configs/benchmark_test_frozen.yaml`) is not yet run. The 2024 smoke cases were inspected earlier and count as exploratory evidence only.
+- Details, including per-lead results, wind and resources: [docs/experiments/context_length_2023.md](docs/experiments/context_length_2023.md).
+
+### Issued AROME comparison, `arome-issued-v2` (12 days × 5 stations, n = 960 pairs)
+
+| System | Historical AROME input | t 6 h | t 24 h | t 48 h | t all | t pinball | t cov. 80% | MSLP all | MSLP cov. 80% |
+|---|---|---|---|---|---|---|---|---|---|
+| persistence | – | 5.67 | 2.90 | 3.44 | 3.89 | – | – | 4.81 | – |
+| climatology (fit 2022–24) | – | 2.80 | 2.61 | 2.63 | 2.65 | 0.88 | 0.75 | 6.11 | 0.80 |
+| **raw AROME** (deterministic) | – | **1.02** | **1.27** | **1.44** | **1.09** | n/a | n/a | **0.62** | n/a |
+| (A) Timestral mv + calendar | no AROME row | 1.84 | 2.84 | 3.05 | 2.52 | 0.86 | 0.73 | 3.69 | 0.76 |
+| (B) + future AROME | missing | 1.83 | 2.83 | 3.05 | 2.51 | 0.86 | 0.73 | 3.69 | 0.76 |
+| (C) + future AROME | archived AROME forecasts (18% coverage) | 1.52 | 2.48 | 2.69 | 2.19 | 0.75 | 0.81 | 2.73 | 0.88 |
+| + future AROME (v1 behaviour) | **substituted observations** | 1.12 | 1.60 | 1.81 | 1.51 | 0.52 | 0.67 | 0.67 | 0.56 |
+
+How to read this:
+
+1. **Raw AROME is the best point forecast** in this October sample.
+2. The conditioned variant from v1 (1.51 °C) uses station observations as the historical AROME segment. That is a different input from AROME, now labelled explicitly. Its intervals are over-confident.
+3. **(B) future-only AROME has no effect.** A +5 °C change of the future AROME temperature moves outputs by at most 1.2×10⁻⁴. The values do reach the network, but the pinned model's masking treats a covariate row with no observed history as not yet started, so it cannot influence a single-block forecast. Traced in [docs/diagnostics/arome_covariates.md](docs/diagnostics/arome_covariates.md).
+4. **(C) honest archived history** helps (2.52 → 2.19 °C), increasingly so as history coverage grows (0% → 37% across origins). It remains well behind raw AROME. Its sensitivity to the future covariate can exceed the size of the perturbation at extreme quantiles; this is recorded as an observed instability.
+5. **Availability caveat.** Run availability, and the vintage of archived history, rest on the archive's `Last-Modified` timestamps. The provider documents no publication-time semantics, so these are **retrospective results under an archive-timestamp assumption** ([evidence](docs/availability_evidence.md)). 12 days and 6 two-day blocks do not justify uncertainty intervals or seasonal conclusions.
+
+### Historical smoke suite (unchanged, integration check)
+
+Test 2024, temperature, n = 761:
 
 | System | 6 h | 24 h | 48 h | all | pinball | cov. 80% |
 |---|---|---|---|---|---|---|
 | persistence | 1.53 | 2.60 | 3.14 | 3.21 | – | – |
-| seasonal naive 24 h | 2.34 | 2.60 | 3.14 | 2.77 | – | – |
 | climatology (fit 2022) | 2.65 | 3.08 | 2.87 | 3.17 | 1.09 | 0.69 |
-| Timestral-28M, t only | 1.12 | 2.42 | 2.37 | 2.23 | 0.78 | 0.80 |
-| Timestral-28M, multivariate | 1.08 | 2.30 | 2.39 | 2.18 | 0.76 | 0.82 |
-| Timestral-28M, multivariate + calendar | 1.11 | 2.32 | 2.35 | 2.15 | 0.74 | 0.82 |
+| Timestral-28M mv + calendar (30 d) | 1.11 | 2.32 | 2.35 | 2.15 | 0.74 | 0.82 |
 
-The validation split (2023) shows the same ordering: Timestral multivariate has an all-lead MAE of 2.11 against 3.32 for persistence, and 80% coverage of 0.83–0.85. For **MSLP** the gain over persistence is small: an all-lead MAE of 3.63–3.71 hPa against 3.79 in test. At 48 h persistence is slightly better (5.05 vs 5.23 hPa). The differences between Timestral variants are small, and this sample cannot resolve them.
+### Reproducibility checks performed (2026-10-24)
 
-**AROME suite, 12 days, 5 stations, test, n = 960**
-
-| System | t 6 h | t 24 h | t 48 h | t all | t pinball | t cov. 80% | MSLP all (hPa) | MSLP cov. 80% |
-|---|---|---|---|---|---|---|---|---|
-| persistence | 5.67 | 2.90 | 3.44 | 3.89 | – | – | 4.81 | – |
-| climatology (fit 2022–24) | 2.80 | 2.61 | 2.63 | 2.65 | 0.88 | 0.75 | 6.11 | 0.80 |
-| Timestral-28M mv + calendar | 1.84 | 2.84 | 3.05 | 2.52 | 0.86 | 0.73 | 3.69 | 0.76 |
-| **raw AROME** (deterministic) | **1.02** | **1.27** | **1.44** | **1.09** | n/a | n/a | **0.62** | n/a |
-| Timestral-28M + AROME covariates | 1.12 | 1.60 | 1.81 | 1.51 | 0.52 | 0.67 | 0.67 | 0.56 |
-| ablation: AROME rows NaN over context | 1.83 | 2.83 | 3.05 | 2.51 | 0.86 | 0.73 | 3.69 | 0.76 |
-
-How to read this, honestly:
-
-1. **Raw AROME is clearly the best point forecast** in this October sample. Standalone Timestral is about 2.3× worse on temperature.
-2. Conditioning Timestral on issued AROME improves it a lot (t MAE 2.52 → 1.51 °C, MSLP 3.69 → 0.67 hPa). It still **does not beat raw AROME**, and its intervals are **over-confident** (80% coverage of 0.67 for t and 0.56 for MSLP).
-3. When the AROME covariate rows are missing over the context, the forecasts are practically identical to the standalone model. Zero-shot, the model only uses the covariate when it can see that series' history.
-4. With 6 two-day blocks, no uncertainty intervals are justified. Nothing here says anything about other seasons or extremes. On the warm-tail subset (28 pairs), raw AROME has MAE 0.83 °C and conditioned Timestral 1.42 °C.
-
-**Reproducibility.** `weather-lab score --run-dir …` regenerated all seven score tables byte-for-byte from the saved predictions, for both suites. A full re-run of `evaluate`, with fresh Timestral calls, also reproduced identical score files.
-
-**Runtime** (Apple M2, 4 torch threads, batch 32, context 240 steps):
-- Timestral-28M (27.8 M parameters) loads in 0.3 s from cache, or 3.5 s including the 111 MB download.
-- A batch of 96 cases takes 0.7–3.1 s, depending on variant.
-- Warm single-case latency is 17–19 ms for t-only, 23–26 ms multivariate, and 52–63 ms with calendar covariates, which doubles the input rows.
-- Process peak RSS is about 0.5–0.64 GB. A full smoke evaluation takes about 13 s wall time.
-
-**Footprint.** About 444 MB downloaded in total:
-- SYNOP 2022–2024 and 2026: 47.9 MB;
-- AROME T2m + MSLP message subsets for 12 runs: 264 MB, plus 1.3 MB of constant fields;
-- Timestral-28M: 111 MB;
-- Timestral-5M (opt-in test only): 21 MB.
-
-Downloading the full 0.025° SP1 files for the same runs would have taken about 6 GB (9 files of about 55 MB per run). The offline example committed to Git is 8.9 MB.
+- `score --run-dir` regenerates every score table byte-for-byte. Fresh re-inference reproduces identical score files.
+- **Clean source tree.** A tree built only from GitHub-intended files (no data, manifests or model cache; empty `HF_HOME`) was tested in three ways:
+  - **Snapshot mode:** fetched the snapshot and weights itself, served the app, and reused the cache on restart.
+  - **Official mode:** downloaded SYNOP from data.gouv.fr, regenerated the frozen manifest exactly as specified, and reproduced the spec score hashes with real inference.
+  - **Failure handling:** a configuration error and an unreachable snapshot server both showed the retry screen. After the server came up, **Retry setup** completed and the app restarted with full results.
 
 ## Design choices worth knowing
 
-- **AROME package.** The brief pointed at the 0.01° packages, but their surface packages carry no MSLP and are about 6× larger per field. The 0.025° SP1 package (the same AROME model, EURW1S40 grid) has T2m and MSLP. Only those messages are fetched, byte-for-byte, with per-message SHA-256.
-- **Availability.** A run is used only if every file it needs appears in the public archive (its `Last-Modified` time) before the origin. That is archive evidence, not an operational dissemination log, so the AROME suite is a retrospective experiment under this assumption.
-- **Nice.** The nearest AROME grid point to Nice airport is sea (land-sea mask 0). It is kept, and recorded, under the frozen nearest-point rule.
-- **Conditioned Timestral.** The covariate row carries observations over the context and the issued forecast over the horizon. This was declared as the primary variant before scoring; the NaN-context version is a pre-declared ablation.
+- **AROME package.** The 0.025° SP1 package is used; the 0.01° surface packages carry no MSLP. Only the T2m/MSLP messages needed are fetched, byte-for-byte, with per-message SHA-256.
+- **Station extraction.** Nearest grid point. Nice's nearest point is sea; this is recorded.
+- **Historical AROME.** Archived forecasts must have been in the archive before both the origin and their own valid time, and missing values are never filled with observations. History uses leads 6–27 h, against 6–51 h in the future segment, which is a documented possible distribution mismatch.
 - `clip_nonnegative=False` is passed to Timestral, because temperatures and wind components can be negative.
 
-## Deployment and licences
+## Licences
 
-- `app.py`, `requirements.txt` (exported from `uv.lock`, without the dev group) and the YAML header above are ready for a Hugging Face Gradio Space. Nothing was published. Per the [Spaces overview](https://huggingface.co/docs/hub/spaces-overview), **creating a Gradio Space now requires a paid plan** (PRO for personal accounts), even though CPU Basic hardware has no hourly cost.
-- Code: Apache-2.0. Observations and AROME data: Météo-France, [Licence Ouverte v2.0](https://www.etalab.gouv.fr/licence-ouverte-open-licence). See `data/examples/*/ATTRIBUTION.json`.
-- **Timestral weights use a Modified MIT licence.** It voids all rights if your company's or employer's global monthly revenue exceeds $20 M. Check it before any employer or commercial use.
+- Code: Apache-2.0.
+- Observations and AROME data: Météo-France, Licence Ouverte v2.0.
+- **Timestral weights: Modified MIT.** No rights apply if your company's or employer's monthly revenue exceeds $20 M. See [docs/sources.md](docs/sources.md).
 
 ## Repository map
 
 ```text
-app.py                      Gradio explorer (reads saved runs only)
-configs/                    smoke.yaml, arome_smoke.yaml, benchmark.yaml (full, not yet run)
+app.py                      Gradio explorer; runs bootstrap at startup, reads saved runs only
+configs/                    smoke, arome_v2 (current), arome_smoke (v1), benchmark, context/, frozen/, deploy.yaml
+benchmarks/specs/           committed YAML specs of frozen suites (manifests are generated locally)
 src/weather_lab/
-  data.py                   SYNOP fetch/clean/regularise
-  arome.py                  AROME byte-range fetch, availability, station extraction
-  suite.py                  origins, cases, eligibility, frozen manifests
-  forecast.py               adapter contract, ForecastBatch, Timestral + raw AROME adapters
-  baselines.py              persistence, seasonal naive, climatology
-  evaluate.py               run a suite, save predictions, score / rescore
-  results.py, plots.py      UI data access and Plotly figures
-  cli.py, example.py        command line, offline example packaging
-benchmarks/manifests/       frozen suite manifests (committed)
-data/examples/              cached runs + observation windows + AROME extract for offline replay
-docs/                       sources.md, experiment_protocol.md, roadmap.md
-tests/                      unit tests; test_real_timestral.py is opt-in (-m real_model)
+  bootstrap.py              official / snapshot setup, snapshot + Space builders
+  specs.py                  spec freeze / manifest + score validation
+  data.py, arome.py         SYNOP and AROME acquisition, archived AROME history, refresh-suite
+  suite.py                  origins, cases, eligibility, manifests
+  forecast.py, baselines.py adapter contract, Timestral / AROME / baseline adapters
+  evaluate.py, compare.py   run, score, rescore; cross-run selection
+  diagnostics.py            AROME input audit and covariate sensitivity
+  evidence.py               availability evidence and manual first-seen observation
+  results.py, plots.py      UI data access and figures
+docs/                       methods, sources, availability evidence, diagnostics, experiments, roadmap
+tests/                      unit tests; test_real_timestral.py is opt-in
 ```
 
-**Adding a model.** Subclass `Adapter` in `forecast.py`: declare `output` (point / quantiles / ensemble) and `inputs`, return a `ForecastBatch`, and register its `kind` in `evaluate.build_adapters`. Scoring and the UI pick it up unchanged. A regional model joins a station suite only through an explicit extraction adapter matching the target definitions.
+**Adding a model.** Subclass `Adapter` in `forecast.py`: declare `output` and `inputs`, return a `ForecastBatch`, and register its `kind` in `evaluate.build_adapters`. Scoring and the UI pick it up unchanged.

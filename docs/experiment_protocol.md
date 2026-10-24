@@ -38,27 +38,30 @@ Timestral and WeatherGenerator are separate models. Nothing here runs, implement
 
 ### `synop-historical-v1`: historical observation benchmark
 
-- Chronological protocol: fitting/baselines 2018–2022, validation 2023, held-out test 2024 (`configs/benchmark.yaml`, not yet run).
+- Chronological protocol: fitting/baselines 2018–2022, validation 2023, held-out test 2024 (`configs/benchmark.yaml`).
+- **Context-length validation** (`synop-ctxval-2023-v1`, three configs in `configs/context/`): 2023 validation only, 1,809 eligible cases. Under the pre-declared rule (temperature pinball, ties within 0.005 °C go to the shorter context), 90 days was selected and frozen in `configs/frozen/context-selection-2023.yaml`. See [the experiment](experiments/context_length_2023.md). The full 2024 test (`configs/benchmark_test_frozen.yaml`) has not been run.
 - **Smoke variant** (`configs/smoke.yaml`): baselines fitted on 2022 only; two stations (Toulouse, Paris-Orly); origins at 00 UTC on days 1 and 15 of each month in 2023 (validation) and 2024 (test). That gives 96 cases, all eligible.
 - Every target window (origin + 3 h … + 48 h) lies wholly inside its split. History may extend into the preceding period.
 - The **smoke scores are integration checks**, not benchmark evidence.
 
-### `arome-issued-v1`: issued AROME comparison
+### `arome-issued-v2` (current) and `arome-issued-v1` (earlier version): issued AROME comparison
+
+Both versions use the same cases. v2 makes the historical segment of the AROME covariate explicit per system (see "Historical AROME inputs" below). v1's scores and manifest are kept unchanged as the earlier experiment version.
 
 - Twelve origins at 06 UTC, 2026-10-10 … 2026-10-21, at all five stations: 60 cases, all eligible.
 - Each origin uses that day's **03 UTC run**. A run qualifies only if every file it needs was in the archive (its `Last-Modified` time) by the origin. Initialization time alone proves nothing.
 - Leads origin + 3 … + 48 h map to run leads +6 … +51 h, which is the end of the run. Nothing is extrapolated.
 - The dates were frozen from archive coverage, with the last date limited by verifying observations through 2026-10-23T21Z, before any forecast was scored.
-- Availability evidence comes from the public archive, not an operational dissemination log, so this is a **retrospective experiment under that assumption**.
+- Availability evidence comes from the public archive, not an operational dissemination log. The provider documents no publication-time semantics, and the object store's `Last-Modified` records write time; see [availability evidence](availability_evidence.md). This is therefore a **retrospective experiment under an archive-timestamp/latency assumption**, not a claim of exact operational availability.
 - Baselines here are fitted on 2022–2024.
 - This is a 12-day **integration study**. It says nothing about seasonal, multi-year or rare-event performance.
 
 ### Common rules
 
 - Observations valid at or before the origin are inputs. No reporting latency is modelled, so this is historical replay, not an operational backtest.
-- **Eligibility** is fixed in the manifest before scoring: at least 80% of the `t` context observed, and at least one `t` observation in the last 24 h. Ineligible cases stay in the availability counts.
+- **Eligibility** is fixed in the manifest before scoring: at least 80% of the `t` context observed, and at least one `t` observation in the last 24 h. The context-validation suite also requires 80% within each of the last 7, 30 and 90 days, giving one common case set for all candidates. Ineligible cases stay in the availability counts.
 - Missing targets are excluded from scores. A failed prediction is counted, never replaced by another model.
-- Each suite has a manifest in `benchmarks/manifests/`. It records the protocol hash, split boundaries, stations, origins, leads, variables, eligibility, source checksums, a checksum of exactly the observations the cases read, case ids and UI examples. `data prepare` refuses to overwrite a manifest whose protocol or case data changed: a change means a new suite version.
+- Each suite has a manifest in `benchmarks/manifests/`, generated locally and not committed. Its committed counterpart is a compact YAML spec in `benchmarks/specs/` (protocol hash, case-data hash, case counts, fixed-year source checksums, AROME extract checksum, and optionally the score hashes a re-evaluation must reproduce). A regenerated manifest must match its spec. It records the protocol hash, split boundaries, stations, origins, leads, variables, eligibility, source checksums, a checksum of exactly the observations the cases read, case ids and UI examples. `data prepare` refuses to overwrite a manifest whose protocol or case data changed: a change means a new suite version.
 - UI examples are chosen by a fixed rule (earliest eligible test origin per station × season), not for appearance.
 
 ## Systems and information sets
@@ -72,8 +75,16 @@ Timestral and WeatherGenerator are separate models. Nothing here runs, implement
 | `timestral-28m-mv` | 30 days of `t, pmer, u, v` history, forecast jointly at each station | quantiles |
 | `timestral-28m-mv-cal` | as above, plus known-future sin/cos hour-of-day and day-of-year | quantiles |
 | `arome-raw` | issued AROME run available at the origin, nearest grid point | point (deterministic: no bands, probabilistic metrics N/A) |
-| `timestral-28m-mv-cal-arome` | as `mv-cal`, plus AROME `t` and `pmer` as known-future covariates. Over the context these rows hold the station observations (a stitched "best estimate" series); over the horizon they hold the issued forecast. | quantiles |
-| `timestral-28m-mv-cal-arome-nanpast` | pre-declared ablation: AROME rows are NaN over the context | quantiles |
+| `timestral-28m-mv-cal-arome` (v1) = `…-arome-substobs` (v2) | as `mv-cal`, plus AROME `t` and `pmer` as known-future covariate rows. Over the horizon: the issued forecast. Over the history: **station observations substituted for AROME** (not AROME values). | quantiles |
+| `timestral-28m-mv-cal-arome-futureonly` (v2, = v1 `…-nanpast`) | AROME rows missing (NaN) over the history | quantiles |
+| `timestral-28m-mv-cal-arome-archived` (v2) | AROME rows over the history hold **archived AROME forecasts** from earlier runs available before the origin and before each value's valid time; missing where none qualifies (18% history coverage on average) | quantiles |
+
+### Historical AROME inputs
+
+- Historical values are **archived forecasts**, **missing values**, or **substituted observations**, depending on the system. They are never analyses, and missing values are never silently filled.
+- Archived values obey a vintage rule: the source run was in the archive before both the origin and the value's own valid time. Run time + lead = valid time is re-checked.
+- Archived history uses leads 6–27 h, while the future segment uses 6–51 h. This is not leakage, but it is a possible distribution mismatch; it is described and checked in [the covariate audit](diagnostics/arome_covariates.md).
+- With the pinned Timestral model, an AROME row whose history is entirely missing has **no effect** on these single-block forecasts. A +5 °C change of its future values moves outputs by at most 1.2×10⁻⁴. The cause is the upstream key-validity masking, traced in the audit.
 
 The AROME ablation holds the checkpoint, targets, context (30 days = 240 steps) and calendar features fixed. **AROME is the only additional input.** Stations are independent batch items; a shared batch axis creates no spatial interaction.
 

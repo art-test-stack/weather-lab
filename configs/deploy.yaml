@@ -1,0 +1,31 @@
+# Deployment / setup configuration shared by `weather-lab bootstrap` and app startup.
+bootstrap:
+  # Suites whose saved results the app needs. Each has a committed spec in benchmarks/specs/.
+  suites: [configs/smoke.yaml, configs/arome_v2.yaml, configs/arome_smoke.yaml]
+  # auto = snapshot when snapshot.url is set (or WEATHER_LAB_SNAPSHOT_URL), else official sources.
+  mode: auto
+  snapshot:
+    id: null
+    # MISSING: no immutable remote location exists yet. Fill url + sha256 after uploading the
+    # archive produced by `weather-lab snapshot build` (see README "Deployment").
+    url: null
+    sha256: null
+  weights:
+    - repo: mistralai/Timestral-28M
+      revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+      sha256: dfc83c6220937ce5fc6687b35a4df94cd25e28a2cfe6fb92a23dad6301b2015d
+      bytes: 111296464
+
+# Hugging Face Spaces metadata: written only into the deployment output by `weather-lab deploy build`.
+space:
+  title: Timestral Weather Lab
+  emoji: "🌦️"
+  colorFrom: blue
+  colorTo: gray
+  sdk: gradio
+  sdk_version: 6.30.0
+  python_version: "3.12"
+  app_file: app.py
+  pinned: false
+  license: apache-2.0
+  short_description: Station-level probabilistic forecasting benchmark (Timestral vs baselines vs AROME)

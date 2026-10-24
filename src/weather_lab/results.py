@@ -13,7 +13,8 @@ from weather_lab.forecast import QUANTILE_LEVELS, qcol
 
 SUITES = {
     "synop-historical-v1": "Historical observations (SYNOP 2023-2024)",
-    "arome-issued-v1": "Issued AROME comparison (Oct 2026, 14-day archive)",
+    "arome-issued-v2": "Issued AROME comparison v2 (Oct 2026, explicit historical AROME)",
+    "arome-issued-v1": "Issued AROME comparison v1 (earlier version, substituted history)",
 }
 # Fixed entity -> colour (reference categorical palette, fixed order; colour follows the system).
 MODEL_STYLE = {
@@ -26,6 +27,9 @@ MODEL_STYLE = {
     "timestral-28m-mv": ("#6250d6", "solid"),
     "timestral-28m-t": ("#e34948", "solid"),
     "timestral-28m-mv-cal-arome-nanpast": ("#8a8984", "longdash"),
+    "timestral-28m-mv-cal-arome-archived": ("#1baf7a", "solid"),
+    "timestral-28m-mv-cal-arome-futureonly": ("#6250d6", "dash"),
+    "timestral-28m-mv-cal-arome-substobs": ("#e34948", "dot"),
 }
 EXPLORATORY_STYLE = ("#52514e", "dot")
 

@@ -19,3 +19,8 @@ runs/
 .cache/
 *.safetensors
 .gradio/
+# Saved runs for offline replay: installed by `weather-lab bootstrap` (snapshot or official mode)
+data/examples/*/
+data/cache/
+data/evidence/
+experiments/*/runs/

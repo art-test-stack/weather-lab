@@ -341,3 +341,104 @@ def load_arome(cfg: Config) -> tuple[pd.DataFrame, dict]:
     if not path.exists():
         raise FileNotFoundError(f"{path} missing: run `weather-lab data prepare --config {cfg.path}` first")
     return pd.read_parquet(path), read_json(path.with_suffix(".meta.json"))
+
+
+# --------------------------------------------------------------------------- archived history
+
+def archived_history(arome_df: pd.DataFrame, stations: np.ndarray, origins: np.ndarray, hist_times: np.ndarray,
+                     variables: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Archived AROME forecasts at history times, with provenance; NaN where none qualifies.
+
+    For a history valid time v of a case with origin o, a run r qualifies if it was in the
+    archive by min(o, v) (available before the origin AND before v: a forecast issued ahead of
+    its valid time) and holds a value for v. The most recent qualifying run (smallest lead)
+    is used. Nothing is substituted when no run qualifies.
+    Returns values (N, V, T), run init (N, T) datetime64[ns] (NaT if none), lead hours (N, T).
+    """
+    n, t = hist_times.shape
+    vals = np.full((n, len(variables), t), np.nan, dtype=np.float32)
+    run_out = np.full((n, t), np.datetime64("NaT", "ns"), dtype="datetime64[ns]")
+    lead_out = np.full((n, t), np.nan)
+    runs = (arome_df.groupby("run")["available_at"].max().sort_index(ascending=False))
+    run_init = runs.index.to_numpy(dtype="datetime64[ns]")
+    run_avail = runs.to_numpy(dtype="datetime64[ns]")
+    table = arome_df.set_index(["station", "run", "valid_time", "variable"])["value"].sort_index()
+    for i in range(n):
+        for k in range(t):
+            v = hist_times[i, k]
+            for r, avail in zip(run_init, run_avail):
+                if avail > origins[i] or avail > v or r >= v:
+                    continue
+                key = (stations[i], pd.Timestamp(r, tz="UTC"), pd.Timestamp(v, tz="UTC"))
+                got = False
+                for j, var in enumerate(variables):
+                    x = table.get(key + (var,))
+                    if x is not None:
+                        vals[i, j, k] = x
+                        got = True
+                if got:
+                    run_out[i, k] = r
+                    lead_out[i, k] = (v - r) / np.timedelta64(1, "h")
+                    break
+    return vals, run_out, lead_out
+
+
+# --------------------------------------------------------------------------- refreshed suites
+
+def archive_tree(session: requests.Session | None = None) -> dict:
+    s = session or requests.Session()
+    meta = s.get(DATASETS["archive"].replace("/datasets/", "/api/1/datasets/") + "/", timeout=60).json()
+    url = next(r["url"] for r in meta["resources"] if r["url"].endswith(".json"))
+    return s.get(url, timeout=120).json()["pnt"]
+
+
+def refreshed_dates(cfg: Config, tree: dict, now: pd.Timestamp, obs_lag_h: int = 30) -> list[str]:
+    """Dates whose run is complete in the archive (all lead groups of the package) and whose
+    48 h target window should already be covered by the daily-updated SYNOP file."""
+    a, o = cfg["arome"], cfg["origins"]
+    groups = len(GROUPS_0025)
+    out = []
+    for rid, models in sorted(tree.items()):
+        init = ts(rid)
+        if init.hour != a["run_hour_utc"]:
+            continue
+        files = models.get("arome", {}).get(a["grid"], {}).get(a["package"], [])
+        origin = init.normalize() + pd.Timedelta(hours=o["hour_utc"])
+        horizon = pd.Timedelta(hours=cfg["forecast"]["step_hours"] * cfg["forecast"]["horizon_steps"])
+        if len(files) == groups and origin + horizon <= now - pd.Timedelta(hours=obs_lag_h):
+            out.append(f"{init:%Y-%m-%d}")
+    return out
+
+
+def refresh_suite(base_path: Path, out_dir: Path, now: pd.Timestamp | None = None, tree: dict | None = None,
+                  log=print) -> Path | None:
+    """Write a new AROME suite config for the dates currently in the archive.
+
+    The suite id encodes the date span, so refreshed dates never reuse a frozen suite id.
+    Returns None when the dates equal the base suite's dates. Nothing is downloaded here.
+    """
+    import yaml
+
+    from weather_lab.common import load_config
+
+    base = load_config(base_path)
+    dates = refreshed_dates(base, tree if tree is not None else archive_tree(), now or pd.Timestamp.now(tz="UTC"))
+    if not dates:
+        raise RuntimeError("no complete runs with verifying observations in the archive window")
+    if dates == list(base["origins"]["dates"]):
+        log(f"archive dates equal {base.suite}'s dates; keep the existing suite")
+        return None
+    sid = f"arome-issued-r{dates[0].replace('-', '')}-{dates[-1].replace('-', '')}"
+    raw = dict(base.raw)
+    raw.update(suite=sid, variant="refresh", label=f"integration study (archive {dates[0]}..{dates[-1]})",
+               manifest=f"benchmarks/manifests/{sid}.json")
+    raw["origins"] = dict(raw["origins"], dates=dates)
+    last = ts(f"{dates[-1]}T{raw['origins']['hour_utc']:02d}:00Z") + pd.Timedelta(hours=48)
+    raw["splits"] = dict(raw["splits"], test=[f"{dates[0]}T00:00Z", f"{last:%Y-%m-%dT%H:%MZ}"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{sid}.yaml"
+    with open(path, "w") as f:
+        f.write(f"# Refreshed from {base_path.name}: dates differ, so this is a NEW suite id.\n")
+        yaml.safe_dump(raw, f, sort_keys=False, allow_unicode=True)
+    log(f"wrote {path} ({len(dates)} dates {dates[0]}..{dates[-1]})")
+    return path

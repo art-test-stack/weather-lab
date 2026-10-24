@@ -22,6 +22,26 @@ from weather_lab.common import VARIABLES  # noqa: E402
 from weather_lab.results import (SUITES, available_runs, case_forecast, filter_metrics, forecast_csv,  # noqa: E402
                                  station_label, training_status)
 
+
+
+def startup_bootstrap() -> dict | None:
+    """Fetch/verify required artifacts before building the UI (idempotent; reuses the cache)."""
+    import os
+
+    from weather_lab.bootstrap import BootstrapError, bootstrap
+
+    if os.environ.get("WEATHER_LAB_BOOTSTRAP", "on") == "off":
+        return None
+    try:
+        return bootstrap()
+    except BootstrapError as e:
+        print(f"bootstrap failed: {e}", flush=True)
+        from weather_lab.bootstrap import _state
+
+        return _state()
+
+
+BOOT = startup_bootstrap()
 RUNS = available_runs()
 DEFAULT_SUITE = "synop-historical-v1" if "synop-historical-v1" in RUNS else next(iter(RUNS), None)
 STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "external NWP (issued run)", "no fitting"]
@@ -52,7 +72,7 @@ def _round(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
 def suite_header(suite: str) -> str:
     run = RUNS[suite]
     m = run.manifest
-    tag = "integration study" if suite == "arome-issued-v1" else "integration check (smoke)"
+    tag = "integration study" if suite.startswith("arome-issued") else "integration check (smoke)"
     return (f"<span class='badge'>{SUITES[suite]}</span><span class='warn'>{tag}: not a performance claim</span>"
             f"<br><small>run <code>{run.run['run_id']}</code> · {run.source} · "
             f"{m['n_eligible']}/{m['n_cases']} eligible cases · {len(m['protocol']['stations'])} stations · "
@@ -151,10 +171,10 @@ def explorer_controls(suite: str, case_id: str | None = None):
     variables = [v for v in VARIABLES if v in set(preds["variable"])]
     systems = run.models
     default_sys = [m for m in systems if m in ("persistence", "climatology", "arome-raw", "timestral-28m-mv-cal",
-                                               "timestral-28m-mv-cal-arome")]
+                                               "timestral-28m-mv-cal-arome", "timestral-28m-mv-cal-arome-archived")]
     prob_models = [m for m in systems if (preds.loc[preds["model"] == m, "output_type"] == "quantiles").any()]
-    band_default = "timestral-28m-mv-cal-arome" if "timestral-28m-mv-cal-arome" in prob_models else \
-        ("timestral-28m-mv-cal" if "timestral-28m-mv-cal" in prob_models else prob_models[0])
+    band_default = next((m for m in ("timestral-28m-mv-cal-arome-archived", "timestral-28m-mv-cal-arome",
+                                     "timestral-28m-mv-cal") if m in prob_models), prob_models[0])
     st_cases = cases[cases["station"] == station]
     return (gr.update(choices=[(station_label(s), s) for s in run.manifest["protocol"]["stations"]], value=station),
             gr.update(choices=_case_choices(st_cases, examples), value=case_id),
@@ -230,6 +250,31 @@ def methods_md() -> str:
         prov.append(f"| {suite} | `{run.run['run_id']}` | {run.source} | `{run.run['code_revision'][:12]}` | "
                     f"`{run.run['timestral_package'][:12]}` | {', '.join(ckpt)} |")
     return text + "\n".join(prov)
+
+
+def failure_ui(state: dict) -> gr.Blocks:
+    """Retryable failure state: explain what failed and offer a retry with progress."""
+    import os
+    import threading
+
+    from weather_lab.bootstrap import BootstrapError, bootstrap, summarize_failure
+
+    def retry(progress=gr.Progress()):
+        try:
+            bootstrap(progress=lambda f, m: progress(f, desc=m))
+        except BootstrapError:
+            from weather_lab.bootstrap import _state
+
+            return summarize_failure(_state()) + f" (attempt {_state().get('attempts')})"
+        # restart the process so the full explorer is built from the fetched artifacts
+        threading.Timer(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)).start()
+        return "Setup complete. Restarting the app: reload this page in a few seconds."
+
+    with gr.Blocks(title="Timestral Weather Lab: setup") as ui:
+        gr.Markdown("# Timestral Weather Lab\nThe app fetches its data snapshot and model weights at startup.")
+        status = gr.Markdown(summarize_failure(state))
+        gr.Button("Retry setup", variant="primary").click(retry, None, status, concurrency_limit=1)
+    return ui
 
 
 def build() -> gr.Blocks:
@@ -357,7 +402,7 @@ def build() -> gr.Blocks:
     return demo
 
 
-demo = build()
+demo = failure_ui(BOOT) if (BOOT or {}).get("status") == "failed" and not RUNS else build()
 
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=4).launch(

@@ -1,0 +1,84 @@
+# Full 2024 TEST evaluation with the context frozen in configs/frozen/context-selection-2023.yaml.
+# NOT run yet. Run once; do not tune on its results.
+suite: synop-historical-v2
+variant: test-frozen
+label: benchmark test (frozen choices)
+manifest: benchmarks/manifests/synop-historical-v2.test.json
+paths:
+  raw: data/raw
+  processed: data/processed
+  runs: runs
+data:
+  years:
+  - 2018
+  - 2019
+  - 2020
+  - 2021
+  - 2022
+  - 2023
+  - 2024
+  stations:
+  - '07630'
+  - 07149
+  - '07110'
+  - 07190
+  - 07690
+splits:
+  fit:
+  - 2018-01-01T00:00Z
+  - 2022-12-31T21:00Z
+  validation:
+  - 2023-01-01T00:00Z
+  - 2023-12-31T21:00Z
+  test:
+  - 2024-01-01T00:00Z
+  - 2024-12-31T21:00Z
+origins:
+  rule: daily
+  hour_utc: 0
+  splits:
+  - test
+forecast:
+  step_hours: 3
+  horizon_steps: 16
+  context_days: 90
+  highlight_leads_h:
+  - 6
+  - 24
+  - 48
+eligibility:
+  variable: t
+  min_context_observed_fraction: 0.8
+  require_observation_within_hours: 24
+  windows_days:
+  - 7
+  - 30
+  - 90
+variables:
+- t
+- pmer
+- u
+- v
+models:
+- id: persistence
+  kind: persistence
+- id: seasonal-naive-24h
+  kind: seasonal_naive
+- id: climatology
+  kind: climatology
+  window_days: 15
+  min_samples: 20
+- id: timestral-28m-mv-cal-ctx90
+  kind: timestral
+  targets:
+  - t
+  - pmer
+  - u
+  - v
+  calendar: true
+  context_days: 90
+timestral:
+  checkpoint: mistralai/Timestral-28M
+  revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+  batch_size: 32
+  max_concurrent: 1

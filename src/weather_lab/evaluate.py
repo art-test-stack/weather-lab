@@ -103,7 +103,14 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
                 for k in range(h):
                     vt = c.origin + (k + 1) * step
                     arome_arr[i, j, k] = a.get((run, c.station, var, vt), np.nan)
-    batch = CaseBatch(cases.reset_index(drop=True), variables, hist, origins, future, f["step_hours"], arome_arr)
+    hist_args = {}
+    if arome_df is not None:
+        hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(f["step_hours"], "h"))[None]
+        vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), origins, hist_times,
+                                                       variables)
+        hist_args = {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}
+    batch = CaseBatch(cases.reset_index(drop=True), variables, hist, origins, future, f["step_hours"], arome_arr,
+                      **hist_args)
     return batch, targets
 
 
@@ -172,7 +179,8 @@ def run_evaluation(cfg: Config, log=print) -> Path:
     log(f"suite {cfg.suite} [{cfg.get('label')}]: {len(cases)}/{len(cases_all)} eligible cases, "
         f"{len(adapters)} systems, history {history_steps} steps")
 
-    run_id = f"{cfg.get('variant', 'run')}-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{cfg.hash()[:8]}"
+    tag = "-".join(x for x in (cfg.get("variant", "run"), cfg.get("experiment")) if x)
+    run_id = f"{tag}-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{cfg.hash()[:8]}"
     run_dir = cfg.dir("runs") / cfg.suite / run_id
     run_dir.mkdir(parents=True)
     frames, systems = [], []
