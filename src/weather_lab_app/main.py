@@ -482,12 +482,28 @@ def failure_ui(state: dict) -> gr.Blocks:
     return ui
 
 
+def fallback_notice(state: dict | None) -> str | None:
+    """One-line notice when bootstrap installed an earlier snapshot because the pinned one failed."""
+    snap = (state or {}).get("snapshot") or {}
+    if not snap.get("fallback"):
+        return None
+    err = str(snap.get("primary_error") or "unknown error")
+    low = err.lower()
+    reason = ("file not found in the storage bucket" if "not found" in low else
+              "checksum mismatch" if "checksum" in low else
+              (err[:117] + "...") if len(err) > 120 else err)
+    return (f"Showing data snapshot `{snap.get('id')}` (fallback): pinned snapshot `{snap.get('primary_id')}` "
+            f"could not be fetched — {reason}. Results shown are from the earlier snapshot.")
+
+
 def build() -> gr.Blocks:
     with gr.Blocks(title="Weather-lab") as demo:
         if DEFAULT_SUITE is None:
             gr.Markdown("# Weather-lab\nNo saved results found. Run `uv run weather-lab bootstrap`.")
             return demo
         gr.Markdown(f"# Weather-lab\n{QUESTION}", elem_id="hero")
+        if notice := fallback_notice(BOOT):
+            gr.Markdown(f"**Note:** {notice}", elem_classes="note", elem_id="snapshot-fallback")
         with gr.Row(equal_height=True):
             exp = gr.Dropdown(experiment_choices(), value=DEFAULT_SUITE, label="Experiment", scale=2, min_width=240)
             var = gr.Dropdown(variable_choices(DEFAULT_SUITE), value="t", label="Weather variable", scale=1,

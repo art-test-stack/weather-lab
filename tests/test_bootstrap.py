@@ -101,3 +101,118 @@ def test_bucket_url_without_mount_uses_hub_api(tmp_path, monkeypatch):
     out = B.download("hf://buckets/owner/store/dir/snap.tar.gz", tmp_path / "o.tgz",
                      hashlib.sha256(b"remote").hexdigest(), lambda *_: None, "snapshot", 0, 1)
     assert calls == [("owner/store", "dir/snap.tar.gz")] and out.read_bytes() == b"remote"
+
+
+# --------------------------------------------------------------------------- snapshot fallbacks
+
+def _tarball(path: Path, snapshot_id: str, files: dict[str, bytes]) -> str:
+    """Tiny archive in `build_snapshot`'s format (yaml index.json + members); returns its sha256."""
+    import gzip
+    import hashlib
+    import io
+    import tarfile
+
+    index = {"snapshot_id": snapshot_id,
+             "files": [{"path": p, "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()} for p, b in files.items()]}
+    with open(path, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gz, \
+            tarfile.open(fileobj=gz, mode="w") as tar:
+        for name, data in [("index.json", yaml.safe_dump(index).encode()), *files.items()]:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture
+def sandbox(tmp_path, monkeypatch):
+    """Point bootstrap at a tmp root/cache/state and return (B, root, src dir, run(snap) -> state)."""
+    from weather_lab import bootstrap as B
+
+    root = (tmp_path / "root").resolve()
+    src = tmp_path / "src"
+    root.mkdir()
+    src.mkdir()
+    monkeypatch.setattr(B, "ROOT", root)
+    monkeypatch.setattr(B, "CACHE", root / "data" / "cache")
+    monkeypatch.setattr(B, "STATE_PATH", root / "data" / "bootstrap_state.json")
+
+    def run(snap):
+        monkeypatch.setattr(B, "make_plan", lambda *a, **k: B.Plan("snapshot", [], snap, []))
+        return B.bootstrap(weights=False, progress=lambda *_: None, log=lambda *_: None)
+
+    return B, root, src, run
+
+
+def _snap(src: Path, name: str, sha: str, fallbacks=()) -> dict:
+    return {"id": name, "url": f"file://{src / (name + '.tar.gz')}", "sha256": sha, "fallbacks": list(fallbacks)}
+
+
+def test_missing_primary_falls_back_to_first_fallback(sandbox):
+    B, root, src, run = sandbox
+    v3 = _tarball(src / "v3.tar.gz", "v3", {"data/x.txt": b"three"})
+    v2 = _tarball(src / "v2.tar.gz", "v2", {"data/x.txt": b"two"})
+    snap = _snap(src, "v4", "1" * 64, [_snap(src, "v3", v3), _snap(src, "v2", v2)])
+    state = run(snap)
+    assert state["status"] == "ready" and (root / "data" / "x.txt").read_bytes() == b"three"
+    assert state["snapshot"]["id"] == "v3" and state["snapshot"]["fallback"] is True
+    assert state["snapshot"]["primary_id"] == "v4" and "download failed" in state["snapshot"]["primary_error"]
+    saved = B.read_json(B.STATE_PATH)
+    assert saved["snapshot"] == state["snapshot"] and saved["steps"]["snapshot"]["snapshot_id"] == "v3"
+    # idempotent: the cached verified fallback archive is reused even once its source is gone
+    (src / "v3.tar.gz").unlink()
+    again = run(snap)
+    assert again["snapshot"]["id"] == "v3" and again["steps"]["snapshot"]["reused"] == 1
+
+
+def test_primary_with_wrong_checksum_uses_fallback(sandbox):
+    B, root, src, run = sandbox
+    _tarball(src / "v4.tar.gz", "v4", {"data/x.txt": b"tampered"})
+    v3 = _tarball(src / "v3.tar.gz", "v3", {"data/x.txt": b"three"})
+    state = run(_snap(src, "v4", "2" * 64, [_snap(src, "v3", v3)]))
+    assert state["snapshot"]["id"] == "v3" and state["snapshot"]["fallback"]
+    assert "checksum mismatch" in state["snapshot"]["primary_error"]
+    assert (root / "data" / "x.txt").read_bytes() == b"three"
+
+
+def test_all_candidates_failing_raises(sandbox):
+    B, root, src, run = sandbox
+    _tarball(src / "v3.tar.gz", "v3", {"data/x.txt": b"three"})
+    with pytest.raises(BootstrapError) as e:
+        run(_snap(src, "v4", "1" * 64, [_snap(src, "v3", "3" * 64), _snap(src, "v2", "4" * 64)]))
+    assert "v4" in e.value.message and "v3" in e.value.message and "v2" in e.value.message
+    saved = B.read_json(B.STATE_PATH)
+    assert saved["status"] == "failed" and "snapshot" not in saved and not (root / "data" / "x.txt").exists()
+
+
+def test_present_primary_uses_no_fallback(sandbox):
+    B, root, src, run = sandbox
+    v4 = _tarball(src / "v4.tar.gz", "v4", {"data/x.txt": b"four"})
+    v3 = _tarball(src / "v3.tar.gz", "v3", {"data/x.txt": b"three"})
+    state = run(_snap(src, "v4", v4, [_snap(src, "v3", v3)]))
+    assert state["snapshot"] == {"id": "v4", "fallback": False, "primary_id": "v4", "primary_error": None}
+    assert (root / "data" / "x.txt").read_bytes() == b"four"
+    assert not (B.CACHE / "snapshots" / f"{v3[:16]}.tar.gz").exists()
+
+
+def test_plan_env_override_keeps_fallbacks(monkeypatch):
+    from weather_lab.bootstrap import load_bootstrap_config, make_plan
+
+    deploy = load_bootstrap_config()
+    monkeypatch.setenv("WEATHER_LAB_SNAPSHOT_URL", "file:///tmp/other.tar.gz")
+    monkeypatch.setenv("WEATHER_LAB_SNAPSHOT_SHA256", "5" * 64)
+    plan = make_plan("snapshot", deploy=deploy)
+    assert plan.snapshot["url"] == "file:///tmp/other.tar.gz" and plan.snapshot["sha256"] == "5" * 64
+    assert plan.snapshot["id"] == "other"
+    assert plan.snapshot["fallbacks"] == deploy["bootstrap"]["snapshot"]["fallbacks"]
+    assert [f["id"] for f in plan.snapshot["fallbacks"]][:1] == ["wl-snapshot-v3-20261025"]
+
+
+def test_app_notice_only_for_fallback():
+    from weather_lab_app.main import fallback_notice
+
+    assert fallback_notice(None) is None
+    assert fallback_notice({"snapshot": {"id": "v4", "fallback": False}}) is None
+    msg = fallback_notice({"snapshot": {"id": "v3", "fallback": True, "primary_id": "v4",
+                                        "primary_error": "download failed: 1 file(s) not found in bucket 'a/b': v4"}})
+    assert msg.startswith("Showing data snapshot `v3` (fallback): pinned snapshot `v4` could not be fetched")
+    assert "not found" in msg and msg.endswith("Results shown are from the earlier snapshot.")

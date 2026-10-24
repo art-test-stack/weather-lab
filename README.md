@@ -88,6 +88,7 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
 
 - The front matter comes from `src/weather_lab_app/space.yaml`. The launcher only adds `src/` to the path and calls `weather_lab_app.main:main`.
 - No data or weights are uploaded. At startup the app runs `bootstrap`, which fetches the snapshot and the pinned 28M weights (111 MB) and verifies both.
+- Snapshot fallback: if the pinned snapshot cannot be fetched or fails its checksum, `bootstrap` tries `bootstrap.snapshot.fallbacks` in `configs/bootstrap.yaml` in order. These are earlier immutable snapshots, each pinned by SHA-256. `data/bootstrap_state.json` records the snapshot that was used (`snapshot.id`, `snapshot.fallback`, `snapshot.primary_error`), and the app shows a one-line notice under the question. The "Retry setup" screen appears only when no candidate can be installed and there are no saved runs.
 - `.github/workflows/deploy-space.yml` automates the build and upload. It runs on manual dispatch or a `space-v*` tag, uses the GitHub environment `huggingface-space` (secret `HF_TOKEN`, variable `HF_SPACE_ID`), runs the unit tests, builds `dist/space`, and uploads it with `hf upload --repo-type space --delete "*"`. That makes the Space an exact copy of the build; `.gitattributes` is kept.
 
 **Current deployment** ([ai-testack/weather-lab](https://huggingface.co/spaces/ai-testack/weather-lab)):

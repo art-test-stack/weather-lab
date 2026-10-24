@@ -14,6 +14,16 @@ bootstrap:
     # otherwise the file is downloaded through the Hub API. Both paths are checksum-verified.
     mounts:
       ai-testack/weather-lab-storage: /data
+    # Earlier immutable snapshots, tried in order only when the pinned one above cannot be fetched or
+    # fails its checksum (the app then shows which snapshot it is using). Each entry is pinned by its
+    # SHA-256, so a fallback can only ever install a known snapshot. Mounts above apply to them too.
+    fallbacks:
+      - id: wl-snapshot-v3-20261025
+        url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v3-20261025.tar.gz
+        sha256: 56beb05b602c899b591e7ca7ac2a784acde0305a369ffae377a2b537c02061ea
+      - id: wl-snapshot-v2-20261024
+        url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v2-20261024.tar.gz
+        sha256: aa9b45ee76326508885962045fea7a273e34202cfd5ee854f59e56434faa378b
   weights:
     - repo: mistralai/Timestral-28M
       revision: 49b26409ac87b5935539a5d8ffe7f397b720db47

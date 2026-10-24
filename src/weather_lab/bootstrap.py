@@ -68,7 +68,11 @@ def make_plan(mode: str = "auto", snapshot_url: str | None = None, snapshot_sha2
               suites: list[str] | None = None, deploy: dict | None = None) -> Plan:
     d = (deploy or load_bootstrap_config())["bootstrap"]
     snap = dict(d.get("snapshot") or {})
-    snap["url"] = snapshot_url or os.environ.get("WEATHER_LAB_SNAPSHOT_URL") or snap.get("url")
+    snap["fallbacks"] = [dict(f) for f in snap.get("fallbacks") or []]
+    url = snapshot_url or os.environ.get("WEATHER_LAB_SNAPSHOT_URL") or snap.get("url")
+    if url != snap.get("url"):  # overridden location: the configured id no longer describes it
+        snap["id"] = _snapshot_label({"url": url})
+    snap["url"] = url
     snap["sha256"] = snapshot_sha256 or os.environ.get("WEATHER_LAB_SNAPSHOT_SHA256") or snap.get("sha256")
     mode = os.environ.get("WEATHER_LAB_BOOTSTRAP_MODE", mode) if mode == "auto" else mode
     if mode == "auto":
@@ -233,6 +237,46 @@ def install_snapshot(snap: dict, progress: Progress, lo: float, hi: float) -> di
     return {"snapshot_id": index["snapshot_id"], "installed": installed, "reused": reused}
 
 
+def _snapshot_label(snap: dict) -> str:
+    return snap.get("id") or Path(str(snap.get("url") or "snapshot")).name.removesuffix(".tar.gz")
+
+
+def install_snapshot_with_fallbacks(snap: dict, progress: Progress, lo: float, hi: float) -> dict:
+    """Install the pinned snapshot; if it cannot be fetched or verified, try `snap["fallbacks"]` in order.
+
+    Fallbacks are earlier immutable snapshots, each pinned by its own SHA-256, so a fallback can only
+    install a known archive. Only fetch/checksum failures (retryable errors raised before anything is
+    written) move on to the next candidate; a configuration error or a bad archive member stops here.
+    Returns the install result plus which snapshot was used, whether it is a fallback and the primary error.
+    """
+    primary = {k: v for k, v in snap.items() if k != "fallbacks"}
+    candidates = [primary] + [{"mounts": snap.get("mounts"), **f} for f in snap.get("fallbacks") or []]
+    errors: list[dict] = []
+    for k, cand in enumerate(candidates):
+        label = _snapshot_label(cand)
+        if k:
+            progress(lo, f"snapshot: trying fallback {label}")
+        try:
+            result = install_snapshot(cand, progress, lo, hi)
+        except BootstrapError as e:
+            errors.append({"id": label, "message": e.message})
+            progress(lo, f"snapshot {label} unavailable: {e.message}")
+            if k == 0 and not cand.get("url"):
+                raise  # nothing configured: not a fetch failure
+            if not e.retryable or k == len(candidates) - 1:
+                if len(errors) > 1:
+                    raise BootstrapError("snapshot", "no snapshot could be installed: "
+                                         + "; ".join(f"{x['id']}: {x['message']}" for x in errors),
+                                         retryable=e.retryable, hint=e.hint) from e
+                raise
+            continue
+        result.update(used=label, url=cand["url"], sha256=cand["sha256"], fallback=k > 0,
+                      primary_id=_snapshot_label(primary), primary_error=errors[0]["message"] if errors else None,
+                      failed_candidates=errors)
+        return result
+    raise AssertionError("unreachable")
+
+
 # --------------------------------------------------------------------------- official
 
 def prepare_suite(cfg: Config, log=print) -> dict:
@@ -343,12 +387,18 @@ def bootstrap(mode: str = "auto", snapshot_url: str | None = None, snapshot_sha2
     state = _state()
     state.update(attempts=state.get("attempts", 0) + 1, mode=plan.mode, started_at=now_utc(), status="running")
     state.pop("error", None)
+    state.pop("snapshot", None)
     _save(state)
     t0 = time.perf_counter()
     try:
         progress(0.0, f"mode {plan.mode}: {', '.join(c.suite for c in plan.suites)}")
         if plan.mode == "snapshot":
-            state["steps"]["snapshot"] = install_snapshot(plan.snapshot, progress, 0.0, 0.6)
+            snap = state["steps"]["snapshot"] = install_snapshot_with_fallbacks(plan.snapshot, progress, 0.0, 0.6)
+            state["snapshot"] = {"id": snap["used"], "fallback": snap["fallback"], "primary_id": snap["primary_id"],
+                                 "primary_error": snap["primary_error"]}
+            if snap["fallback"]:
+                log(f"bootstrap: using fallback snapshot {snap['used']} (pinned {snap['primary_id']} failed: "
+                    f"{snap['primary_error']})")
         else:
             n = len(plan.suites)
             state["steps"]["suites"] = [official_suite(c, progress, 0.6 * k / n, 0.6 * (k + 1) / n, log)
