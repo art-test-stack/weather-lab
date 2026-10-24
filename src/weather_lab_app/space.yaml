@@ -7,6 +7,8 @@ sdk: gradio
 sdk_version: 6.30.0
 python_version: '3.12'
 app_file: app.py
+# CPU inference only (no @spaces.GPU); ZeroGPU would require torch <= 2.13.0. Not auto-assigned.
+suggested_hardware: cpu-basic
 pinned: false
 license: apache-2.0
 short_description: Probabilistic weather forecasting at French stations

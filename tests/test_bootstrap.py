@@ -1,5 +1,7 @@
 """Bootstrap guards, spec validation and refreshed-suite ids (synthetic inputs, no network)."""
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 import yaml
@@ -57,3 +59,45 @@ def test_spec_rejects_different_case_data():
     manifest["case_data_sha256"] = "x"
     with pytest.raises(RuntimeError, match="does not reproduce"):
         check_manifest(cfg, manifest)
+
+
+def test_bucket_url_prefers_mounted_volume_and_verifies_it(tmp_path, monkeypatch):
+    import hashlib
+
+    from weather_lab import bootstrap as B
+
+    mount = tmp_path / "data"
+    mount.mkdir()
+    (mount / "snap.tar.gz").write_bytes(b"payload")
+    url = "hf://buckets/owner/store/snap.tar.gz"
+    assert B.resolve_bucket(url, {"owner/store": str(mount)}) == ("owner/store", "snap.tar.gz", mount / "snap.tar.gz")
+    assert B.resolve_bucket(url, {"owner/store": str(tmp_path / "absent")})[2] is None
+
+    def no_network(*a, **k):
+        raise AssertionError("mounted file must be used without downloading")
+
+    monkeypatch.setattr("huggingface_hub.download_bucket_files", no_network)
+    digest = hashlib.sha256(b"payload").hexdigest()
+    got = B.download(url, tmp_path / "out.tar.gz", digest, lambda *_: None, "snapshot", 0, 1,
+                     mounts={"owner/store": str(mount)})
+    assert got.read_bytes() == b"payload"
+    with pytest.raises(BootstrapError):          # a mutable bucket file that changed is rejected
+        B.download(url, tmp_path / "other.tar.gz", "0" * 64, lambda *_: None, "snapshot", 0, 1,
+                   mounts={"owner/store": str(mount)})
+
+
+def test_bucket_url_without_mount_uses_hub_api(tmp_path, monkeypatch):
+    import hashlib
+
+    from weather_lab import bootstrap as B
+
+    calls = []
+
+    def fake(bucket_id, files, raise_on_missing_files=False, token=None):
+        calls.append((bucket_id, files[0][0]))
+        Path(files[0][1]).write_bytes(b"remote")
+
+    monkeypatch.setattr("huggingface_hub.download_bucket_files", fake)
+    out = B.download("hf://buckets/owner/store/dir/snap.tar.gz", tmp_path / "o.tgz",
+                     hashlib.sha256(b"remote").hexdigest(), lambda *_: None, "snapshot", 0, 1)
+    assert calls == [("owner/store", "dir/snap.tar.gz")] and out.read_bytes() == b"remote"

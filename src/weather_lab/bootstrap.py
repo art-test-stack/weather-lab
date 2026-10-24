@@ -91,8 +91,25 @@ def _save(state: dict) -> None:
 
 # --------------------------------------------------------------------------- downloads
 
-def download(url: str, dest: Path, sha256: str | None, progress: Progress, label: str, lo: float, hi: float) -> Path:
-    """Download (http(s) or file://) with progress; verify SHA-256; reuse a verified cached copy."""
+BUCKET_PREFIX = "hf://buckets/"
+
+
+def resolve_bucket(url: str, mounts: dict[str, str] | None) -> tuple[str, str, Path | None]:
+    """`hf://buckets/<owner>/<bucket>/<path>` -> (bucket id, path in bucket, local mounted file or None).
+
+    `mounts` maps a bucket id to the directory where it is attached as a volume (e.g. a Space
+    volume at /data). A mounted copy is used only if it exists; it is checksum-verified like a download.
+    """
+    owner, name, *rest = url[len(BUCKET_PREFIX):].split("/")
+    bucket, path = f"{owner}/{name}", "/".join(rest)
+    mount = (mounts or {}).get(bucket)
+    local = Path(mount) / path if mount and (Path(mount) / path).is_file() else None
+    return bucket, path, local
+
+
+def download(url: str, dest: Path, sha256: str | None, progress: Progress, label: str, lo: float, hi: float,
+             mounts: dict[str, str] | None = None) -> Path:
+    """Fetch http(s)://, file:// or hf://buckets/ with progress; verify SHA-256; reuse a verified cached copy."""
     if dest.exists() and (sha256 is None or sha256_file(dest) == sha256):
         progress(hi, f"{label}: cached ({dest.stat().st_size / 1e6:.1f} MB)")
         return dest
@@ -100,7 +117,18 @@ def download(url: str, dest: Path, sha256: str | None, progress: Progress, label
     tmp = dest.with_suffix(dest.suffix + ".part")
     h = hashlib.sha256()
     try:
-        if url.startswith("file://"):
+        if url.startswith(BUCKET_PREFIX):
+            bucket, path, local = resolve_bucket(url, mounts)
+            if local is not None:
+                progress(lo, f"{label}: reading mounted bucket file {local}")
+                shutil.copyfile(local, tmp)
+            else:
+                from huggingface_hub import download_bucket_files
+
+                progress(lo, f"{label}: downloading {url}")
+                download_bucket_files(bucket, [(path, str(tmp))], raise_on_missing_files=True)
+            h.update(tmp.read_bytes())
+        elif url.startswith("file://"):
             shutil.copyfile(url[7:], tmp)
             h.update(tmp.read_bytes())
         else:
@@ -115,7 +143,7 @@ def download(url: str, dest: Path, sha256: str | None, progress: Progress, label
                         if total and time.time() - last > 1:
                             last = time.time()
                             progress(lo + (hi - lo) * done / total, f"{label}: {done / 1e6:.0f}/{total / 1e6:.0f} MB")
-    except (requests.RequestException, OSError) as e:
+    except Exception as e:  # noqa: BLE001 - network, hub and filesystem errors are all retryable here
         tmp.unlink(missing_ok=True)
         raise BootstrapError(label, f"download failed: {e}", retryable=True) from e
     if sha256 is not None and h.hexdigest() != sha256:
@@ -123,7 +151,7 @@ def download(url: str, dest: Path, sha256: str | None, progress: Progress, label
         raise BootstrapError(label, f"checksum mismatch (got {h.hexdigest()[:12]}, expected {sha256[:12]})",
                              retryable=True, hint="the remote file changed or the transfer was corrupted")
     tmp.rename(dest)
-    progress(hi, f"{label}: downloaded {dest.stat().st_size / 1e6:.1f} MB, sha256 verified")
+    progress(hi, f"{label}: fetched {dest.stat().st_size / 1e6:.1f} MB, sha256 verified")
     return dest
 
 
@@ -184,7 +212,7 @@ def install_snapshot(snap: dict, progress: Progress, lo: float, hi: float) -> di
                              hint="set bootstrap.snapshot.url and .sha256 in configs/bootstrap.yaml (or "
                                   "WEATHER_LAB_SNAPSHOT_URL / WEATHER_LAB_SNAPSHOT_SHA256), or use --mode official")
     archive = download(snap["url"], CACHE / "snapshots" / f"{snap['sha256'][:16]}.tar.gz", snap["sha256"],
-                       progress, "snapshot", lo, lo + 0.8 * (hi - lo))
+                       progress, "snapshot", lo, lo + 0.8 * (hi - lo), mounts=snap.get("mounts"))
     installed = reused = 0
     with tarfile.open(archive, "r:gz") as tar:
         index = yaml.safe_load(tar.extractfile("index.json").read())

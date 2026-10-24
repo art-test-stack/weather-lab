@@ -56,19 +56,21 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
 ```
 
 - The front matter comes from `src/weather_lab_app/space.yaml`. The launcher only adds `src/` to the path and calls `weather_lab_app.main:main`.
-- No data or weights are uploaded. At startup the app runs `bootstrap`, which downloads the snapshot and the pinned 28M weights (111 MB), verifies both, and reuses them after a restart.
+- No data or weights are uploaded. At startup the app runs `bootstrap`, which fetches the snapshot and the pinned 28M weights (111 MB) and verifies both.
 - `.github/workflows/deploy-space.yml` automates the build and upload. It runs on manual dispatch or a `space-v*` tag, uses the GitHub environment `huggingface-space` (secret `HF_TOKEN`, variable `HF_SPACE_ID`), runs the unit tests, builds `dist/space`, and uploads it with `hf upload --repo-type space --delete "*"`. That makes the Space an exact copy of the build; `.gitattributes` is kept.
 
-**Next steps to publish:**
+**Current deployment** ([ai-testack/weather-lab](https://huggingface.co/spaces/ai-testack/weather-lab)):
 
-1. **Host the data snapshot immutably.** Create a Hugging Face Dataset (e.g. `<user>/weather-lab-snapshots`) and upload `dist/snapshot/<id>.tar.gz` with `hf upload <user>/weather-lab-snapshots dist/snapshot . --repo-type dataset`. Put the URL pinned to the upload commit (`https://huggingface.co/datasets/<user>/weather-lab-snapshots/resolve/<commit>/<id>.tar.gz`) and the `.sha256` value into `bootstrap.snapshot` in `configs/bootstrap.yaml`, then commit.
-2. **Create the Space** (Gradio SDK, CPU Basic) on huggingface.co. Creating Gradio Spaces requires a paid HF plan ([Spaces overview](https://huggingface.co/docs/hub/spaces-overview)).
-3. **Create a fine-grained HF token** with write access to that Space only.
-4. **On GitHub, add the environment** (Settings → Environments → `huggingface-space`): secret `HF_TOKEN`, variable `HF_SPACE_ID=<user>/weather-lab`. Optionally require a reviewer.
-5. **Push, then run the "Deploy Hugging Face Space" workflow**: from the Actions tab, or with `git tag space-v1 && git push origin space-v1`.
-6. **Check the Space build logs.** The first start downloads about 11 MB of snapshot and 111 MB of weights, then serves the explorer.
-
-Before step 1, you can rehearse locally: build the Space content, serve the snapshot with `python -m http.server`, and start `python app.py` inside `dist/space` with `WEATHER_LAB_SNAPSHOT_URL` / `WEATHER_LAB_SNAPSHOT_SHA256` set.
+- **Snapshot.** The data snapshot lives in the public Storage Bucket [`ai-testack/weather-lab-storage`](https://huggingface.co/buckets/ai-testack/weather-lab-storage). `configs/bootstrap.yaml` pins it as `hf://buckets/ai-testack/weather-lab-storage/<id>.tar.gz` with its SHA-256.
+  - In the Space the bucket is attached at `/data`, so `bootstrap` reads the file from the mount. Elsewhere (locally, CI) it downloads it through the Hub API. Both paths verify the checksum.
+  - Buckets are mutable and unversioned: never overwrite a snapshot file. Upload a new id (`weather-lab snapshot build --id …`, then `hf buckets cp dist/snapshot/<id>.tar.gz hf://buckets/ai-testack/weather-lab-storage/`) and update the pinned URL and SHA-256.
+  - The app only reads the bucket, so attaching it **read-only** is safer.
+  - The installed artifacts go to the Space's ephemeral disk (`/home/user/app/data`). They are re-extracted from the mounted snapshot at each restart, which takes seconds.
+- **Hardware: use CPU Basic.**
+  - The app runs CPU inference only, with no `@spaces.GPU`.
+  - ZeroGPU accepts only torch 2.8.0–2.13.0, and the lockfile pins 2.14.1.
+  - torch 2.13.0 was tested: forecasts differ by at most 1.9×10⁻⁶ and scores by at most 4×10⁻⁷ (float rounding). That is enough to break the specs' exact score hashes, so moving to ZeroGPU would mean re-freezing those hashes under the new environment.
+- **GitHub.** The workflow uses the environment `huggingface-space`. GitHub creates it automatically on first run, and repository-level secrets and variables (`HF_TOKEN`, `HF_SPACE_ID`) are available inside it. Moving `HF_TOKEN` into the environment and adding a required reviewer or a tag-only deployment rule restricts who can trigger an upload with that write token.
 
 ## Suites and versions
 

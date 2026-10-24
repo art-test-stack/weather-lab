@@ -5,11 +5,15 @@ bootstrap:
   # auto = snapshot when snapshot.url is set (or WEATHER_LAB_SNAPSHOT_URL), else official sources.
   mode: auto
   snapshot:
-    id: null
-    # MISSING: no immutable remote location exists yet. Fill url + sha256 after uploading the
-    # archive produced by `weather-lab snapshot build` (see README "Deployment").
-    url: null
-    sha256: null
+    id: wl-snapshot-v2-20261024
+    # Public Hugging Face Storage Bucket. Buckets are mutable and unversioned, so integrity rests on
+    # the pinned SHA-256: never overwrite a snapshot file; publish a new id instead.
+    url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v2-20261024.tar.gz
+    sha256: aa9b45ee76326508885962045fea7a273e34202cfd5ee854f59e56434faa378b
+    # Where the bucket is attached as a volume (the Space mounts it at /data). Used when present,
+    # otherwise the file is downloaded through the Hub API. Both paths are checksum-verified.
+    mounts:
+      ai-testack/weather-lab-storage: /data
   weights:
     - repo: mistralai/Timestral-28M
       revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
