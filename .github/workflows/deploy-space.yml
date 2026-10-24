@@ -26,13 +26,16 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moves to 26.04 during Oct-Nov 2026; change deliberately.
+    runs-on: ubuntu-24.04
     environment:
       name: huggingface-space
       url: https://huggingface.co/spaces/${{ vars.HF_SPACE_ID }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6 (node24)
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2 (node24)
+        with:
+          version: "0.11.28"  # uv used to write uv.lock
       - name: Install (locked)
         run: uv sync --frozen
       - name: Unit tests (no downloads)
