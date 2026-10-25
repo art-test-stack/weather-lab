@@ -20,7 +20,9 @@ uv run pytest -m real_model        # downloads Timestral-5M (~21 MB)
 uv run weather-lab data fetch|prepare --config configs/<cfg>.yaml
 uv run weather-lab evaluate --config configs/<cfg>.yaml
 uv run weather-lab score --run-dir runs/<suite>/<run-id>   # must report "byte-for-byte"
+uv run weather-lab evaluate --config configs/<cfg>.yaml --reuse runs/<suite>/<run>   # copy verified identical systems
 uv run weather-lab bootstrap       # idempotent setup (official or snapshot mode)
+uv run weather-lab models prefetch|status          # pinned checkpoint files; cache status (add --offline: no Hub)
 uv run weather-lab-app            # app: Overview / Benchmark / Methods (weather-lab-app build-space: Space content)
 ```
 
@@ -28,7 +30,9 @@ uv run weather-lab-app            # app: Overview / Benchmark / Methods (weather
 
 - Python 3.12 with `uv`. Dependencies are pinned in `uv.lock`. Regenerate `requirements.txt` with `uv export --no-dev --no-hashes --no-emit-project -o requirements.txt` whenever `uv.lock` changes.
 - torch is pinned to 2.13.0 for ZeroGPU (supported 2.8.0–2.13.0); after changing torch, add score references with `weather-lab spec add-reference` (exact hashes are per torch/OS/CPU).
-- Timestral is pinned to commit `a534bdb` and the checkpoint revisions in `configs/*.yaml` / `forecast.CHECKPOINTS`. Bump them deliberately and record the change in `docs/sources.md`.
+- Timestral is pinned to commit `a534bdb` and the checkpoint revisions in `configs/*.yaml` / `models.CHECKPOINTS` (full 40-character revisions + SHA-256; never `main`). Bump them deliberately and record the change in `docs/sources.md`.
+- Caching (`docs/caching.md`): load weights only through `weather_lab.models` (shared files per revision, one loaded object per revision/device/dtype, request data never stored on it). Exploratory forecasts go through `weather_lab.predcache` and are never scored. On ZeroGPU never keep GPU-resident models between calls.
+- New model families: follow `docs/adding_a_model.md` (capabilities in `models.FAMILIES`, adapter in `evaluate.ADAPTERS`, benchmark quantile grid or an explicit recorded mapping). Do not add a checkpoint above the download budget to bootstrap `weights` or `space_preload` without saying so.
 - Bulk data (`data/raw`, `data/processed`), `runs/`, `data/examples/*/`, `data/evidence/`, `dist/` and weights are git-ignored. Refresh the offline replay with `weather-lab export-example`, then publish it with `weather-lab snapshot build` (record the URL + SHA-256 in `configs/bootstrap.yaml`).
 - Keep scientific logic (data, suites, models, evaluation, setup) in `src/weather_lab/`. The app and deployment live in `src/weather_lab_app/`, which may import `weather_lab`, never the reverse. UI callbacks only read saved results. On ZeroGPU only the exploratory forecast may hold a GPU (`zerogpu.gpu`); import `weather_lab_app.zerogpu` before torch/gradio. The exploratory panel never writes to `runs/`.
 - **Readable names in the app.** Every system id in `configs/` needs a readable name and description (`MODELS`) and a colour/line style (`STYLE`) in `src/weather_lab_app/labels.py`; `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces it. Keep colours within the system's family (Timestral blues, Timestral + AROME teal, AROME orange, references greys). New experiments shown in the app go in `labels.EXPERIMENTS`. Identifiers ending in `-cal` mean calendar inputs, never calibration; do not name them otherwise in the UI or docs.

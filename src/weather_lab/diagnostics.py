@@ -112,10 +112,11 @@ def _variant(cfg: Config, mode: str | None) -> Timestral:
 def _quantiles(model: Timestral, ctx: np.ndarray, known: np.ndarray | None, h: int) -> np.ndarray:
     import torch
 
-    from weather_lab.forecast import load_timestral
+    from weather_lab.models import MODELS, resolve
 
-    fc, _ = load_timestral(model.checkpoint, model.revision)
-    with torch.inference_mode():
+    item = MODELS.get(resolve(model.checkpoint, model.revision))
+    fc = item.forecaster
+    with item.lock, torch.inference_mode():
         return fc.forecast(ctx, prediction_length=h, known_covariates=known, clip_nonnegative=False
                            ).quantiles.cpu().numpy()
 
@@ -217,3 +218,74 @@ def write_report(name: str, obj: dict | pd.DataFrame) -> Path:
         p = d / "result.json"
         write_json(p, obj)
     return p
+
+
+# --------------------------------------------------------------------------- forecast-only response
+
+def normalized_known_row(fc, ctx: np.ndarray, known: np.ndarray, h: int, known_row: int) -> tuple[np.ndarray, np.ndarray]:
+    """(normalized values, observed mask), each (N, T + H), of one known-covariate row exactly as the
+    pinned upstream code scales it (non-causal instance mean/std over the row's observed positions)."""
+    import torch
+    from timestral.scaler import instance_norm_stats
+
+    inputs, mask = fc._as_context(ctx, None)
+    kc = fc._as_covariates(known, inputs.shape[0], inputs.shape[-1] + h, "known_covariates")
+    rows, rmask, roles, kf, kfm, n_tgt = fc._assemble_rows(inputs, mask, h, None, kc)
+    b, v, _ = rows.shape
+    full = torch.cat([rows, kf.reshape(b, v, -1)], -1)[:, n_tgt + known_row]
+    fmask = torch.cat([rmask, kfm.reshape(b, v, -1)], -1)[:, n_tgt + known_row]
+    loc, scale, _ = instance_norm_stats(full, fmask, fc.config.minimum_scale)
+    z = torch.where(fmask, (full - loc) / scale, torch.zeros_like(full))
+    return z.cpu().numpy(), fmask.cpu().numpy()
+
+
+def forecast_only_response(cfg: Config, sizes: tuple[str, ...] = ("Timestral-28M", "Timestral-209M"),
+                           delta: float = 5.0, local_lead_h: int = 24, case_ids: list[str] | None = None) -> dict:
+    """Does a checkpoint use the issued AROME temperature when its history segment is missing?
+
+    Perturbations of the FUTURE segment of the AROME temperature row only, masks fixed:
+    - reorder: the 16 issued values reversed in time (same values, same mask);
+    - local: +delta at one lead only;
+    - uniform: +delta at every lead (shown for reference: instance normalisation removes it).
+    For each, the change of the normalised covariate actually seen by the model is reported next to the
+    change of the temperature quantiles, for the forecast-only setup and, as a control, the archived one.
+    """
+    from weather_lab.models import CHECKPOINTS as REGISTRY, MODELS
+
+    batch, _, _ = load_suite_batch(cfg)
+    if case_ids:
+        batch = batch.subset(np.flatnonzero(batch.cases["case_id"].isin(case_ids).to_numpy()))
+    h = batch.horizon
+    out = {"n_cases": len(batch.cases), "delta": delta, "local_lead_h": local_lead_h, "checkpoints": {}}
+    for size in sizes:
+        ck = REGISTRY[size]
+        fc = MODELS.get(ck).forecaster
+        res = {}
+        for mode in ("missing", "archived"):
+            m = Timestral(f"diag-{mode}", cfg["variables"], targets=cfg["variables"], checkpoint=ck.repo,
+                          revision=ck.revision, context_days=cfg["forecast"]["context_days"], calendar=True,
+                          arome=mode, arome_fields=cfg["arome"]["fields"])
+            ctx, known = m.build_inputs(batch)
+            row = known.shape[1] - len(m.arome_fields) + m.arome_fields.index("t")
+            t_ctx, k = ctx.shape[-1], local_lead_h // batch.step_hours - 1
+            variants = {"reorder": known.copy(), "local": known.copy(), "uniform": known.copy()}
+            variants["reorder"][:, row, t_ctx:] = known[:, row, t_ctx:][:, ::-1]
+            variants["local"][:, row, t_ctx + k] += delta
+            variants["uniform"][:, row, t_ctx:] += delta
+            z0, m0 = normalized_known_row(fc, ctx, known, h, row)
+            q0 = _quantiles(m, ctx, known, h)
+            ti = m.variables.index("t")
+            for name, kv in variants.items():
+                z1, m1 = normalized_known_row(fc, ctx, kv, h, row)
+                assert np.array_equal(m0, m1), "perturbation changed the observation mask"
+                q1 = _quantiles(m, ctx, kv, h)
+                d = np.abs(q1[:, ti] - q0[:, ti])                      # (N, H, Q)
+                res[f"{mode}/{name}"] = {
+                    "normalized_input_max_abs_change": float(np.abs(z1 - z0).max()),
+                    "t_quantiles_max_abs_change_c": float(d.max()),
+                    "t_median_mean_abs_change_c": float(d[..., 10].mean()),
+                    "t_median_mean_abs_change_at_lead_c": float(d[:, k, 10].mean()),
+                    "other_variables_max_abs_change": float(np.abs(np.delete(q1 - q0, ti, axis=1)).max()),
+                }
+        out["checkpoints"][size] = {"revision": ck.revision, "responses": res}
+    return out

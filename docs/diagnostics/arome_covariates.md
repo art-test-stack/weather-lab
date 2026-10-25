@@ -105,3 +105,14 @@ All 60 cases and the Timestral-28M checkpoint are held fixed, along with the obs
 - **Observed instability.** In C, a 5 °C shift of the future covariate moves some outputs by more than 5 °C: up to 25.8 °C, at the 0.99 quantile and the last lead, for origins with 33–37% history coverage. The median moves by up to 6.4 °C. Sensitivity grows with history coverage, and is exactly zero at origin 10-10, which has no coverage. The cause has not been established; it is recorded as a limitation of the conditioned variant.
 
 Because there is no defect in our code, no regression test was added for this behaviour. `tests/test_arome_history.py` checks what this project does control: the vintage rule, no substitution, and the exact rows each mode builds.
+
+## 5. Follow-up (2026-10-25): forecast-only response with reordered and local perturbations, both checkpoints
+
+A uniform shift of the future covariate cannot isolate its use: the pinned code normalizes a known
+covariate row by its own mean and standard deviation over observed positions, and with the history missing
+those are exactly the 16 future values, so a uniform +5 °C cancels out (normalized change 0). The new check
+(`weather-lab diagnose forecast-only`) reverses the 16 future values, or adds +5 °C at the 24 h lead only,
+with masks fixed, and verifies that the normalized input changes (3.6–4.7 standard units). Temperature
+medians then move by about 0.001–0.002 °C for both Timestral-28M and -209M (max quantile change 0.03 / 0.05
+°C), against 0.13–0.84 °C mean and up to 15 °C max in the archived-history control. 209M responds slightly
+more than 28M but not meaningfully. Table: [../experiments/conditioning_matrix.md](../experiments/conditioning_matrix.md) §4.

@@ -16,6 +16,12 @@ Two steps, in order, on the same frozen cases (and on a longer AROME suite once 
 
 Both are post-processing of AROME. Neither is WeatherGenerator training, and neither involves local fine-tuning of Timestral.
 
+## 0b. Next model family: TFC t0-gamma (interfaces prepared, not run)
+
+Registry, capability record and adapter contract are in place (`weather_lab.models.FAMILIES["t0"]`,
+`evaluate.ADAPTERS`). Concrete steps and the facts to recheck: [adding_a_model.md](adding_a_model.md). Run it on
+the `arome-issued-v2` cases with `evaluate --reuse`, so the existing 12 systems are not recomputed.
+
 ## 1. Complete the historical benchmark
 
 - **Done (2026-10-24): context-length validation on 2023.** 90 days was selected under the pre-declared rule; see `docs/experiments/context_length_2023.md` and `configs/frozen/context-selection-2023.yaml`.

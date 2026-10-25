@@ -37,30 +37,34 @@ TAIL_QUANTILE = 0.9
 
 # --------------------------------------------------------------------------- adapters
 
-def build_adapters(cfg: Config) -> list[Adapter]:
-    variables = cfg["variables"]
+def _timestral(mid: str, spec: dict, cfg: Config) -> Adapter:
     tcfg = cfg["timestral"]
+    return Timestral(mid, cfg["variables"], targets=spec.pop("targets"),
+                     checkpoint=spec.pop("checkpoint", tcfg["checkpoint"]), revision=spec.pop("revision", tcfg["revision"]),
+                     context_days=spec.pop("context_days", cfg["forecast"]["context_days"]),
+                     calendar=spec.pop("calendar", False), arome=spec.pop("arome", None),
+                     arome_fields=(cfg.get("arome") or {}).get("fields"), batch_size=tcfg.get("batch_size", 32), **spec)
+
+
+# Config `kind` -> constructor(id, remaining spec, config). A new model family adds one entry (and its
+# adapter class); scoring, storage, caching and the app read only the shared output schema.
+ADAPTERS = {
+    "persistence": lambda mid, spec, cfg: Persistence(mid, cfg["variables"]),
+    "seasonal_naive": lambda mid, spec, cfg: SeasonalNaive(mid, cfg["variables"]),
+    "climatology": lambda mid, spec, cfg: Climatology(mid, cfg["variables"], **spec),
+    "arome": lambda mid, spec, cfg: AromeRaw(mid, cfg["variables"], fields=cfg["arome"]["fields"]),
+    "timestral": _timestral,
+}
+
+
+def build_adapters(cfg: Config) -> list[Adapter]:
     out: list[Adapter] = []
     for spec in cfg["models"]:
         spec = dict(spec)
         mid, kind = spec.pop("id"), spec.pop("kind")
-        if kind == "persistence":
-            out.append(Persistence(mid, variables))
-        elif kind == "seasonal_naive":
-            out.append(SeasonalNaive(mid, variables))
-        elif kind == "climatology":
-            out.append(Climatology(mid, variables, **spec))
-        elif kind == "arome":
-            out.append(AromeRaw(mid, variables, fields=cfg["arome"]["fields"]))
-        elif kind == "timestral":
-            out.append(Timestral(
-                mid, variables, targets=spec.pop("targets"),
-                checkpoint=spec.pop("checkpoint", tcfg["checkpoint"]), revision=spec.pop("revision", tcfg["revision"]),
-                context_days=spec.pop("context_days", cfg["forecast"]["context_days"]),
-                calendar=spec.pop("calendar", False), arome=spec.pop("arome", None),
-                arome_fields=(cfg.get("arome") or {}).get("fields"), batch_size=tcfg.get("batch_size", 32), **spec))
-        else:
-            raise ValueError(f"unknown model kind {kind!r}")
+        if kind not in ADAPTERS:
+            raise ValueError(f"unknown model kind {kind!r} (registered: {sorted(ADAPTERS)})")
+        out.append(ADAPTERS[kind](mid, spec, cfg))
     return out
 
 
@@ -88,30 +92,36 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
         targets[i] = g.iloc[pos + 1: pos + h + 1].to_numpy(dtype=np.float32).T
     origins = cases["origin"].to_numpy(dtype="datetime64[ns]")
     future = origins[:, None] + (np.arange(1, h + 1) * np.timedelta64(f["step_hours"], "h"))[None, :]
-    arome_arr = None
+    arome_arr, hist_args = None, {}
     if arome_df is not None:
-        arome_arr = np.full((n, len(variables), h), np.nan, dtype=np.float32)
-        a = arome_df.set_index(["run", "station", "variable", "valid_time"])["value"]
-        avail = arome_df.groupby("run")["available_at"].max()
-        for i, c in enumerate(cases.itertuples()):
-            run = pd.Timestamp(c.arome_run)
-            if avail[run] > c.origin:
-                raise ValueError(f"{c.case_id}: AROME run {run} not available at origin")
-            for j, var in enumerate(variables):
-                if var not in cfg["arome"]["fields"]:
-                    continue
-                for k in range(h):
-                    vt = c.origin + (k + 1) * step
-                    arome_arr[i, j, k] = a.get((run, c.station, var, vt), np.nan)
-    hist_args = {}
-    if arome_df is not None:
-        hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(f["step_hours"], "h"))[None]
-        vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), origins, hist_times,
-                                                       variables)
-        hist_args = {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}
+        arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, cfg["arome"]["fields"], h,
+                                            f["step_hours"], history_steps)
     batch = CaseBatch(cases.reset_index(drop=True), variables, hist, origins, future, f["step_hours"], arome_arr,
                       **hist_args)
     return batch, targets
+
+
+def arome_inputs(arome_df: pd.DataFrame, cases: pd.DataFrame, origins: np.ndarray, variables: list[str],
+                 fields: list[str], h: int, step_hours: int, history_steps: int) -> tuple[np.ndarray, dict]:
+    """Issued AROME over the horizon (run named per case, available at its origin) and the archived
+    AROME history with provenance, as `CaseBatch` fields. Shared by the benchmark and exploratory runs."""
+    n, step = len(cases), pd.Timedelta(hours=step_hours)
+    arome_arr = np.full((n, len(variables), h), np.nan, dtype=np.float32)
+    a = arome_df.set_index(["run", "station", "variable", "valid_time"])["value"]
+    avail = arome_df.groupby("run")["available_at"].max()
+    for i, c in enumerate(cases.itertuples()):
+        run = pd.Timestamp(c.arome_run)
+        if avail[run] > c.origin:
+            raise ValueError(f"{c.case_id}: AROME run {run} not available at origin")
+        for j, var in enumerate(variables):
+            if var not in fields:
+                continue
+            for k in range(h):
+                arome_arr[i, j, k] = a.get((run, c.station, var, c.origin + (k + 1) * step), np.nan)
+    hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(step_hours, "h"))[None]
+    vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), origins, hist_times,
+                                                   variables)
+    return arome_arr, {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}
 
 
 def targets_frame(batch: CaseBatch, targets: np.ndarray) -> pd.DataFrame:
@@ -154,7 +164,47 @@ def peak_rss_mb() -> float:
 
 # --------------------------------------------------------------------------- run
 
-def run_evaluation(cfg: Config, log=print) -> Path:
+def _same_system(a: Adapter, rec: dict) -> bool:
+    """A saved system record describes exactly this adapter (kind, inputs, variables, params, revision)."""
+    import json
+
+    want = a.describe()
+    norm = lambda x: json.loads(json.dumps(x, sort_keys=True, default=str))  # noqa: E731
+    revision = f"{a.checkpoint}@{a.revision[:12]}" if isinstance(a, Timestral) else a.revision
+    return all(norm(want[k]) == norm(rec.get(k)) for k in ("id", "kind", "output", "inputs", "variables", "params")) \
+        and rec.get("revision") == revision
+
+
+def reusable_predictions(prior_dir: Path, cfg: Config, manifest: dict, data_sha: str, adapters: list[Adapter],
+                         targets: pd.DataFrame, log=print) -> dict[str, tuple[pd.DataFrame, dict]]:
+    """Saved predictions of `prior_dir` that can stand in for a fresh run: same frozen manifest, case data,
+    observations, AROME extract and verifying targets, and an identical system description."""
+    prior = read_json(prior_dir / "run.json")
+    checks = {"manifest": prior["manifest_sha256"] == sha256_file(cfg.manifest_path),
+              "case data": prior["data"]["case_data_sha256"] == manifest["case_data_sha256"],
+              "observations": prior["data"]["observations"]["sha256"] == data_sha,
+              "arome extract": (prior["data"].get("arome") or {}).get("sha256") == (manifest.get("arome") or {}).get(
+                  "sha256")}
+    old_t = pd.read_parquet(prior_dir / "targets.parquet")
+    checks["targets"] = old_t.reset_index(drop=True).equals(targets.reset_index(drop=True))
+    if not all(checks.values()):
+        raise RuntimeError(f"cannot reuse {prior_dir.name}: differs in {[k for k, ok in checks.items() if not ok]}")
+    preds = pd.read_parquet(prior_dir / "predictions.parquet")
+    out = {}
+    for a in adapters:
+        rec = next((r for r in prior["systems"] if r["id"] == a.id), None)
+        if rec is None or not _same_system(a, rec):
+            continue
+        rows = preds[preds["model"] == a.id].drop(columns="run_id")
+        expect = len(targets[targets["variable"].isin(a.variables)])
+        if len(rows) != expect:
+            raise RuntimeError(f"{prior_dir.name}/{a.id}: {len(rows)} rows, expected {expect}")
+        out[a.id] = (rows, rec)
+        log(f"  {a.id:<36} reused from {prior['run_id']} ({len(rows)} rows, identical description)")
+    return out
+
+
+def run_evaluation(cfg: Config, log=print, reuse_from: Path | None = None) -> Path:
     if not cfg.manifest_path.exists():
         raise FileNotFoundError(f"{cfg.manifest_path} missing: run `weather-lab data prepare` first")
     manifest = read_json(cfg.manifest_path)
@@ -185,7 +235,16 @@ def run_evaluation(cfg: Config, log=print) -> Path:
     run_dir.mkdir(parents=True)
     frames, systems = [], []
     rss0 = peak_rss_mb()
+    tgt = targets_frame(batch, targets)
+    reused = reusable_predictions(reuse_from, cfg, manifest, data_meta["sha256"], adapters, tgt, log) \
+        if reuse_from else {}
     for a in adapters:
+        if a.id in reused:
+            rows, rec = reused[a.id]
+            systems.append(rec | {"reused_from": rec.get("reused_from") or read_json(reuse_from / "run.json")[
+                "run_id"]})
+            frames.append(rows)
+            continue
         t0 = time.perf_counter()
         if isinstance(a, Climatology):
             a.fit(fit_obs)
@@ -203,7 +262,6 @@ def run_evaluation(cfg: Config, log=print) -> Path:
             f"{np.isfinite(fb.point).mean():.1%} finite")
     preds = pd.concat(frames, ignore_index=True)
     preds.insert(1, "run_id", run_id)
-    tgt = targets_frame(batch, targets)
     thresholds = tail_thresholds(fit_obs)
 
     preds.to_parquet(run_dir / "predictions.parquet", index=False)
@@ -230,9 +288,17 @@ def run_evaluation(cfg: Config, log=print) -> Path:
         "n_cases": len(cases_all), "n_eligible": len(cases), "history_steps": history_steps,
         "systems": systems, "environment": environment(), "peak_rss_mb_start": rss0,
         "local_fine_tuning": "none", "files": sorted(p.name for p in run_dir.iterdir()),
+        "reused_systems_from": read_json(reuse_from / "run.json")["run_id"] if reused else None,
+        "model_cache": _model_stats(),
     })
     log(f"saved run {run_dir}")
     return run_dir
+
+
+def _model_stats() -> dict:
+    from weather_lab.models import MODELS, STATS
+
+    return {**STATS, "loaded_at_end": MODELS.status()}
 
 
 def _timestral_commit() -> str:
@@ -344,7 +410,7 @@ def _bootstrap(df: pd.DataFrame, loss: str, ref: str, highlight: list[int], n_bo
 
 
 def score(preds: pd.DataFrame, targets: pd.DataFrame, cases: pd.DataFrame, thresholds: dict,
-          highlight: list[int]) -> dict[str, pd.DataFrame]:
+          highlight: list[int], pairs: list[list[str]] | None = None) -> dict[str, pd.DataFrame]:
     meta = cases[["case_id", "split", "season", "origin"]]
     df = preds.drop(columns=["origin"]).merge(targets[["case_id", "variable", "lead_h", "observed"]],
                                               on=["case_id", "variable", "lead_h"], how="left")
@@ -365,14 +431,6 @@ def score(preds: pd.DataFrame, targets: pd.DataFrame, cases: pd.DataFrame, thres
                       "failed_predictions": int(g["point"].isna().sum()),
                       "valid_pairs": int((g["point"].notna() & g["observed"].notna()).sum())})
     avail = pd.DataFrame(avail)
-
-    # common valid sets per (split, variable)
-    def common(sub: pd.DataFrame, col: str) -> pd.DataFrame:
-        ok = sub[col].notna() & sub["observed"].notna()
-        n_models = sub.groupby(["split", "variable"])["model"].transform("nunique")
-        good = sub[ok].groupby(["split", "variable", "case_id", "lead_h"])["model"].transform("nunique")
-        keep = sub[ok][good == n_models[ok]]
-        return keep
 
     point_rows = common(df, "point")
     point = _cube(point_rows, {"mae": ("abs_err", "mean"), "rmse": ("sq_err", "mean"), "bias": ("err", "mean")})
@@ -396,6 +454,7 @@ def score(preds: pd.DataFrame, targets: pd.DataFrame, cases: pd.DataFrame, thres
     t["threshold"] = np.array([thresholds.get(f"{s}|{SEASONS[v.month]}", np.nan)
                                for s, v in zip(t["station"], t["valid_time"])], dtype=float)
     tail = t[t["observed"] > t["threshold"]]
+    matched = _matched(point_rows, prob_rows, pairs or [], highlight)
     tail_tab = tail.groupby(["split", "model"]).agg(n=("observed", "size"), mae=("abs_err", "mean"),
                                                     bias=("err", "mean"), pinball=("pinball", "mean")).reset_index()
     tail_tab["definition"] = "obs t > station x season P90 of fitting period (warm tail, not a heatwave definition)"
@@ -404,7 +463,29 @@ def score(preds: pd.DataFrame, targets: pd.DataFrame, cases: pd.DataFrame, thres
     case_tab = point_rows.groupby(["case_id", "station", "split", "season", "variable", "model"]).agg(
         mae=("abs_err", "mean"), n=("abs_err", "size")).reset_index()
     return {"metrics_point": point, "metrics_probabilistic": prob, "probabilistic_not_applicable": na,
-            "availability": avail, "paired_differences": paired, "tail_warm_t": tail_tab, "case_scores": case_tab}
+            "availability": avail, "paired_differences": paired, "tail_warm_t": tail_tab, "case_scores": case_tab,
+            **({"paired_matched": matched} if pairs else {})}
+
+
+def common(sub: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Common valid set per (split, variable): pairs where the target is observed and every system in
+    `sub` produced a finite value of `col`."""
+    ok = sub[col].notna() & sub["observed"].notna()
+    n_models = sub.groupby(["split", "variable"])["model"].transform("nunique")
+    good = sub[ok].groupby(["split", "variable", "case_id", "lead_h"])["model"].transform("nunique")
+    return sub[ok][good == n_models[ok]]
+
+
+def _matched(point_rows: pd.DataFrame, prob_rows: pd.DataFrame, pairs: list[list[str]],
+             highlight: list[int]) -> pd.DataFrame:
+    """Paired differences for declared (model, reference) pairs on the run's common valid sets."""
+    out = []
+    for model, ref in pairs:
+        for rows, loss in ((point_rows, "abs_err"), (prob_rows, "pinball")):
+            sub = rows[rows["model"].isin([model, ref])]
+            if sub["model"].nunique() == 2:
+                out.append(_bootstrap(sub, loss, ref, highlight))
+    return pd.concat(out, ignore_index=True) if out else pd.DataFrame()
 
 
 def score_run(run_dir: Path) -> dict[str, pd.DataFrame]:
@@ -415,7 +496,7 @@ def score_run(run_dir: Path) -> dict[str, pd.DataFrame]:
     cases = cases_from_manifest(manifest)
     thresholds = read_json(run_dir / "tail_thresholds.json")
     cfg = load_config(run_dir / "config.yaml")
-    return score(preds, targets, cases, thresholds, cfg["forecast"]["highlight_leads_h"])
+    return score(preds, targets, cases, thresholds, cfg["forecast"]["highlight_leads_h"], cfg.get("paired_comparisons"))
 
 
 def rescore(run_dir: Path, log=print) -> bool:

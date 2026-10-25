@@ -35,6 +35,12 @@ MODELS = {
         "Timestral 28M + AROME (observed history)", "Issued AROME forecast, with station observations standing "
                                                     "in for past AROME values: a different input, not real AROME "
                                                     "history."),
+    "timestral-209m-mv-cal-arome-substobs": (
+        "Timestral 209M + AROME (observed history)", "As Timestral 28M + AROME (observed history), 209M checkpoint: "
+                                                     "observations stand in for past AROME values."),
+    "timestral-209m-mv-cal-arome-futureonly": (
+        "Timestral 209M + AROME (forecast only)", "Diagnostic: issued AROME forecast, no AROME history; 209M "
+                                                  "checkpoint (see Methods for whether it is used)."),
     "timestral-28m-mv-cal-arome": ("Timestral 28M + AROME (observed history)",
                                    "v1 name of the observed-history variant."),
     "timestral-28m-mv-cal-arome-nanpast": ("Timestral 28M + AROME (forecast only)",
@@ -60,6 +66,8 @@ STYLE = {
     "timestral-209m-mv-cal-arome-archived": ("#0f7a54", "dash", 2.6),
     "timestral-28m-mv-cal-arome-futureonly": ("#7fd1b2", "dot", 2.0),
     "timestral-28m-mv-cal-arome-substobs": ("#7fd1b2", "dash", 2.0),
+    "timestral-209m-mv-cal-arome-substobs": ("#2e9c78", "dash", 2.0),
+    "timestral-209m-mv-cal-arome-futureonly": ("#2e9c78", "dot", 2.0),
     "timestral-28m-mv-cal-arome": ("#7fd1b2", "dash", 2.0),
     "timestral-28m-mv-cal-arome-nanpast": ("#7fd1b2", "dot", 2.0),
     "persistence": ("#a3a29c", "dash", 1.6),
@@ -67,8 +75,11 @@ STYLE = {
     "climatology": ("#8a8984", "dashdot", 1.6),
 }
 EXPLORATORY = ("#6250d6", "longdash", 2.2)
+# Colour family per model family for ids without an explicit STYLE entry (next family: TFC t0, browns).
+FAMILY_STYLE = {"t0-": ("#a0522d", "solid", 2.4)}
 # Systems whose inputs differ in kind (not just in model): hatched in comparisons, explained in the summary.
-DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-28m-mv-cal-arome"})
+DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-209m-mv-cal-arome-substobs",
+                             "timestral-28m-mv-cal-arome"})
 
 
 def model_name(mid: str) -> str:
@@ -84,7 +95,10 @@ def model_description(mid: str) -> str:
 
 
 def model_style(mid: str) -> tuple[str, str, float]:
-    return EXPLORATORY if mid.startswith("exploratory") else STYLE.get(mid, ("#52514e", "solid", 2.0))
+    if mid.startswith("exploratory"):
+        return EXPLORATORY
+    family = next((v for k, v in FAMILY_STYLE.items() if mid.startswith(k)), ("#52514e", "solid", 2.0))
+    return STYLE.get(mid, family)
 
 
 CHECKPOINTS = ("28M", "209M")
@@ -124,6 +138,12 @@ EXPERIMENTS = {
         "compare": {"timestral-28m-mv-cal-arome-archived": "timestral-28m-mv-cal"},
         "default_systems": ["arome-raw", "timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-archived"],
         "band": "timestral-28m-mv-cal-arome-archived",
+        # Input-setup x checkpoint matrix: ids are base.format(size) + suffix. "main" is the setup shown by
+        # default; diagnostic setups are selectable but labelled as such.
+        "matrix": {"base": "timestral-{size}-mv-cal", "sizes": ["28M", "209M"], "main": "archived",
+                   "setups": {"none": "", "archived": "-arome-archived", "substobs": "-arome-substobs",
+                              "futureonly": "-arome-futureonly"}},
+        "prob_reference": "climatology",
     },
     "synop-ctxval-2023-v1": {
         "name": "History length · 2023 validation",
@@ -162,6 +182,18 @@ EXPERIMENTS = {
         "band": "timestral-28m-mv-cal-arome",
         "superseded": True,
     },
+}
+# Input setups of the Timestral x AROME matrix (readable, consistent everywhere in the app).
+SETUP_NAMES = {
+    "none": ("No AROME input", "Observations and time-of-day / time-of-year inputs only."),
+    "archived": ("AROME forecast + archived AROME history",
+                 "Issued AROME forecast over the horizon; earlier archived AROME forecasts over the past."),
+    "substobs": ("AROME forecast + observed history (substituted)",
+                 "Issued AROME forecast; station observations stand in for past AROME values. A different input "
+                 "construction, not real AROME history (it does not by itself imply future leakage)."),
+    "futureonly": ("AROME forecast only (diagnostic)",
+                   "Issued AROME forecast with the past AROME segment missing. Diagnostic: the pinned models barely "
+                   "respond to it (see Methods)."),
 }
 DEFAULT_EXPERIMENT = "arome-issued-v2"
 EXPERIMENT_ORDER = ["arome-issued-v2", "synop-ctxval-2023-v1", "synop-historical-v1", "arome-issued-v1"]

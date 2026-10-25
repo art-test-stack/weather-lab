@@ -4,7 +4,7 @@ This is a small, reproducible benchmark for **short-range probabilistic weather 
 
 **Research question.** Can Timestral improve station-level probabilistic forecasts on its own, and when it is conditioned on issued AROME predictions?
 
-> **Status (2026-10-24).** Initialization is complete. A context-length experiment has been validated on 2023 and its choice frozen; the full 2024 test has not been run. The smoke and AROME results are integration checks under stated assumptions, not performance claims.
+> **Status (2026-10-25).** The 28M / 209M × AROME-input matrix is complete on the AROME suite ([results](docs/experiments/conditioning_matrix.md)). Initialization is complete. A context-length experiment has been validated on 2023 and its choice frozen; the full 2024 test has not been run. The smoke and AROME results are integration checks under stated assumptions, not performance claims.
 
 ## Quick start
 
@@ -35,12 +35,17 @@ uv run weather-lab data prepare  --config configs/smoke.yaml        # clean, reg
 uv run weather-lab evaluate      --config configs/smoke.yaml        # baselines + Timestral-28M; saves a run
 uv run weather-lab data fetch    --config configs/arome_v2.yaml     # + SYNOP 2026 and AROME messages (14-day archive)
 uv run weather-lab data prepare  --config configs/arome_v2.yaml
-uv run weather-lab evaluate      --config configs/arome_v2.yaml
+uv run weather-lab evaluate      --config configs/arome_v2_matrix.yaml --reuse runs/arome-issued-v2/<earlier-run>
+                                                                    # reuse verified identical systems, infer the rest
 uv run weather-lab score --run-dir runs/<suite>/<run-id>            # recompute scores, no model calls
 uv run weather-lab compare --freeze                                 # context-length selection (configs/context/)
 uv run weather-lab compare --export-combined runs/synop-ctxval-2023-v1/combined   # one run with all candidates, for the app
 uv run weather-lab diagnose arome-inputs --config configs/arome_v2.yaml --case <case-id>
 uv run weather-lab diagnose covariates   --config configs/arome_v2.yaml
+uv run weather-lab diagnose forecast-only                           # does each checkpoint use future-only AROME?
+uv run weather-lab models prefetch [28M 209M]                       # pinned inference files, SHA-256 verified
+uv run weather-lab models status                                    # files on disk / loaded models / saved + cached predictions
+uv run weather-lab --offline <command>                              # no Hub requests (WEATHER_LAB_OFFLINE=1)
 uv run weather-lab arome evidence | observe | refresh-suite         # availability evidence; new suite ids for new dates
 uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benchmarks/specs/<manifest>.yaml
 ```
@@ -51,10 +56,10 @@ uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benc
 
 `uv run weather-lab-app` (or the Space) opens on three tabs. *Experiment* and *Weather variable* sit above the tabs and apply to all of them.
 
-- **Overview** (landing): the research question, a large forecast chart for one forecast, and headline tiles (error of the key systems, and how often observations fall inside the shaded system's 80% range). The four primary controls are *Experiment*, *Weather variable*, *Station* and *Forecast issued*. The default forecast follows a fixed, neutral rule: the most recent forecast of the last period for the station. The chart shows 48 h of observed history by default.
+- **Overview** (landing): a large forecast chart for one forecast with an aligned error panel (forecast − observation, signed or absolute, same time axis), and headline tiles (error of the key systems, and how often observations fall inside the shaded system's 80% range). The primary controls are *Experiment*, *Weather variable*, *Station*, *Timestral model* (28M / 209M), *Timestral + AROME input* (archived history; observed history; forecast only, diagnostic) and *Forecast issued*. Size and input setup update the curves, the shaded range, the per-forecast errors and the tiles together; a combination without a saved result shows **not run**, never a substitute. The default forecast follows a fixed, neutral rule: the most recent forecast of the last period for the station. The chart shows 48 h of observed history by default.
   - The **Advanced** accordion holds the systems shown (only those forecasting the selected variable; raw AROME has no wind), the system whose 80% / 90% range is shaded, the history slider, a toggle for superseded experiment versions, and the exploratory run (Timestral once on the displayed forecast with custom settings; kept in the session, never saved or scored).
-- **Benchmark**: *Score* and *Lead time* controls, sorted comparison bars with the reference system outlined, and a score-by-lead chart. *Detailed tables and downloads* and *Advanced: filters, availability, uncertainty, timings* hold the tables, CSV downloads, station/season filters, availability, paired differences and CPU cost.
-- **Methods**: a table mapping each readable system name to its exact identifier, definitions of the scores, *Runs, versions and integrity*, and the full protocol.
+- **Benchmark**: a finding sentence computed from the saved scores for the selected setup, sorted comparison bars (reference outlined), and the **lead-time chart**. That chart is recomputed from saved predictions on matched cases, either at each lead or cumulative over all leads up to H, with per-lead sample counts and a data-derived note on which lead ranges favour a system. It shows block-bootstrap intervals of the mean only when there are at least 10 two-day blocks. Scores: MAE, RMSE, pinball, 80/90% coverage (nominal line), 80/90% width; *Station* selects one station or all. *Experiment matrix* lists every input setup × checkpoint as a score, *not run*, *unsupported input* or *not integrated yet*. *Detailed tables and downloads* and *Advanced: filters, availability, uncertainty, timings* hold the tables, CSV downloads, station/season filters, availability, paired differences and CPU cost.
+- **Methods**: a table mapping each readable system name to its exact identifier, definitions of the scores, *Runs, versions and integrity*, *Caches and model files* (checkpoints on disk, models loaded in memory, saved and cached predictions), and the full protocol.
 
 Experiments offered (`EXPERIMENTS` in `src/weather_lab_app/labels.py`):
 
@@ -76,6 +81,7 @@ Experiments offered (`EXPERIMENTS` in `src/weather_lab_app/labels.py`):
 | Timestral 28M + AROME (observed history): station observations stand in for past AROME, a different input | `timestral-28m-mv-cal-arome-substobs` (v1: `…-arome`) |
 | Timestral 28M + AROME (forecast only): no AROME history, ignored by the pinned model | `timestral-28m-mv-cal-arome-futureonly` (v1: `…-arome-nanpast`) |
 | Timestral 209M, Timestral 209M + AROME | `timestral-209m-mv-cal`, `timestral-209m-mv-cal-arome-archived` |
+| Timestral 209M + AROME (observed history / forecast only) | `timestral-209m-mv-cal-arome-substobs`, `timestral-209m-mv-cal-arome-futureonly` |
 
 ## Deployment to a Hugging Face Space (prepared, not published)
 
@@ -97,7 +103,7 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
 ```
 
 - The front matter comes from `src/weather_lab_app/space.yaml`. The launcher only adds `src/` to the path and calls `weather_lab_app.main:main`.
-- No data or weights are uploaded. At startup the app runs `bootstrap`, which fetches the snapshot and the pinned 28M weights (111 MB) and verifies both.
+- No data or weights are uploaded. The generated front matter asks Spaces to **preload** Timestral-28M and -209M at build time (`preload_from_hub`, pinned full revisions, inference files only) into the default Hub cache, where the loader looks. At startup the app runs `bootstrap`, which fetches the snapshot and verifies the 28M weights. Exploratory forecasts are cached on the attached bucket (`/data/cache/predictions`; public bucket, so publicly readable). What survives restarts and rebuilds: [docs/caching.md](docs/caching.md).
 - Snapshot fallback: if the pinned snapshot cannot be fetched or fails its checksum, `bootstrap` tries `bootstrap.snapshot.fallbacks` in `configs/bootstrap.yaml` in order. These are earlier immutable snapshots, each pinned by SHA-256. `data/bootstrap_state.json` records the snapshot that was used (`snapshot.id`, `snapshot.fallback`, `snapshot.primary_error`), and the app shows a one-line notice under the question. The "Retry setup" screen appears only when no candidate can be installed and there are no saved runs.
 - `.github/workflows/deploy-space.yml` automates the build and upload. It runs on manual dispatch or a `space-v*` tag, uses the GitHub environment `huggingface-space` (secret `HF_TOKEN`, variable `HF_SPACE_ID`), runs the unit tests, builds `dist/space`, and uploads it with `hf upload --repo-type space --delete "*"`. That makes the Space an exact copy of the build; `.gitattributes` is kept.
 
@@ -153,7 +159,18 @@ Selection rule, declared before running: lowest mean temperature pinball; ties w
 
 ### Issued AROME comparison, `arome-issued-v2` (12 days × 5 stations, n = 960 pairs)
 
-In short (temperature MAE): AROME 1.09 °C; Timestral 28M 2.52 °C; **Timestral 28M + AROME** (archived history) 2.19 °C, about 13% lower error than Timestral alone but about 2.0× AROME's error, with 81% of observations inside its 80% range. The observed-history variant reaches 1.51 °C with a different input; Timestral 209M + AROME reaches 1.90 °C. "mv + calendar" below is the app's *Timestral 28M*.
+In short (temperature MAE): AROME 1.09 °C; Timestral 28M 2.52 °C; **Timestral 28M + AROME** (archived history) 2.19 °C, about 13% lower error than Timestral alone but about 2.0× AROME's error, with 81% of observations inside its 80% range. Timestral 209M + AROME reaches 1.90 °C. "mv + calendar" below is the app's *Timestral 28M*.
+
+**Complete 28M / 209M matrix** (run `smoke-matrix-v1-20261025T000314-43244569`; full tables, station and lead breakdowns, paired differences and costs in [docs/experiments/conditioning_matrix.md](docs/experiments/conditioning_matrix.md)). Temperature MAE (°C) and 80% coverage, n = 960 per cell:
+
+| Input setup | 28M | 209M |
+|---|---|---|
+| No AROME input | 2.52 · 73% | 2.42 · 75% |
+| AROME forecast + archived AROME history | 2.19 · 81% | 1.90 · 84% |
+| AROME forecast + observed history (substituted) | 1.51 · 67% | 1.18 · **18%** (overconfident: 0.65 °C wide 80% range) |
+| AROME forecast only (diagnostic) | 2.51 · 73% | 2.43 · 76% |
+
+Reordering or locally perturbing the future-only AROME row changes its normalized input by 3.6–4.7 standard units but the temperature medians by about 0.002 °C for both checkpoints (archived-history control: 0.4–0.8 °C), so neither checkpoint uses future-only AROME values. No uncertainty intervals: 6 two-day blocks < 10.
 
 | System | Historical AROME input | t 6 h | t 24 h | t 48 h | t all | t pinball | t cov. 80% | MSLP all | MSLP cov. 80% |
 |---|---|---|---|---|---|---|---|---|---|
@@ -220,15 +237,18 @@ The 2024 test of the frozen 90-day context also remains to be run; see [docs/roa
 ## Repository map
 
 ```text
-configs/                    smoke, arome_v2 (current), arome_smoke (v1), benchmark, context/, frozen/, bootstrap.yaml
+configs/                    smoke, arome_v2 + arome_v2_matrix (current), arome_smoke (v1), benchmark, context/, frozen/, bootstrap.yaml
 benchmarks/specs/           committed YAML specs of frozen suites (manifests are generated locally)
 src/weather_lab/            science: data, suites, models, evaluation, setup
   bootstrap.py              official / snapshot setup, snapshot builder
   specs.py                  spec freeze / manifest + score validation
   data.py, arome.py         SYNOP and AROME acquisition, archived AROME history, refresh-suite
   suite.py                  origins, cases, eligibility, manifests
-  forecast.py, baselines.py adapter contract, Timestral / AROME / baseline adapters
-  evaluate.py, compare.py   run, score, rescore; cross-run selection
+  forecast.py, baselines.py adapter contract, Timestral / AROME / baseline adapters, exploratory forecast
+  models.py                 model families + capabilities, pinned checkpoints, prefetch/offline, loaded-model LRU
+  predcache.py, status.py   exploratory prediction cache (content-addressed, atomic); cache status
+  evaluate.py, compare.py   run (with verified reuse), score, rescore; cross-run selection
+  horizon.py                error by lead / cumulative to H from saved predictions (matched cases)
   diagnostics.py            AROME input audit and covariate sensitivity
   evidence.py               availability evidence and manual first-seen observation
 src/weather_lab_app/        app and deployment only (no benchmark logic)
@@ -242,4 +262,4 @@ docs/                       methods, sources, availability evidence, diagnostics
 tests/                      unit tests; test_real_timestral.py is opt-in
 ```
 
-**Adding a model.** Subclass `Adapter` in `forecast.py`: declare `output` and `inputs`, return a `ForecastBatch`, and register its `kind` in `evaluate.build_adapters`. Scoring picks it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`); `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces this.
+**Adding a model.** See [docs/adding_a_model.md](docs/adding_a_model.md) (contract, capabilities, and the concrete integration points for TFC t0-gamma, the next candidate). In short: subclass `Adapter`, return a `ForecastBatch` on the benchmark quantile grid, register its `kind` in `evaluate.ADAPTERS` and its capabilities and pinned checkpoint in `weather_lab.models`. Scoring, storage, caching and the app pick it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`); `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces this.

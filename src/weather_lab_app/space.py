@@ -3,7 +3,8 @@
 The output is the GitHub code plus two generated files that exist only in the Space:
 - `README.md` with the Spaces front matter from `space.yaml` prepended to the GitHub README;
 - `app.py`, a small launcher at the repository root (the `app_file` Spaces runs).
-No data or weights are included; the app fetches them with `weather-lab bootstrap` at startup.
+No data or weights are included: the README front matter asks Spaces to preload the pinned checkpoints at
+build time (`preload_from_hub`), and the app fetches data with `weather-lab bootstrap` at startup.
 """
 
 from __future__ import annotations
@@ -37,8 +38,24 @@ def git_intended_files(root: Path = ROOT) -> list[str]:
     return sorted(f for f in out if (root / f).is_file())
 
 
+def preload_entries() -> list[str]:
+    """`preload_from_hub` lines: "<repo> <files> <full revision>" for the configured checkpoints.
+
+    Spaces downloads them at build time into the DEFAULT Hub cache (~/.cache/huggingface/hub, it ignores
+    HF_HOME), which is where the app's loader looks unless HF_HOME/HF_HUB_CACHE is changed; so neither
+    variable is set for the Space.
+    """
+    from weather_lab.bootstrap import load_bootstrap_config
+    from weather_lab.models import CHECKPOINTS
+
+    names = load_bootstrap_config()["bootstrap"].get("space_preload") or []
+    return [f"{CHECKPOINTS[n].repo} {','.join(CHECKPOINTS[n].files)} {CHECKPOINTS[n].revision}" for n in names]
+
+
 def build_space(out: Path, log=print) -> Path:
     meta = yaml.safe_load(SPACE_META.read_text())
+    if preload := preload_entries():
+        meta["preload_from_hub"] = preload
     if out.exists():
         shutil.rmtree(out)
     files = [f for f in git_intended_files() if f.startswith(SPACE_INCLUDE)]

@@ -26,6 +26,10 @@ def test_space_build_has_metadata_launcher_and_no_data(tmp_path):
     front = yaml.safe_load(readme.split("---\n")[1])
     assert front["sdk"] == "gradio" and front["app_file"] == "app.py" and front["title"] == "Weather-lab"
     assert len(front["short_description"]) <= 60
+    from weather_lab.models import CHECKPOINTS
+    for name in ("Timestral-28M", "Timestral-209M"):           # pinned, full revisions, inference files only
+        c = CHECKPOINTS[name]
+        assert f"{c.repo} config.json,model.safetensors {c.revision}" in front["preload_from_hub"]
     assert "weather_lab_app.main import main" in (out / "app.py").read_text()
     assert not (ROOT / "README.md").read_text().startswith("---")       # GitHub README stays plain
     files = [p for p in out.rglob("*") if p.is_file()]
@@ -72,22 +76,6 @@ def test_lockfile_matches_what_the_spaces_builder_installs():
     if meta.get("suggested_hardware", "").startswith("zero"):
         major, minor = (int(x) for x in reqs["torch"].split(".")[:2])
         assert (major, minor) <= (2, 13)                               # ZeroGPU supports torch <= 2.13.0
-
-
-def test_checkpoint_is_fetched_before_any_gpu_work(monkeypatch):
-    import pytest
-
-    from weather_lab import forecast
-
-    calls = []
-    monkeypatch.setattr(forecast, "weights_cached", lambda c, r: False)
-    monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda repo, name, revision: calls.append((repo, name)))
-    with pytest.raises(PermissionError):
-        forecast.ensure_checkpoint("Timestral-209M", allow_download=False)
-    assert forecast.ensure_checkpoint("Timestral-209M", allow_download=True) is True
-    assert calls == [("mistralai/Timestral-209M", "config.json"), ("mistralai/Timestral-209M", "model.safetensors")]
-    monkeypatch.setattr(forecast, "weights_cached", lambda c, r: True)
-    assert forecast.ensure_checkpoint("Timestral-28M", allow_download=False) is False
 
 
 def test_explorer_systems_persist_across_variables_and_exploratory_runs(monkeypatch):
@@ -146,9 +134,11 @@ def _fake_v2_run(mae_by_model: dict[str, float], variable: str = "t", extra_mode
     class FakeRun:
         suite = "arome-issued-v2"
         splits = ["test"]
+        source = "test fixture"
+        run = {"run_id": "fake"}
         models = list(mae_by_model) + list(extra_models)      # e.g. AROME saved, but not for this variable
         tables = {"metrics_point": pd.DataFrame({**rows, "mae": list(mae_by_model.values())}),
-                  "metrics_probabilistic": pd.DataFrame({**rows, "coverage80": 0.8})}
+                  "metrics_probabilistic": pd.DataFrame({**rows, "coverage80": 0.8, "pinball": 0.5})}
 
         def predictions(self):
             return pd.DataFrame({"model": self.models, "variable": variable,
@@ -177,8 +167,9 @@ def test_checkpoint_selector_switches_headline_defaults_and_preferences(monkeypa
     s, b = app.systems_update("arome-issued-v2", "c1", "t", {}, None, app.EMPTY_EXTRA, "209M")
     assert s["value"] == v["default_systems"] and b["value"] == "timestral-209m-mv-cal-arome-archived"
     pref = {"arome-issued-v2": ["timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]}
-    out = app.switch_checkpoint("arome-issued-v2", "209M", pref)["arome-issued-v2"]
-    assert out == ["timestral-209m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]  # no 209M twin
+    out, view = app.switch_view("arome-issued-v2", "209M", "archived", {"size": "28M", "setup": "archived"}, pref)
+    assert out["arome-issued-v2"] == ["timestral-209m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]
+    assert view == {"size": "209M", "setup": "archived"}
     assert "209M" in app.tiles_html("arome-issued-v2", "t", "209M") and "1.90" in app.tiles_html(
         "arome-issued-v2", "t", "209M")
 
@@ -188,8 +179,9 @@ def test_benchmark_finding_only_states_what_the_scores_support(monkeypatch):
 
     monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
     text = app.finding("arome-issued-v2", "t")
-    assert ("AROME remains most accurate; conditioning on AROME improves Timestral, with the larger checkpoint "
-            "performing better.") in text and "within what this small sample" not in text
+    assert ("AROME remains most accurate; adding the AROME forecast + archived AROME history improves Timestral, "
+            "with the larger checkpoint performing better.") in text
+    assert "within what this small sample" not in text
     wind = {k: v for k, v in V2_T.items() if k != "arome-raw"} | {"timestral-28m-mv-cal": 1.883,
                                                                    "timestral-28m-mv-cal-arome-archived": 1.887}
     monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(wind, "u", extra_models=("arome-raw",))})
@@ -207,4 +199,43 @@ def test_checkpoint_selector_hidden_where_both_checkpoints_are_already_shown(mon
     run.suite = "synop-historical-v1"
     monkeypatch.setattr(app, "RUNS", {"synop-historical-v1": run})
     assert not app.has_checkpoints("synop-historical-v1")
-    assert app.experiment_view("synop-historical-v1", "209M") is app.EXPERIMENTS["synop-historical-v1"]
+    view = app.experiment_view("synop-historical-v1", "209M")
+    assert view["headline"] == app.EXPERIMENTS["synop-historical-v1"]["headline"] and view["missing"] == []
+
+
+def test_input_setup_switches_conditioned_system_and_reports_not_run(monkeypatch):
+    from weather_lab_app import main as app
+
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})   # no 209M observed-history run
+    v = app.experiment_view("arome-issued-v2", "28M", "substobs")
+    assert v["headline"] == ["arome-raw", "timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-substobs"]
+    assert v["band"] == "timestral-28m-mv-cal-arome-substobs" and v["missing"] == []
+    v = app.experiment_view("arome-issued-v2", "209M", "substobs")
+    assert v["missing"] == ["timestral-209m-mv-cal-arome-substobs"] and v["band"] == ""   # never substituted
+    assert "timestral-209m-mv-cal-arome-substobs" not in v["default_systems"]
+    assert "not run" in app.tiles_html("arome-issued-v2", "t", "209M", "substobs")
+    text = app.finding("arome-issued-v2", "t", setup="substobs")
+    assert "Not run: Timestral 209M + AROME (observed history)" in text
+    assert "different input construction" in text
+    pref = {"arome-issued-v2": ["arome-raw", "timestral-28m-mv-cal-arome-archived"]}
+    out, _ = app.switch_view("arome-issued-v2", "28M", "substobs", {"size": "28M", "setup": "archived"}, pref)
+    assert out["arome-issued-v2"] == ["arome-raw", "timestral-28m-mv-cal-arome-substobs"]
+    html = app.matrix_html("arome-issued-v2", "t")
+    assert html.count("not run") >= 2 and "not integrated yet" in html
+
+
+def test_benchmark_views_never_load_a_model(monkeypatch):
+    """Browsing saved results reads files only: loading a model here is a bug."""
+    from weather_lab import models
+    from weather_lab_app import main as app
+
+    def boom(*a, **k):
+        raise AssertionError("a model was loaded while browsing saved results")
+
+    monkeypatch.setattr(models.ModelCache, "get", boom)
+    monkeypatch.setattr(models, "prefetch", boom)
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
+    app.tiles_html("arome-issued-v2", "t", "209M", "archived")
+    app.finding("arome-issued-v2", "t")
+    app.matrix_html("arome-issued-v2", "t")
+    app.cache_md()

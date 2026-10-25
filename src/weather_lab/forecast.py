@@ -110,6 +110,11 @@ class ForecastBatch:
         if self.output == "quantiles":
             if self.quantiles is None or self.quantiles.shape != expect + (len(self.quantile_levels),):
                 raise ValueError(f"{self.model}: quantiles shape mismatch")
+            if tuple(round(q, 6) for q in self.quantile_levels) != QUANTILE_LEVELS:
+                # Pinball and coverage are compared on one grid. Never relabel or invent levels: an adapter
+                # whose native levels differ must map them explicitly and record how (info["quantile_mapping"]).
+                raise ValueError(f"{self.model}: quantile levels {self.quantile_levels} differ from the benchmark "
+                                 "grid; map them explicitly in the adapter")
             q = self.quantiles[np.isfinite(self.quantiles).all(-1)]
             if len(q) and (np.diff(q, axis=-1) < -1e-6).any():
                 raise ValueError(f"{self.model}: crossing quantiles")
@@ -161,9 +166,17 @@ def qcol(level: float) -> str:
 
 
 class Adapter:
-    """Base class: subclasses set the class attributes and implement `predict`."""
+    """Base class: subclasses set the class attributes and implement `predict`.
+
+    Contract (also docs/adding_a_model.md): `predict(CaseBatch) -> ForecastBatch` with point forecasts
+    (N, V, H) in benchmark units and, for probabilistic systems, quantiles on `QUANTILE_LEVELS`. An
+    adapter declares the inputs it consumes in `inputs`; `family` names its entry in
+    `weather_lab.models.FAMILIES` (capabilities), so an impossible input setup is reported as
+    unsupported rather than run. Preprocessing is the adapter's own business.
+    """
 
     kind: str = ""
+    family: str | None = None
     output: OutputType = "point"
     inputs: frozenset[str] = frozenset({"history"})
     revision: str = "n/a"
@@ -206,52 +219,25 @@ class AromeRaw(Adapter):
 
 # --------------------------------------------------------------------------- Timestral
 
-_MODEL_CACHE: dict[tuple[str, str], tuple[object, dict]] = {}
-_MODEL_LOCK = threading.Lock()
+def load_timestral(checkpoint: str, revision: str, device: str = "cpu") -> tuple[object, dict]:
+    """Shared loaded model for this checkpoint revision/device (see `weather_lab.models.ModelCache`)."""
+    from weather_lab.models import MODELS, resolve
 
-
-def load_timestral(checkpoint: str, revision: str, local_files_only: bool = False,
-                   device: str = "cpu") -> tuple[object, dict]:
-    """Cached `TimestralForecaster.from_pretrained`; returns (forecaster, load-timing info)."""
-    key = (checkpoint, revision, device)
-    with _MODEL_LOCK:
-        if key not in _MODEL_CACHE:
-            import torch
-            from huggingface_hub import try_to_load_from_cache
-            from timestral import TimestralForecaster
-
-            cached = isinstance(try_to_load_from_cache(checkpoint, "model.safetensors", revision=revision), str)
-            t0 = time.perf_counter()
-            fc = TimestralForecaster.from_pretrained(checkpoint, device=device, revision=revision,
-                                                     local_files_only=local_files_only)
-            fc.model.eval()
-            info = {"first_load_s": round(time.perf_counter() - t0, 3), "weights_were_cached": cached, "device": device,
-                    "torch_threads": torch.get_num_threads(),
-                    "n_parameters": int(sum(p.numel() for p in fc.model.parameters())),
-                    "supports_known_covariates": bool(fc.supports_known_covariates),
-                    "quantile_levels": list(fc.quantile_levels)}
-            _MODEL_CACHE[key] = (fc, info)
-        return _MODEL_CACHE[key]
+    item = MODELS.get(resolve(checkpoint, revision), device)
+    return item.forecaster, item.info
 
 
 def weights_cached(checkpoint: str, revision: str) -> bool:
-    from huggingface_hub import try_to_load_from_cache
+    from weather_lab.models import local_dir, resolve
 
-    return isinstance(try_to_load_from_cache(checkpoint, "model.safetensors", revision=revision), str)
+    return local_dir(resolve(checkpoint, revision)) is not None
 
 
 def ensure_checkpoint(size: str, allow_download: bool) -> bool:
     """Make the pinned checkpoint available locally (no GPU needed). Returns True if it was downloaded."""
-    from huggingface_hub import hf_hub_download
+    from weather_lab.models import CHECKPOINTS as REGISTRY, prefetch
 
-    checkpoint, revision, mb = CHECKPOINTS[size]
-    if weights_cached(checkpoint, revision):
-        return False
-    if not allow_download:
-        raise PermissionError(f"{size} weights (~{mb} MB) are not cached; tick 'allow download' to fetch them")
-    for name in ("config.json", "model.safetensors"):
-        hf_hub_download(checkpoint, name, revision=revision)
-    return True
+    return prefetch(REGISTRY[size], allow_download=allow_download)["downloaded"]
 
 
 def calendar_features(times: np.ndarray) -> np.ndarray:
@@ -279,8 +265,11 @@ class Timestral(Adapter):
     """
 
     AROME_MODES = ("archived", "missing", "substituted_observations", "observations")
+    ADAPTER_VERSION = 1          # bump when predict()/build_inputs() change outputs
+    PREPROCESSING_VERSION = 1    # bump when the input construction (context, covariates) changes
 
     kind = "timestral"
+    family = "timestral"
     output = "quantiles"
 
     def __init__(self, id: str, variables: list[str], targets: list[str], checkpoint: str, revision: str,
@@ -334,14 +323,17 @@ class Timestral(Adapter):
     def predict(self, batch: CaseBatch) -> ForecastBatch:
         import torch
 
-        fc, load_info = load_timestral(self.checkpoint, self.revision, device=self.device)
+        from weather_lab.models import MODELS, resolve
+
+        item = MODELS.get(resolve(self.checkpoint, self.revision), self.device)
+        fc, load_info = item.forecaster, item.info
         t_ctx = self.context_steps(batch.step_hours)
         idx = [batch.variables.index(v) for v in self.variables]
         ctx, known = self.build_inputs(batch)
         h = batch.horizon
         out = np.full((len(ctx), len(idx), h, len(fc.quantile_levels)), np.nan, dtype=np.float32)
         t0 = time.perf_counter()
-        with torch.inference_mode():
+        with item.lock, torch.inference_mode():   # inputs are per call; the lock guards the shared module
             for s in range(0, len(ctx), self.batch_size):
                 sl = slice(s, s + self.batch_size)
                 res = fc.forecast(ctx[sl], prediction_length=h,
@@ -371,24 +363,24 @@ class Timestral(Adapter):
 
 # --------------------------------------------------------------------------- exploratory (UI)
 
-CHECKPOINTS = {  # pinned Hub revisions inspected on 2026-10-24
-    "Timestral-5M": ("mistralai/Timestral-5M", "bdd20cfc15a3fea0e4cb5ccef37f8d3ca7aa335f", 21),
-    "Timestral-28M": ("mistralai/Timestral-28M", "49b26409ac87b5935539a5d8ffe7f397b720db47", 111),
-    "Timestral-209M": ("mistralai/Timestral-209M", "9874d252ab0aae16f7f7c999f98f98d6ad7d8365", 837),
-}
-_EXPLORE_SEMAPHORE = threading.Semaphore(1)  # cap concurrent CPU inference requests
+def _registry() -> dict:
+    from weather_lab.models import CHECKPOINTS as REGISTRY
+
+    return REGISTRY
 
 
-def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str], size: str, context_days: int,
-                         calendar: bool, horizon_steps: int = 16, step_hours: int = 3,
-                         allow_download: bool = False, device: str = "cpu") -> pd.DataFrame:
-    """One-off Timestral run on a single case, OUTSIDE the frozen benchmark (never saved to runs/).
+CHECKPOINTS = {k: (c.repo, c.revision, c.mb) for k, c in _registry().items()}   # (repo, revision, MB)
+_EXPLORE_SEMAPHORE = threading.Semaphore(1)  # cap concurrent inference requests
+AROME_LABELS = {None: "", "archived": " +AROME archived history", "substituted_observations": " +AROME observed history",
+                "missing": " +AROME forecast only"}
 
-    `obs` holds the station's observation window; only rows at or before the origin are used.
-    """
-    checkpoint, revision, mb = CHECKPOINTS[size]
-    if not weights_cached(checkpoint, revision) and not allow_download:
-        raise PermissionError(f"{size} weights (~{mb} MB) are not cached; tick 'allow download' to fetch them")
+
+def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str], context_days: int,
+                       arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
+                       arome_fields: tuple[str, ...] = ("t", "pmer"), horizon_steps: int = 16,
+                       step_hours: int = 3) -> CaseBatch:
+    """A one-case batch from saved files: observations <= origin, and (optionally) issued + archived AROME
+    from the station extract with the same rules as the benchmark (`evaluate.arome_inputs`)."""
     origin = pd.Timestamp(case["origin"])
     step = pd.Timedelta(hours=step_hours)
     t_ctx = context_days * 24 // step_hours
@@ -396,14 +388,68 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     hist = obs.set_index("time").reindex(axis)[variables]          # strictly <= origin
     if hist.notna().mean().min() < 0.5:
         raise ValueError("observation window too short or sparse for this context length")
-    batch = CaseBatch(pd.DataFrame([{"case_id": case.name, "station": case["station"]}]), variables,
-                      hist.to_numpy(dtype=np.float32).T[None], np.array([origin.to_datetime64()]),
-                      np.array([[(origin + (k + 1) * step).to_datetime64() for k in range(horizon_steps)]]),
-                      step_hours)
-    model = Timestral(f"exploratory {size} ctx{context_days}d{' +cal' if calendar else ''} [{device}]", variables,
-                      targets=variables, checkpoint=checkpoint, revision=revision, context_days=context_days,
-                      calendar=calendar, batch_size=1, device=device)
-    with _EXPLORE_SEMAPHORE:
-        fb = model.predict(batch)
-    fb.validate(batch)
-    return fb.to_frame(batch, "exploratory (outside frozen benchmark)")
+    cases = pd.DataFrame([{"case_id": case.name, "station": case["station"], "origin": origin,
+                           "arome_run": case.get("arome_run")}])
+    origins = np.array([origin.to_datetime64()]).astype("datetime64[ns]")
+    future = origins[:, None] + (np.arange(1, horizon_steps + 1) * np.timedelta64(step_hours, "h"))[None]
+    arome_arr, hist_args = None, {}
+    if arome_mode:
+        if arome_df is None or not isinstance(case.get("arome_run"), str):
+            raise ValueError("this forecast has no saved AROME run, so AROME conditioning is unavailable")
+        from weather_lab.evaluate import arome_inputs
+
+        arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, list(arome_fields), horizon_steps,
+                                            step_hours, t_ctx)
+    return CaseBatch(cases, variables, hist.to_numpy(dtype=np.float32).T[None], origins, future, step_hours,
+                     arome_arr, **hist_args)
+
+
+def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str], size: str, context_days: int,
+                         calendar: bool, arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
+                         horizon_steps: int = 16, step_hours: int = 3, allow_download: bool = False,
+                         device: str = "cpu", use_cache: bool = True,
+                         lookup_only: bool = False) -> tuple[pd.DataFrame | None, dict]:
+    """One-off Timestral run on a single case, OUTSIDE the frozen benchmark (never saved to runs/).
+
+    Returns (prediction rows, info) where info says whether the prediction cache was hit. The model is
+    loaded only on a cache miss. `lookup_only` returns (None, info) on a miss without computing (used to
+    avoid requesting a ZeroGPU slot for a cached result).
+    """
+    import torch
+
+    from weather_lab import predcache
+    from weather_lab.models import offline, prefetch
+
+    ck = _registry()[size]
+    batch = exploratory_inputs(obs, case, variables, context_days, arome_mode, arome_df,
+                               horizon_steps=horizon_steps, step_hours=step_hours)
+    model = Timestral(f"exploratory {size} ctx{context_days}d{' +cal' if calendar else ''}{AROME_LABELS[arome_mode]} "
+                      f"[{device}]", variables, targets=variables, checkpoint=ck.repo, revision=ck.revision,
+                      context_days=context_days, calendar=calendar, arome=arome_mode, arome_fields=["t", "pmer"],
+                      batch_size=1, device=device)
+    ctx, known = model.build_inputs(batch)
+    payload = {"adapter": model.kind, "adapter_version": Timestral.ADAPTER_VERSION,
+               "preprocessing": Timestral.PREPROCESSING_VERSION, "checkpoint": ck.repo, "revision": ck.revision,
+               "variables": variables, "station": case["station"], "origin": str(case["origin"]),
+               "horizon_steps": horizon_steps, "step_hours": step_hours, "context_steps": ctx.shape[-1],
+               "calendar": calendar, "arome_mode": arome_mode, "arome_run": case.get("arome_run") if arome_mode else None,
+               "quantile_levels": list(QUANTILE_LEVELS), "device": device, "dtype": "float32",
+               "torch": torch.__version__, "stochastic": "none (deterministic forward pass)"}
+    key = predcache.make_key(payload, {"context": ctx, "known_covariates": known})
+
+    def compute() -> pd.DataFrame:
+        if not offline():
+            prefetch(ck, allow_download=allow_download)  # PermissionError if not cached and not allowed
+        with _EXPLORE_SEMAPHORE:
+            fb = model.predict(batch)
+        fb.validate(batch)
+        return fb.to_frame(batch, "exploratory (outside frozen benchmark)")
+
+    if lookup_only:
+        frame = predcache.lookup(key)
+        return frame, {"cache_hit": frame is not None, "key": key[:16], "model": model.id}
+    if use_cache:
+        frame, hit = predcache.get_or_compute(key, payload, compute)
+    else:
+        frame, hit = compute(), False
+    return frame, {"cache_hit": hit, "key": key[:16], "model": model.id}

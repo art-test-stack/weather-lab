@@ -62,6 +62,14 @@ class Run:
     def stations(self) -> list[dict]:
         return self.manifest["dataset"]["stations"]
 
+    def arome_extract(self) -> pd.DataFrame | None:
+        """The AROME station extract the run's AROME inputs came from (for exploratory reruns), if present."""
+        for p in (self.path / "arome_station_extract.parquet",
+                  ROOT / "data" / "processed" / f"arome_{self.suite}.parquet"):
+            if p.exists():
+                return _parquet(p)
+        return None
+
 
 @lru_cache(maxsize=16)
 def _parquet(path: Path) -> pd.DataFrame:
@@ -72,8 +80,9 @@ def find_run(suite: str, prefer_local: bool = True) -> Path | None:
     """Latest local run of a benchmark (a combined multi-candidate run wins), else the installed example."""
     local = [p.parent for p in (ROOT / "runs" / suite).glob("*/run.json")]
     if prefer_local and local:
-        combined = [d for d in local if "combined_from" in read_json(d / "run.json")]
-        return sorted(combined or local)[-1]
+        meta = {d: read_json(d / "run.json") for d in local}
+        combined = [d for d in local if "combined_from" in meta[d]]
+        return max(combined or local, key=lambda d: (meta[d]["created_at"], d.name))
     example = ROOT / "data" / "examples" / suite
     return example if (example / "run.json").exists() else None
 

@@ -1,7 +1,7 @@
 # Setup configuration for `weather-lab bootstrap` (local use and app startup).
 bootstrap:
   # Suites whose saved results the app needs. Each has a committed spec in benchmarks/specs/.
-  suites: [configs/smoke.yaml, configs/arome_v2.yaml, configs/arome_smoke.yaml]
+  suites: [configs/smoke.yaml, configs/arome_v2_matrix.yaml, configs/arome_smoke.yaml]
   # auto = snapshot when snapshot.url is set (or WEATHER_LAB_SNAPSHOT_URL), else official sources.
   mode: auto
   snapshot:
@@ -22,6 +22,15 @@ bootstrap:
       - id: wl-snapshot-v2-20261024
         url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v2-20261024.tar.gz
         sha256: aa9b45ee76326508885962045fea7a273e34202cfd5ee854f59e56434faa378b
+  # Exploratory forecast cache (never benchmark scores). Used when the bucket is attached at its mount path
+  # and writable (the Space: read-write at /data); otherwise data/cache/predictions on local disk.
+  # NOTE: the bucket is public, so cached exploratory forecasts are publicly readable there.
+  # Override with WEATHER_LAB_PREDICTION_CACHE=<path> or =off.
+  caches:
+    predictions: {bucket: ai-testack/weather-lab-storage, subdir: cache/predictions}
+  # Checkpoints the Space build preloads into the default Hub cache (README `preload_from_hub`, pinned
+  # revisions from weather_lab.models.CHECKPOINTS). Local bootstrap fetches only `weights` below.
+  space_preload: [Timestral-28M, Timestral-209M]
   weights:
     - repo: mistralai/Timestral-28M
       revision: 49b26409ac87b5935539a5d8ffe7f397b720db47

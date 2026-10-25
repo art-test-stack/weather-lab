@@ -32,7 +32,7 @@ def cmd_prepare(args) -> None:
 def cmd_evaluate(args) -> None:
     from weather_lab.evaluate import run_evaluation
 
-    run_evaluation(load_config(args.config))
+    run_evaluation(load_config(args.config), reuse_from=Path(args.reuse) if args.reuse else None)
 
 
 def cmd_score(args) -> None:
@@ -127,6 +127,54 @@ def cmd_diag_covariates(args) -> None:
     print(f"saved {p}")
 
 
+def cmd_models_prefetch(args) -> None:
+    from weather_lab.models import CHECKPOINTS, CheckpointError, prefetch
+
+    names = args.names or ["Timestral-28M", "Timestral-209M"]
+    try:
+        for n in names:
+            r = prefetch(CHECKPOINTS[n if n in CHECKPOINTS else f"Timestral-{n}"])
+            print(f"{r['checkpoint']:<16} {r['repo']}@{r['revision'][:12]} "
+                  f"{'downloaded' if r['downloaded'] else 'already cached'} ({r['bytes'] / 1e6:.0f} MB, sha256 verified)"
+                  f"\n{'':<16} {r['path']}")
+    except CheckpointError as e:
+        print(f"prefetch FAILED: {e}")
+        sys.exit(2)
+
+
+def cmd_models_status(args) -> None:
+    import json
+
+    from weather_lab.status import cache_status
+
+    st = cache_status()
+    if args.json:
+        print(json.dumps(st, indent=1, default=str))
+        return
+    print(f"offline mode: {st['offline']} · Hub cache: {st['hub_cache']}")
+    print("checkpoint files on disk:")
+    for r in st["checkpoints"]:
+        print(f"  {r['checkpoint']:<16} {'on disk' if r['on_disk'] else 'absent ':<8} {r['mb']:>5} MB  {r['revision']}")
+    print(f"models loaded in this process: {len(st['loaded'])} (a fresh CLI process holds none)")
+    print("saved benchmark predictions:")
+    for r in st["saved_runs"]:
+        print(f"  {r['suite']:<24} {r['run_id']:<48} {r['systems']:>3} systems  {r['source']}")
+    pc = st["prediction_cache"]
+    print(f"exploratory prediction cache: {pc['entries']} entries, {pc['mb']} MB at {pc['path']} ({pc['persistence']})")
+
+
+def cmd_diag_forecast_only(args) -> None:
+    import json
+
+    from weather_lab.diagnostics import forecast_only_response, write_report
+
+    sizes = tuple(args.checkpoint or ("Timestral-28M", "Timestral-209M"))
+    res = forecast_only_response(load_config(args.config), sizes, args.delta, args.lead)
+    p = write_report("forecast_only_response", res)
+    print(json.dumps(res["checkpoints"], indent=1))
+    print(f"saved {p}")
+
+
 def cmd_arome_evidence(args) -> None:
     from weather_lab.evidence import collect
 
@@ -165,6 +213,8 @@ def main(argv: list[str] | None = None) -> None:
         sp.set_defaults(func=fn)
     ev = sub.add_parser("evaluate", help="run every system on the frozen suite and save predictions + scores")
     ev.add_argument("--config", required=True)
+    ev.add_argument("--reuse", metavar="RUN_DIR", help="copy predictions of identical systems from an earlier run of "
+                    "the same frozen manifest (verified: manifest, data, AROME, targets, system description)")
     ev.set_defaults(func=cmd_evaluate)
     sc = sub.add_parser("score", help="recompute scores from a saved run directory (no model calls)")
     sc.add_argument("--run-dir", required=True)
@@ -217,6 +267,14 @@ def main(argv: list[str] | None = None) -> None:
     ob.add_argument("--config", default="configs/arome_smoke.yaml")
     ob.add_argument("--last-runs", type=int, default=1)
     ob.set_defaults(func=cmd_arome_observe)
+    mo = sub.add_parser("models", help="pinned checkpoints: prefetch and cache status (WEATHER_LAB_OFFLINE=1: no Hub)")
+    msub = mo.add_subparsers(dest="models_command", required=True)
+    mp = msub.add_parser("prefetch", help="download + verify inference files of pinned checkpoints (default 28M 209M)")
+    mp.add_argument("names", nargs="*", help="e.g. Timestral-28M 209M")
+    mp.set_defaults(func=cmd_models_prefetch)
+    ms = msub.add_parser("status", help="checkpoint files on disk, loaded models, saved and cached predictions")
+    ms.add_argument("--json", action="store_true")
+    ms.set_defaults(func=cmd_models_status)
     dg = sub.add_parser("diagnose", help="audits and sensitivity checks")
     dgs = dg.add_subparsers(dest="diag_command", required=True)
     di = dgs.add_parser("arome-inputs", help="table of what the AROME covariate contains for one case")
@@ -229,12 +287,23 @@ def main(argv: list[str] | None = None) -> None:
     dc.add_argument("--case", action="append")
     dc.add_argument("--delta", type=float, default=5.0)
     dc.set_defaults(func=cmd_diag_covariates)
+    fo = dgs.add_parser("forecast-only", help="does a checkpoint use future-only AROME? reorder/local perturbations")
+    fo.add_argument("--config", default="configs/arome_v2_matrix.yaml")
+    fo.add_argument("--checkpoint", action="append", default=None)
+    fo.add_argument("--delta", type=float, default=5.0)
+    fo.add_argument("--lead", type=int, default=24)
+    fo.set_defaults(func=cmd_diag_forecast_only)
     cp = sub.add_parser("compare", help="score candidate runs on one common set and apply a pre-declared rule")
     cp.add_argument("--rule", default="configs/context/selection_rule.yaml")
     cp.add_argument("--freeze", action="store_true", help="write configs/frozen/... and the frozen test config")
     cp.add_argument("--export-combined", metavar="DIR", help="write one run directory with all candidates (for the app)")
     cp.set_defaults(func=cmd_compare)
+    p.add_argument("--offline", action="store_true", help="no Hub requests (same as WEATHER_LAB_OFFLINE=1)")
     args = p.parse_args(argv)
+    if args.offline:
+        import os
+
+        os.environ["WEATHER_LAB_OFFLINE"] = os.environ["HF_HUB_OFFLINE"] = "1"
     args.func(args)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from weather_lab.forecast import qcol
 from weather_lab_app.labels import OBS_COLOR, model_name, model_style, unit, variable_name
@@ -42,14 +43,22 @@ def _rgba(hex_color: str, alpha: float) -> str:
 # --------------------------------------------------------------------------- forecast
 
 def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, variable: str, systems: list[str],
-                    band_model: str | None, history_hours: int = 48, height: int = 340) -> go.Figure:
-    """The forecast window first: short history, shaded forecast period, readable names, ids in hover."""
+                    band_model: str | None, history_hours: int = 48, height: int = 300,
+                    error_mode: str = "signed") -> go.Figure:
+    """The forecast window first: short history, shaded forecast period, readable names, ids in hover.
+
+    error_mode "signed" / "absolute" adds an aligned panel (shared time axis) with each system's point
+    forecast minus the observation, the same point forecast the benchmark scores; "off" hides it.
+    """
     origin = pd.Timestamp(case["origin"])
     u = unit(variable)
     end = pd.Timestamp(rows["valid_time"].max()) if len(rows) else origin
     start = origin - pd.Timedelta(hours=history_hours)
-    fig = go.Figure()
-    fig.add_vrect(x0=origin, x1=end + pd.Timedelta(hours=1.5), fillcolor=FORECAST_BG, line_width=0, layer="below")
+    panel = error_mode in ("signed", "absolute")
+    fig = make_subplots(rows=2 if panel else 1, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+                        row_heights=[0.73, 0.27] if panel else None)
+    fig.add_vrect(x0=origin, x1=end + pd.Timedelta(hours=1.5), fillcolor=FORECAST_BG, line_width=0, layer="below",
+                  row="all", col=1)
     fig.add_annotation(x=origin, y=1, yref="paper", xanchor="left", yanchor="top", showarrow=False,
                        text="  forecast →", font={"size": 12, "color": "#184f95"})
     fig.add_annotation(x=origin, y=1, yref="paper", xanchor="right", yanchor="top", showarrow=False,
@@ -63,27 +72,47 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
                 x=list(b["valid_time"]) + list(b["valid_time"][::-1]),
                 y=list(b[qcol(hi)]) + list(b[qcol(lo)][::-1]), fill="toself", line={"width": 0},
                 fillcolor=_rgba(color, alpha), name=f"80% / 90% range · {model_name(band_model)}",
-                legendgroup="band", showlegend=label == "80%", hoverinfo="skip"))
+                legendgroup="band", showlegend=label == "80%", hoverinfo="skip"), row=1, col=1)
     hist = obs[(obs["time"] >= start) & (obs["time"] <= origin)]
     fut = obs[(obs["time"] > origin) & (obs["time"] <= end)]
     fig.add_trace(go.Scatter(x=hist["time"], y=hist["observed"], name="Observed", mode="lines+markers",
                              line={"color": OBS_COLOR, "width": 2}, marker={"size": 4}, legendgroup="obs",
-                             hovertemplate="%{y:.1f} " + u + "<extra>Observed</extra>"))
+                             hovertemplate="%{y:.1f} " + u + "<extra>Observed</extra>"), row=1, col=1)
     fig.add_trace(go.Scatter(x=fut["time"], y=fut["observed"], name="Observed (verification)", mode="markers",
                              legendgroup="obs", showlegend=False,
                              marker={"color": OBS_COLOR, "size": 9, "symbol": "circle-open", "line": {"width": 2}},
-                             hovertemplate="%{y:.1f} " + u + "<extra>Observed (not an input)</extra>"))
+                             hovertemplate="%{y:.1f} " + u + "<extra>Observed (not an input)</extra>"), row=1, col=1)
+    verif = fut.set_index("time")["observed"]
     for model in [m for m in systems if m in set(sel["model"])]:
         g = sel[sel["model"] == model]
         color, dash, width = model_style(model)
         name = model_name(model)
+        lead = ((pd.to_datetime(g["valid_time"]) - origin) / pd.Timedelta(hours=1)).round().astype(int)
         fig.add_trace(go.Scatter(x=g["valid_time"], y=g["point"], name=name, mode="lines+markers",
                                  line={"color": color, "dash": dash, "width": width}, marker={"size": 5},
-                                 hovertemplate="%{y:.1f} " + u + f"<extra>{name}<br><sub>{model}</sub></extra>"))
+                                 legendgroup=model, customdata=lead,
+                                 hovertemplate="%{y:.1f} " + u + " · %{customdata} h ahead"
+                                               f"<extra>{name}<br><sub>{model}</sub></extra>"), row=1, col=1)
+        if panel:
+            err = g["point"].to_numpy() - verif.reindex(pd.to_datetime(g["valid_time"])).to_numpy()
+            err = abs(err) if error_mode == "absolute" else err
+            fig.add_trace(go.Scatter(x=g["valid_time"], y=err, name=name, mode="lines+markers", showlegend=False,
+                                     line={"color": color, "dash": dash, "width": max(width - 0.6, 1.2)},
+                                     marker={"size": 4}, legendgroup=model, customdata=lead,
+                                     hovertemplate=("%{y:+.2f} " if error_mode == "signed" else "%{y:.2f} ") + u
+                                                   + " · %{customdata} h ahead<br>valid %{x|%a %d %b %H:%M} UTC"
+                                                   f"<extra>{name}</extra>"), row=2, col=1)
     fig.add_vline(x=origin, line={"color": INK2, "width": 1, "dash": "dash"})
-    fig.update_yaxes(title=variable_name(variable))
+    fig.update_yaxes(title=variable_name(variable), row=1, col=1)
     fig.update_xaxes(range=[start, end + pd.Timedelta(hours=1.5)], tickformat="%a %d %b\n%H:%M")
-    return _layout(fig, height=height)
+    if panel:
+        if error_mode == "signed":
+            fig.add_hline(y=0, line={"color": INK2, "width": 1}, row=2, col=1)
+        fig.update_yaxes(title=("Forecast − obs." if error_mode == "signed" else "|Forecast − obs.|") + f" ({u})",
+                         row=2, col=1, title_font={"size": 11}, zeroline=False)
+        if error_mode == "absolute":
+            fig.update_yaxes(rangemode="tozero", row=2, col=1)
+    return _layout(fig, height=height + (100 if panel else 40))
 
 
 # --------------------------------------------------------------------------- benchmark
@@ -93,7 +122,11 @@ METRICS = {
     "rmse": ("Root-mean-square error", True, "point"),
     "pinball": ("Pinball loss (probabilistic)", True, "prob"),
     "coverage80": ("80% range coverage", False, "prob"),
+    "coverage90": ("90% range coverage", False, "prob"),
+    "width80": ("80% range width", None, "prob"),
+    "width90": ("90% range width", None, "prob"),
 }
+NOMINAL = {"coverage80": 0.8, "coverage90": 0.9}
 
 
 def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: str | None,
@@ -102,16 +135,17 @@ def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: 
     if table.empty:
         return _empty("No scores for this selection")
     label, lower_better, _ = METRICS[metric]
-    u = "" if metric == "coverage80" else f" {unit(variable)}"
+    cov = metric in NOMINAL
+    u = "" if cov else f" {unit(variable)}"
     t = table.dropna(subset=[metric]).copy()
-    if metric == "coverage80":
-        t["key"] = (t[metric] - 0.8).abs()                      # closest to the nominal 80% first
+    if cov:
+        t["key"] = (t[metric] - NOMINAL[metric]).abs()          # closest to nominal first
     else:
-        t["key"] = t[metric] if lower_better else -t[metric]
+        t["key"] = t[metric] if lower_better is not False else -t[metric]
     t = t.sort_values("key", ascending=False)                   # plotly draws bottom-up: best ends on top
     names = [model_name(m) for m in t["model"]]
     colors = [model_style(m)[0] for m in t["model"]]
-    text = [f"{v:.0%}" if metric == "coverage80" else f"{v:.2f}{u}" for v in t[metric]]
+    text = [f"{v:.0%}" if cov else f"{v:.2f}{u}" for v in t[metric]]
     fig = go.Figure(go.Bar(
         x=t[metric], y=names, orientation="h", marker={"color": colors, "pattern": {
             "shape": ["/" if m in hatched else "" for m in t["model"]], "fgcolor": SURFACE, "size": 7}, "line": {
@@ -121,40 +155,62 @@ def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: 
         customdata=list(zip(t["model"], t["n"])),
         hovertemplate="%{y}: %{text}<br>n = %{customdata[1]} forecast–observation pairs"
                       "<br><sub>%{customdata[0]}</sub><extra></extra>"))
-    if metric == "coverage80":
-        fig.add_vline(x=0.8, line={"color": INK2, "dash": "dot"}, annotation_text="nominal 80%",
-                      annotation_position="top")
+    if cov:
+        fig.add_vline(x=NOMINAL[metric], line={"color": INK2, "dash": "dot"},
+                      annotation_text=f"nominal {NOMINAL[metric]:.0%}", annotation_position="top")
         fig.update_xaxes(tickformat=".0%", range=[0, 1.05])
     else:
-        fig.update_xaxes(title=f"{label} ({unit(variable)}) · lower is better", rangemode="tozero")
+        hint = " · lower is better" if lower_better else " · narrower only helps if coverage holds"
+        fig.update_xaxes(title=f"{label} ({unit(variable)}){hint}", rangemode="tozero")
     fig.update_layout(hovermode="closest", bargap=0.35)
     return _layout(fig, height=max(240, 46 * len(t) + 70), legend_top=False)
 
 
 def metric_by_lead(table: pd.DataFrame, metric: str, variable: str, models: list[str],
-                   primary: list[str] | None = None) -> go.Figure:
-    """Score by lead; systems outside `primary` start hidden (one click on the legend shows them)."""
-    df = table[table["lead_h"].notna() & table["model"].isin(models)]
+                   primary: list[str] | None = None, cumulative: bool = False) -> go.Figure:
+    """Score against lead from `weather_lab.horizon.by_lead`; systems outside `primary` start hidden.
+
+    cumulative=False: value at each lead. cumulative=True: value over all leads up to H (a different
+    quantity). Error bars appear only where the table holds a block-bootstrap interval of the mean.
+    """
+    df = table[table["model"].isin(models)]
     if df.empty:
         return _empty("No lead-time scores for this selection")
     label = METRICS[metric][0]
+    cov = metric in NOMINAL
     fig = go.Figure()
     for m in models:
         g = df[df["model"] == m].sort_values("lead_h")
         if g.empty:
             continue
         color, dash, width = model_style(m)
-        fig.add_trace(go.Scatter(x=g["lead_h"], y=g[metric], name=model_name(m), mode="lines+markers",
-                                 line={"color": color, "dash": dash, "width": width}, marker={"size": 6},
-                                 visible=True if primary is None or m in primary else "legendonly",
-                                 hovertemplate="%{y:.2f}<extra>" + model_name(m) + "</extra>"))
-    if metric == "coverage80":
-        fig.add_hline(y=0.8, line={"color": INK2, "dash": "dot"})
+        has_ci = g["ci95_low"].notna().any()
+        err = {"type": "data", "symmetric": False, "array": g["ci95_high"] - g[metric],
+               "arrayminus": g[metric] - g["ci95_low"], "color": _rgba(color, 0.5), "thickness": 1.2,
+               "width": 3} if has_ci else None
+        fmt = ".0%" if cov else ".2f"
+        where = "all leads ≤ %{x} h" if cumulative else "%{x} h ahead"
+        fig.add_trace(go.Scatter(
+            x=g["lead_h"], y=g[metric], name=model_name(m), mode="lines+markers", error_y=err,
+            line={"color": color, "dash": dash, "width": width}, marker={"size": 6},
+            visible=True if primary is None or m in primary else "legendonly",
+            customdata=list(zip(g["n"], g["n_cases"], g["ci95_low"], g["ci95_high"])),
+            hovertemplate=f"%{{y:{fmt}}} · {where}<br>%{{customdata[0]}} pairs from %{{customdata[1]}} forecasts"
+                          + ("<br>95% interval of the mean %{customdata[2]:.2f}–%{customdata[3]:.2f}" if has_ci
+                             else "") + "<extra>" + model_name(m) + "</extra>"))
+    if cov:
+        fig.add_hline(y=NOMINAL[metric], line={"color": INK2, "dash": "dot"},
+                      annotation_text=f"nominal {NOMINAL[metric]:.0%}", annotation_position="bottom right")
         fig.update_yaxes(tickformat=".0%")
     else:
         fig.update_yaxes(title=f"{label} ({unit(variable)})", rangemode="tozero")
-    fig.update_xaxes(title="hours ahead", tickvals=list(range(0, 49, 6)))
-    return _layout(fig, height=360)
+    fig.update_xaxes(title="all leads up to H (hours ahead)" if cumulative else "hours ahead (H)",
+                     tickvals=list(range(0, 49, 6)))
+    title = (f"{label}, cumulative: mean over every lead up to H" if cumulative else f"{label} at each lead H")
+    fig = _layout(fig, title=title, height=470, legend_top=False)
+    fig.update_layout(legend={"orientation": "h", "yanchor": "top", "y": -0.2, "x": 0, "font": {"size": 11}},
+                      margin={"b": 130})
+    return fig
 
 
 def station_map(stations: list[dict], selected: str | None) -> go.Figure:

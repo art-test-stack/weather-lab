@@ -44,6 +44,14 @@ Neither gives publication times or explains the archive timestamps. See `docs/av
 
 Measured availability for the 12 runs used (03Z, 2026-10-10 to 2026-10-21): each run was complete in the archive **2.64–2.80 h after initialization** (05:38–05:48Z), before its 06Z origin. The dedicated Météo-France API, which may require an account, was not used.
 
+## TFC t0-gamma (next candidate, not integrated)
+
+Checked 2026-10-25: [model card](https://huggingface.co/theforecastingcompany/t0-gamma) (main
+`e08aee083778f1f32da4974c0a34276776a35c52`, Apache-2.0, not gated, `model.safetensors` 1,022,492,908 B),
+[tfc-t0](https://github.com/theforecastingcompany/tfc-t0) (requires `tfc-t0 >= 0.6.0`; 0.6.0 is the latest on
+PyPI, 2026-10-13; PyTorch and MLX runtimes; 21 native quantiles 0.01, 0.05–0.95, 0.99). Integration points:
+[adding_a_model.md](adding_a_model.md). Recheck and pin package and weight revision when integrating.
+
 ## WeatherGenerator (future milestone, not integrated)
 
 | Source | Revision / date | Facts |
@@ -55,7 +63,13 @@ Measured availability for the 12 runs used (03Z, 2026-10-10 to 2026-10-21): each
 | https://weathergenerator.eu/blog/technical-blog-vol-3/ | listed as 2026-05-27 | FastEvaluation metrics: RMSE, MAE, CRPS, SSR, rank histograms, ACC, categorical scores and others. Regrids with earthkit-regrid for model intercomparison. Station verification is not described. |
 | https://wgen-fasteval.readthedocs.io/en/latest/ | no version shown | Reads native WeatherGenerator Zarr, and score files with `type: csv` (`metrics_dir/<run_id>/*.csv`, header `,parameter,level,number,score,step,date,domain_name,value`). CSV input only produces score line plots. Station/point ingestion is not documented; non-gridded data must "already be on the same point layout as the model output". **Our station forecasts cannot be fed to its native reader.** At most, our scores could be exported to its CSV format. |
 
-## Hugging Face Spaces (deployment, not done)
+## Hugging Face Spaces (deployment)
+
+Storage and caching checked 2026-10-25 (Spaces storage, config reference, manage-Spaces guide, local cache):
+buckets attached as volumes persist beyond the Space, the legacy persistent-storage add-on is discontinued,
+`preload_from_hub` writes to the default Hub cache at build time and ignores `HF_HOME`, and model volumes are
+read-only and can only be configured through the API. Details and the chosen mechanism:
+[caching.md](caching.md).
 
 | Source | Facts |
 |---|---|
