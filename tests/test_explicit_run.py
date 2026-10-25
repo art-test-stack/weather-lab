@@ -189,7 +189,7 @@ def _run(app, d, applied):
 EDITS = {"station": "07110", "variable": "pmer", "size": "28M", "conditioning": "none",
          "features": ["resid", "atmos", "solar", "tend"], "calendar": False, "ctx": 45, "horizon": 24,
          "resid_vars": ["t"], "atmos_fields": ["td"], "tend_lags": [6, 12], "overlays": ["persistence"],
-         "band": "", "error_mode": "signed", "prediction_target": "arome_error"}
+         "band": "", "error_mode": "signed", "prediction_target": "arome_error", "metric": "rmse"}
 
 
 @needs_example
@@ -227,6 +227,39 @@ def test_edits_never_reach_resolution_inference_loading_or_rendering(app_env):
 
 
 @needs_example
+@pytest.mark.parametrize("computed", [False, True])
+def test_main_metric_is_applied_only_on_run_without_new_predictions(app_env, tmp_path, monkeypatch, computed):
+    from pathlib import Path
+
+    app, fake, counters, a0 = app_env
+    if computed:
+        a0, _, changed = _run(app, {**a0["draft"], "conditioning": "none", "ctx": 45}, a0)
+        assert changed and fake.inference == 1
+    monkeypatch.setattr(app, "ROOT", tmp_path)
+    original = app.render(a0)
+    original_csv = Path(original[6]).read_bytes()
+    before = counters()
+    d = {**a0["draft"], "metric": "rmse"}
+    feedback = app.draft_feedback(*_vals(app, d), a0, {"busy": False})
+    assert "main metric → RMSE" in feedback[0] and "main metric MAE" in feedback[0]
+    assert app.render(a0)[4] == original[4] and counters() == before
+    result, msg = app.run_forecast(*_vals(app, d), a0)
+    stale, _, changed = app.apply_if_current(result, *_vals(app, a0["draft"]), a0, msg)
+    assert stale is a0 and not changed
+    applied, _, changed = app.apply_if_current(result, *_vals(app, d), a0, msg)
+    assert changed and counters()[:3] == before[:3] and fake.calls == before[-2]
+    assert applied["config"] == a0["config"] and applied["view"]["metric"] == "rmse"
+    output = app.render(applied)
+    assert "<th>RMSE</th><th>MAE</th>" in output[4] and "Main metric: RMSE" in output[3]
+    score_label = "RMSE · this forecast" if computed else "root mean squared error"
+    assert score_label in output[8]
+    exported = pd.read_csv(output[6])
+    assert set(exported.main_metric) == {"rmse"}
+    assert exported.applied_configuration.str.contains("main metric RMSE").all()
+    assert output[6] != original[6] and Path(original[6]).read_bytes() == original_csv
+
+
+@needs_example
 def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display():
     """Event graph: every function writing `applied` or a displayed output descends from the Run button's click
     or from the page load; draft controls trigger only draft feedback."""
@@ -237,6 +270,12 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
 
     demo = app.init(run_bootstrap=False)
     h = demo.wl
+    main_metric = dict(zip(app.DRAFT_KEYS, h["draft"]))["metric"]
+    assert main_metric.label == h["benchmark_metric"].label == "Main metric"
+    assert main_metric.value == h["benchmark_metric"].value == "mae"
+    assert {v for _, v in main_metric.choices} == {"mae", "rmse"}
+    assert {"mae", "rmse"} <= {v for _, v in h["benchmark_metric"].choices}
+    assert any(c.get("props", {}).get("label") == "Forecast" for c in demo.config["components"])
     overview = h["render"][:-1]                                     # the last output is the Benchmark tab's variable
     protected = {h["applied"]._id} | {c._id for c in overview if c not in h["draft"]}
     fns = demo.fns
@@ -265,6 +304,9 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     worker = next(f for f in fns.values() if f.fn is app.run_captured)
     assert worker.trigger_only_on_success and worker.inputs == [h["captured_request"]]
     assert any(f.fn is app.finish_forecast for f in fns.values())
+    matrices = [f for f in fns.values() if f.fn is app.matrix_html]
+    assert matrices and all(f.inputs[-1] is h["benchmark_metric"] for f in matrices)
+    assert any((h["benchmark_metric"]._id, "input") in root(f).targets for f in matrices)
 
 
 @needs_example

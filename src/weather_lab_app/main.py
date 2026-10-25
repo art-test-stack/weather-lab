@@ -1,6 +1,6 @@
 """Weather-lab: Gradio app presenting saved benchmark results.
 
-Overview (landing): what is compared, a large forecast chart and headline numbers for the selected
+Forecast (landing): what is compared, a large forecast chart and headline numbers for the selected
 experiment. Benchmark: a compact comparison, details below. Methods: scope, definitions, exact
 identifiers, previous versions and integrity details. Nothing here runs the benchmark; the only
 model call is the optional exploratory forecast, labelled as such.
@@ -224,7 +224,7 @@ def on_station(suite: str, station: str):
 
 
 def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | None = None,
-               horizon: int | None = None, extra: str | None = None) -> str:
+               horizon: int | None = None, extra: str | None = None, metric: str = "mae") -> str:
     """Benchmark aggregate cards for the selected experiment, checkpoint and input setup (saved score tables).
 
     With `horizon` below the run's inference horizon they are recomputed from the saved predictions on leads
@@ -244,11 +244,13 @@ def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | 
     u = unit(variable)
     split = run.splits[-1]
     ref = e["reference"]
-    ref_mae = h.set_index("model")["mae"].get(ref)
-    maes = h.set_index("model")["mae"]
+    errors = h.set_index("model")[metric]
+    secondary = "rmse" if metric == "mae" else "mae"
 
     def versus(value: float, other: str) -> str:
-        ratio = value / maes[other]
+        if errors[other] == 0:
+            return f"{model_name(other)} has zero {metric.upper()}"
+        ratio = value / errors[other]
         if ratio >= 1.5:
             return f"{ratio:.1f}× the error of {model_name(other)}"
         return f"{abs(ratio - 1):.0%} {'higher' if ratio > 1 else 'lower'} error than {model_name(other)}"
@@ -257,16 +259,18 @@ def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | 
     for r in h.itertuples():
         color = model_style(r.model)[0]
         parts = []
+        value = getattr(r, metric)
         other = e.get("compare", {}).get(r.model)
-        if other in maes.index:
-            parts.append(versus(r.mae, other))
-        if r.model != ref and ref_mae is not None:
-            parts.append(versus(r.mae, ref))
+        if other in errors.index:
+            parts.append(versus(value, other))
+        if r.model != ref and ref in errors.index:
+            parts.append(versus(value, ref))
         detail = "reference" if r.model == ref else " · ".join(parts)
         out.append(f"<div class='tile{' ref' if r.model == ref else ''}' title='{r.model}'>"
-                   f"<div class='v'>{r.mae:.2f} {u}</div>"
+                   f"<div class='v'>{value:.2f} {u}</div>"
                    f"<div class='n'><span class='sw' style='background:{color}'></span>{r.name}</div>"
-                   f"<div class='d'>{detail}</div></div>")
+                   f"<div class='d'>{metric.upper()} · {secondary.upper()} {getattr(r, secondary):.2f} {u}"
+                   f" · {detail}</div></div>")
     band = e.get("band")
     cov = h.set_index("model")["coverage80"].get(band) if band in set(h["model"]) else None
     if cov is not None and pd.notna(cov):
@@ -275,11 +279,12 @@ def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | 
                    f"<div class='d'>{model_name(band)} · nominal 80%</div></div>")
     n = int(h["n"].max())
     split_txt = f" · {SPLIT_NAMES.get(split, split)}" if len(run.splits) > 1 else ""
-    what = (f"<b>Benchmark aggregate, interactive slice</b>: mean absolute error over {n:,} forecast–observation "
+    score_name = "mean absolute error" if metric == "mae" else "root mean squared error"
+    what = (f"<b>Benchmark aggregate, interactive slice</b>: {score_name} over {n:,} forecast–observation "
             f"pairs with lead ≤ {int(horizon)} h of the saved {run.horizon_hours} h forecasts, all stations"
             f"{split_txt}, recomputed from saved predictions. Frozen full-horizon scores: Benchmark tab."
             if sliced else
-            f"<b>Benchmark aggregate</b> (frozen): mean absolute error over {n:,} forecast–observation pairs, all "
+            f"<b>Benchmark aggregate</b> (frozen): {score_name} over {n:,} forecast–observation pairs, all "
             f"stations and lead times{split_txt}; lower is better.")
     return f"<div class='tiles'>{''.join(out)}{not_run}</div><div class='note'>{what}</div>"
 
@@ -347,9 +352,10 @@ CONDITIONING_CHOICES = [("No AROME conditioning" if k == "none" else SETUP_NAMES
 FEATURE_LABELS = {n: g.label for n, g in FEATS.GROUPS.items()}
 FEATURE_CHOICES = [(g.label, n) for n, g in FEATS.GROUPS.items()]
 DRAFT_KEYS = ("suite", "station", "case", "variable", "size", "conditioning", "features", "calendar", "ctx",
-              "horizon", "resid_vars", "atmos_fields", "tend_lags", "overlays", "band", "error_mode", "prediction_target")
+              "horizon", "resid_vars", "atmos_fields", "tend_lags", "overlays", "band", "error_mode", "prediction_target",
+              "metric")
 FORECAST_KEYS = DRAFT_KEYS[:13] + ("prediction_target",)
-PRESENTATION_KEYS = ("variable", "overlays", "band", "error_mode")
+PRESENTATION_KEYS = ("variable", "overlays", "band", "error_mode", "metric")
 COUNTERS = {"applied": 0, "runs": 0}      # forecast applications / Run forecast clicks (this process)
 _SUBMISSION_LOCK = threading.Lock()
 DRAFT_LABELS = {"suite": "experiment", "station": "station", "case": "forecast time", "variable": "variable",
@@ -357,13 +363,16 @@ DRAFT_LABELS = {"suite": "experiment", "station": "station", "case": "forecast t
                 "calendar": "calendar inputs", "ctx": "context", "horizon": "horizon",
                 "resid_vars": "AROME-error variables", "atmos_fields": "dew point / cloud fields",
                 "tend_lags": "tendency lags", "overlays": "comparison overlays", "band": "shaded range",
-                "error_mode": "error panel", "prediction_target": "forecast method"}
+                "error_mode": "error panel", "prediction_target": "forecast method", "metric": "main metric"}
 
 
 def make_draft(*vals) -> dict:
     """An immutable-by-convention copy of the forecast block's control values."""
     d = dict(zip(DRAFT_KEYS, vals))
     d.setdefault("prediction_target", "weather")
+    d.setdefault("metric", "mae")
+    if d["metric"] not in ("mae", "rmse"):
+        raise ValueError("Main metric must be MAE or RMSE")
     d["features"] = [n for n in FEATS.GROUPS if n in (d.get("features") or [])]
     for k in ("resid_vars", "atmos_fields", "overlays"):
         d[k] = sorted(d.get(k) or [])
@@ -553,7 +562,7 @@ def present(new: dict, d: dict, prev: dict | None) -> dict:
         pref[new["suite"]] = p
     choices, shown, prob, band = select_systems(new, variable, pref, d["band"], keep_band=not new_forecast)
     new["view"] = {"variable": variable, "pref": pref, "shown": shown, "choices": choices, "prob": prob,
-                   "band": band, "error_mode": d["error_mode"] or "absolute"}
+                   "band": band, "error_mode": d["error_mode"] or "absolute", "metric": d["metric"]}
     new["draft"] = dict(d)
     return new
 
@@ -640,6 +649,7 @@ def applied_text(a: dict) -> str:
     cfg = a["config"]
     head = describe(cfg, {k: v[0] for k, v in SETUP_NAMES.items()}).replace(f"horizon {cfg.horizon_h} h",
                                                                              f"shown to {a['shown_h']} h")
+    head += f" · main metric {a.get('view', {}).get('metric', 'mae').upper()}"
     if a["source"] == "saved":
         return f"{model_name(a['primary'])} = {head} (saved {RUNS[a['suite']].horizon_hours} h forecast)"
     return head
@@ -662,6 +672,8 @@ def pending_items(a: dict, d: dict) -> list[str]:
                 ", ".join(map(str, v)) or "none"
             if k == "prediction_target":
                 val = PREDICTION_TARGETS.get(v, v)
+            if k == "metric":
+                val = v.upper()
             if k == "case" and v in set(RUNS[d["suite"]].cases()["case_id"]):
                 c = RUNS[d["suite"]].cases().set_index("case_id").loc[v]
                 val = f"{station_label(c['station']).split(' ', 1)[-1]}, {c['origin']:%a %d %b %H:%M} UTC"
@@ -781,7 +793,7 @@ def select_systems(a: dict, variable: str, pref_by: dict | None, band: str | Non
 
 
 def render(applied, changed=True):
-    """Every Overview output from the applied result, in one step. Skipped when nothing was applied."""
+    """Every Forecast output from the applied result, in one step. Skipped when nothing was applied."""
     if not changed:
         return tuple(gr.skip() for _ in range(10))
     a = applied
@@ -807,7 +819,7 @@ def _window(rows: pd.DataFrame, horizon: int) -> pd.DataFrame:
 
 def forecast_scores(rows: pd.DataFrame, obs: pd.DataFrame, systems: list[str]) -> tuple[pd.DataFrame, int]:
     """Per system on THIS forecast: leads covered, and on the leads where every listed system has a point
-    forecast and the observation exists (shared window): MAE, 80% coverage and width."""
+    forecast and the observation exists (shared window): MAE, RMSE, 80% coverage and width."""
     r = rows[rows["model"].isin(systems)].merge(obs.rename(columns={"time": "valid_time"}), on="valid_time",
                                                 how="left")
     covers = r.groupby("model")["lead_h"].max()
@@ -817,27 +829,33 @@ def forecast_scores(rows: pd.DataFrame, obs: pd.DataFrame, systems: list[str]) -
     shared = shared if have == set(covers.index) else set()
     s = ok[ok["lead_h"].isin(shared)].copy()
     s["abs_err"] = (s["point"] - s["observed"]).abs()
+    s["sq_err"] = (s["point"] - s["observed"]).pow(2)
     if qcol(0.1) in s:
         s["in80"] = ((s["observed"] >= s[qcol(0.1)]) & (s["observed"] <= s[qcol(0.9)])).where(s[qcol(0.1)].notna())
         s["width80"] = s[qcol(0.9)] - s[qcol(0.1)]
     out = pd.DataFrame({"covers_h": covers})
     if len(s):
         agg = s.groupby("model").agg(mae=("abs_err", "mean"), n=("abs_err", "size"),
+                                     rmse=("sq_err", "mean"),
                                      **({"cov80": ("in80", "mean"), "width80": ("width80", "mean")}
                                         if "in80" in s else {}))
+        agg["rmse"] = agg["rmse"].pow(0.5)
         out = out.join(agg)
     return out.reindex([m for m in systems if m in out.index]), len(shared)
 
 
-def this_forecast_html(scores: pd.DataFrame, n_shared: int, variable: str) -> str:
+def this_forecast_html(scores: pd.DataFrame, n_shared: int, variable: str, metric: str = "mae") -> str:
     u = unit(variable)
+    metrics = (metric, "rmse" if metric == "mae" else "mae")
     observable = n_shared > 0
     cell = lambda x, f: f(x) if observable and pd.notna(x) else "Not yet observable" if not observable else "–"  # noqa: E731
     rows = "".join(
         f"<tr><td><span class='sw' style='background:{model_style(m)[0]}'></span>{model_name(m)}</td>"
-        f"<td>{int(r.covers_h)} h</td><td>{cell(r.get('mae'), lambda v: f'{v:.2f} {u}')}</td>"
-        f"<td>{cell(r.get('cov80'), lambda v: f'{v:.0%}')}</td></tr>" for m, r in scores.iterrows())
-    return ("<table class='mini'><thead><tr><th>System</th><th>Shown to</th><th>Mean abs. error</th>"
+        f"<td>{int(r.covers_h)} h</td>"
+        + "".join(f"<td>{cell(r.get(key), lambda v: f'{v:.2f} {u}')}</td>" for key in metrics)
+        + f"<td>{cell(r.get('cov80'), lambda v: f'{v:.0%}')}</td></tr>" for m, r in scores.iterrows())
+    return ("<table class='mini'><thead><tr><th>System</th><th>Shown to</th>"
+            + "".join(f"<th>{key.upper()}</th>" for key in metrics) +
             f"<th>80% coverage</th></tr></thead><tbody>{rows}</tbody></table><div class='note'>This forecast only, "
             f"on the {n_shared} lead(s) where every listed system has a forecast and the observation exists"
             + ("" if observable else ": none observed yet") + ".</div>")
@@ -847,8 +865,11 @@ def cards_html(applied, variable) -> str:
     """Primary cards: the applied exploratory forecast (labelled), or the benchmark aggregate of the applied
     saved view over its displayed slice."""
     a = applied
+    metric = a["view"].get("metric", "mae")
+    secondary = "rmse" if metric == "mae" else "mae"
     if a["source"] == "saved":
-        return tiles_html(a["suite"], variable, a["size"], a["setup"] or e_main(a["suite"]), a["shown_h"], a["primary"])
+        return tiles_html(a["suite"], variable, a["size"], a["setup"] or e_main(a["suite"]), a["shown_h"],
+                          a["primary"], metric)
     run, mid, st = RUNS[a["suite"]], a["primary"], a["settings"]
     frame = a["exploratory"][mid]
     rows, _, case = case_forecast(run, a["case"], variable)
@@ -856,15 +877,20 @@ def cards_html(applied, variable) -> str:
     f = _window(frame[frame["variable"] == variable], a["shown_h"])
     u = unit(variable)
     v = f.merge(obs.rename(columns={"time": "valid_time"}), on="valid_time", how="left")
-    seen = v.dropna(subset=["observed"])
+    seen = v.dropna(subset=["point", "observed"])
     n_obs, n_leads = len(seen), len(f)
     head = (f"<div class='note'><b>Current forecast · Exploratory</b> — {settings_text(st)}; shown to "
             f"{a['shown_h']} h; {n_obs} of {n_leads} leads observed so far.</div>")
     color = model_style(mid)[0]
     nyo = "<div class='v'>Not yet observable</div>"
-    mae = f"<div class='v'>{(seen['point'] - seen['observed']).abs().mean():.2f} {u}</div>" if n_obs else nyo
-    cards = [f"<div class='tile ref' title='{mid}'>{mae}<div class='n'><span class='sw' style='background:{color}'>"
-             f"</span>Mean absolute error · this forecast</div><div class='d'>{n_obs} observed lead(s)</div></div>"]
+    err = seen["point"] - seen["observed"]
+    values = {"mae": err.abs().mean(), "rmse": np.sqrt(err.pow(2).mean())}
+    cards = []
+    for key in (metric, secondary):
+        value = f"<div class='v'>{values[key]:.2f} {u}</div>" if n_obs else nyo
+        cards.append(f"<div class='tile{' ref' if key == metric else ''}' title='{mid}'>{value}<div class='n'>"
+                     f"<span class='sw' style='background:{color}'></span>{key.upper()} · this forecast</div>"
+                     f"<div class='d'>{n_obs} observed lead(s)</div></div>")
     if qcol(0.1) in f and f[qcol(0.1)].notna().any():
         width = (f[qcol(0.9)] - f[qcol(0.1)]).mean()
         inside = ((seen["observed"] >= seen[qcol(0.1)]) & (seen["observed"] <= seen[qcol(0.9)])).mean()
@@ -880,15 +906,17 @@ def cards_html(applied, variable) -> str:
     others = [m for m in ("arome-raw", comparison) if m and m != mid and m in set(all_rows["model"])]
     sc, n_shared = forecast_scores(_window(all_rows, a["shown_h"]), obs, [mid] + others)
     for m in others:
-        val = sc.loc[m, "mae"] if "mae" in sc and m in sc.index else None
+        val = sc.loc[m, metric] if metric in sc and m in sc.index else None
+        other_score = (f"{secondary.upper()} {sc.loc[m, secondary]:.2f} {u} · "
+                       if secondary in sc and pd.notna(sc.loc[m, secondary]) else "")
         cards.append(f"<div class='tile' title='{m}'><div class='v'>"
                      + (f"{val:.2f} {u}" if val is not None and pd.notna(val) else "Not yet observable")
                      + f"</div><div class='n'><span class='sw' style='background:{model_style(m)[0]}'></span>"
-                     f"{model_name(m)}</div><div class='d'>"
+                     f"{model_name(m)}</div><div class='d'>{metric.upper()} · {other_score}"
                      + ("previously applied forecast" if m == a.get("comparison") else "saved forecast")
                      + f", on the {n_shared} lead(s) both cover and "
-                     "observed" + (f"; the exploratory forecast scores {sc.loc[mid, 'mae']:.2f} {u} there"
-                                   if "mae" in sc and pd.notna(sc.loc[mid, "mae"]) else "") + "</div></div>")
+                     "observed" + (f"; this forecast scores {sc.loc[mid, metric]:.2f} {u} {metric.upper()} there"
+                                   if metric in sc and pd.notna(sc.loc[mid, metric]) else "") + "</div></div>")
     return (head + f"<div class='tiles'>{''.join(cards)}</div><div class='note'>One forecast, outside the frozen "
             "benchmark: not saved to results and never scored there. The benchmark aggregates over all cases are in "
             "the Benchmark tab.</div>")
@@ -913,7 +941,8 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
     fig = plots.forecast_figure(rows, obs, case, variable, systems, band_model or None,
                                 context_hours=int(ctx_days) * 24, error_mode=error_mode or "off")
     scores, n_shared = forecast_scores(rows, obs, systems)
-    this = this_forecast_html(scores, n_shared, variable)
+    metric = a["view"].get("metric", "mae")
+    this = this_forecast_html(scores, n_shared, variable, metric)
     desc = "\n".join(f"- **{model_name(m)}**: {model_description(m)}" for m in systems)
     origin = pd.Timestamp(case["origin"])
     plotted = int(rows.loc[rows["model"].isin(systems), "lead_h"].max()) if systems else 0
@@ -938,6 +967,7 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
                "scored or exported." + gap
                + (err_txt[error_mode] + ", from the same point forecast the benchmark scores." if error_mode in
                   err_txt else ""))
+    caption += f" Main metric: {metric.upper()}; MAE and RMSE use the same observed leads."
     if a["config"].prediction_target == "arome_error":
         coverage = "; ".join(f"{name}: {r['observed_steps']} of {r['total_steps']} steps, "
                               f"{r['first'][:16]} to {r['last'][:16]} UTC"
@@ -957,6 +987,7 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
     out.insert(0, "source", np.where(out["model"].astype(str).str.startswith("exploratory"),
                                      "exploratory (outside the frozen benchmark, not scored)", "saved benchmark run"))
     out["applied_configuration"] = applied_text(a)
+    out["main_metric"] = metric
     configs = {**_systems_as_configs(a["suite"]), **a.get("configs_by", {})}
     out["forecast_configuration"] = out["model"].map(
         lambda m: describe(configs[m]) if m in configs else model_description(m))
@@ -1028,18 +1059,19 @@ def is_pilot(model: str) -> bool:
     return "-f-" in model or model == "arome-biascorr"
 
 
-def finding(suite: str, variable: str, split: str | None = None, setup: str | None = None) -> str:
+def finding(suite: str, variable: str, split: str | None = None, setup: str | None = None,
+            metric: str = "mae") -> str:
     """One sentence on the AROME comparison for the selected input setup, built only from clauses the saved
     all-lead scores support (no assumption that a larger checkpoint or more inputs must help)."""
     run, e = RUNS[suite], EXPERIMENTS[suite]
-    if "arome-raw" not in run.models:
+    if "arome-raw" not in run.models or metric not in ("mae", "rmse"):
         return ""
     mx = e.get("matrix")
     setup = setup if mx and setup in mx["setups"] else (mx or {}).get("main", "archived")
     split = split or run.splits[-1]
     sel = lambda d: d[(d["split"] == split) & (d["variable"] == variable) & (d["station"] == "ALL")  # noqa: E731
                       & (d["season"] == "ALL") & d["lead_h"].isna()]
-    allmae = sel(run.tables["metrics_point"]).set_index("model")["mae"]
+    allmae = sel(run.tables["metrics_point"]).set_index("model")[metric]
     cover = sel(run.tables["metrics_probabilistic"]).set_index("model")["coverage80"]
     mae = allmae[[m for m in allmae.index if m not in DIFFERENT_INPUT and not is_pilot(m)]]
     if mae.empty:
@@ -1097,8 +1129,9 @@ def finding(suite: str, variable: str, split: str | None = None, setup: str | No
         notes.append("Some of these differences are a few percent, within what this small sample can resolve; see "
                      "the paired differences under Advanced.")
     sample = e.get("sample", "this experiment")
-    return (f"<div class='finding'><b>In {sample}</b> ({variable_name(variable, unit=False).lower()}, mean "
-            f"absolute error over all stations and lead times): {'; '.join(clauses)}.{' ' if notes else ''}"
+    score_name = "mean absolute error" if metric == "mae" else "root mean squared error"
+    return (f"<div class='finding'><b>In {sample}</b> ({variable_name(variable, unit=False).lower()}, "
+            f"{score_name} over all stations and lead times): {'; '.join(clauses)}.{' ' if notes else ''}"
             f"{' '.join(notes)}</div>")
 
 
@@ -1146,7 +1179,7 @@ def lead_view(suite, variable, metric, station, split, statuses, size=None, setu
     return fig, text
 
 
-def matrix_html(suite: str, variable: str, split: str | None = None) -> str:
+def matrix_html(suite: str, variable: str, split: str | None = None, metric: str = "mae") -> str:
     """Input setup x checkpoint: saved scores, 'not run' (possible, no result) or 'unsupported input'."""
     from weather_lab.models import FAMILIES
 
@@ -1158,6 +1191,8 @@ def matrix_html(suite: str, variable: str, split: str | None = None) -> str:
     sel = lambda d: d[(d["split"] == split) & (d["variable"] == variable) & (d["station"] == "ALL")  # noqa: E731
                       & (d["season"] == "ALL") & d["lead_h"].isna()].set_index("model")
     pt, pr = sel(run.tables["metrics_point"]), sel(run.tables["metrics_probabilistic"])
+    metric_name, _, kind = plots.METRICS[metric]
+    scores = pt if kind == "point" else pr
     u = unit(variable)
     planned = [f for f in FAMILIES.values() if f.status == "planned"]
     head = "".join(f"<th>Timestral {s}</th>" for s in mx["sizes"]) + "".join(f"<th>{f.name}</th>" for f in planned)
@@ -1167,9 +1202,12 @@ def matrix_html(suite: str, variable: str, split: str | None = None) -> str:
         for s in mx["sizes"]:
             mid = matrix_id(suite, s, key)
             if mid in pt.index:
+                value = scores.loc[mid, metric] if mid in scores.index else None
+                score = ("not applicable" if value is None or pd.isna(value) else f"{value:.0%}"
+                         if metric.startswith("coverage") else f"{value:.2f} {u}")
                 prob = (f" · pinball {pr.loc[mid, 'pinball']:.2f} · 80% cov. {pr.loc[mid, 'coverage80']:.0%}"
-                        if mid in pr.index else "")
-                cells.append(f"<td title='{mid}'>MAE {pt.loc[mid, 'mae']:.2f} {u}{prob}</td>")
+                        if kind == "point" and mid in pr.index else "")
+                cells.append(f"<td title='{mid}'>{metric_name}: {score}{prob}</td>")
             else:
                 cells.append(f"<td title='{mid}'><i>not run</i></td>")
         for f in planned:
@@ -1249,8 +1287,8 @@ def benchmark(suite, variable, metric, lead, split, station, season, statuses, s
                + " In the lead-time chart, click a legend entry to show or hide a system."
                + (" The lead-time chart covers every season." if season != "ALL" else "")
                + "\n\n" + context_label(run, list(t["model"])))
-    return (finding(suite, variable, split, setup), summary, bars, lines, horizon_txt,
-            *detail_tables(run, split, variable, station, season, lead, statuses))
+    return (finding(suite, variable, split, setup, metric), summary, bars, lines, horizon_txt,
+            *detail_tables(run, split, variable, station, season, lead, statuses, metric))
 
 
 def benchmark_applied(suite, variable, metric, lead, split, station, season, statuses, applied, lead_mode="at"):
@@ -1260,10 +1298,11 @@ def benchmark_applied(suite, variable, metric, lead, split, station, season, sta
                      a.get("setup") or e_main(suite), lead_mode)
 
 
-def detail_tables(run, split, variable, station, season, lead, statuses):
+def detail_tables(run, split, variable, station, season, lead, statuses, metric="mae"):
     u = unit(variable)
     keep = lambda d: d[d["model"].map(training_status).isin(statuses or STATUSES)]  # noqa: E731
-    p = keep(_select(run.tables["metrics_point"], split, variable, station, season, lead)).sort_values("mae")
+    primary = metric if metric in ("mae", "rmse") else "mae"
+    p = keep(_select(run.tables["metrics_point"], split, variable, station, season, lead)).sort_values(primary)
     ih = input_history(run)
     hist = lambda m: ih.loc[m, "summary"] if m in ih.index else "Unknown"  # noqa: E731
     ahist = lambda m: arome_history_text(ih.loc[m]) if m in ih.index else "Unknown"  # noqa: E731
@@ -1272,6 +1311,8 @@ def detail_tables(run, split, variable, station, season, lead, statuses):
                           "vs persistence": p["skill_mae_vs_persistence"].map(lambda x: f"{x:+.0%}"),
                           "Pairs": p["n"], "Input history": p["model"].map(hist),
                           "AROME history": p["model"].map(ahist)})
+    if primary == "rmse":
+        point = point[["System", f"RMSE ({u})", f"MAE ({u})", *point.columns[3:]]]
     q = keep(_select(run.tables["metrics_probabilistic"], split, variable, station, season, lead)).sort_values(
         "pinball")
     prob = pd.DataFrame({"System": q["model"].map(model_name), f"Pinball ({u})": q["pinball"].round(3),
@@ -1416,7 +1457,7 @@ def integrity_md() -> str:
 {rows}
 
 The *AROME vs Timestral · v1* experiment is a superseded version kept unchanged; enable "show superseded
-versions" in the Overview's advanced panel to browse it. Fitting/adaptation status filters, availability,
+versions" in the Forecast tab's advanced panel to browse it. Fitting/adaptation status filters, availability,
 paired differences and timings are in the Benchmark tab's advanced section."""
 
 
@@ -1525,8 +1566,8 @@ def build() -> gr.Blocks:
         changed = gr.State(True)
         g = FEATS.GROUPS
         with gr.Tabs(selected="overview"):
-            # ---------------- overview
-            with gr.Tab("Overview", id="overview"):
+            # ---------------- forecast
+            with gr.Tab("Forecast", id="overview"):
                 with gr.Group(elem_id="forecast-panel"):
                     with gr.Row(equal_height=True):
                         station = gr.Dropdown(station_choices(DEFAULT_SUITE), value=d0["station"], label="Station",
@@ -1558,6 +1599,8 @@ def build() -> gr.Blocks:
                             horizon = gr.Slider(3, h_upd["maximum"], value=d0["horizon"], step=3,
                                                 label="Forecast horizon (hours)")
                             horizon_info = gr.Markdown(h_info0, elem_classes="note")
+                    main_metric = gr.Radio([("MAE", "mae"), ("RMSE", "rmse")], value=d0["metric"],
+                                           label="Main metric", info="Both scores are shown; apply changes with Run forecast.")
                     with gr.Accordion("Advanced: feature parameters, overlays, uncertainty shading, error display",
                                       open=False, elem_id="advanced"):
                         with gr.Row():
@@ -1596,7 +1639,7 @@ def build() -> gr.Blocks:
                 with gr.Row(equal_height=True):
                     b_var = gr.Dropdown(variable_choices(DEFAULT_SUITE), value="t", label="Weather variable",
                                         min_width=160)
-                    metric = gr.Dropdown(METRIC_CHOICES, value="mae", label="Score", min_width=180)
+                    metric = gr.Dropdown(METRIC_CHOICES, value="mae", label="Main metric", min_width=180)
                     lead = gr.Dropdown(LEADS, value="all", label="Lead time (bars)", min_width=160)
                     b_station = gr.Dropdown(label="Station", choices=[], min_width=180)
                     lead_mode = gr.Radio(LEAD_VIEWS, value="at", label="Lead-time chart", min_width=260)
@@ -1639,7 +1682,7 @@ def build() -> gr.Blocks:
         # ---------------- wiring
         # Draft controls, in DRAFT_KEYS order. Their edits only reach `draft_feedback` (never `applied`).
         draft_in = [exp, station, date, var, ckpt, cond, feats_cb, calendar, ctx, horizon, resid_vars, atmos_fields,
-                    tend_lags, systems, band, err_mode, method]
+                    tend_lags, systems, band, err_mode, method, main_metric]
         feedback_out = [status, horizon, horizon_info, ctx_info, e_btn, feat_note]
         render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles, b_var]
         b_inputs = [exp, b_var, metric, lead, split, b_station, b_season, statuses, applied, lead_mode]
@@ -1652,18 +1695,18 @@ def build() -> gr.Blocks:
 
         def refresh_benchmark(event):
             return (event.then(benchmark_applied, b_inputs, b_outputs, show_progress="hidden")
-                    .then(matrix_html, [exp, b_var], matrix, show_progress="hidden")
+                    .then(matrix_html, [exp, b_var, split, metric], matrix, show_progress="hidden")
                     .then(advanced_tables, [exp, b_var, split], [avail_tab, paired_tab, rt_tab, hw],
                           show_progress="hidden")
                     .then(downloads, exp, [dl_point, dl_prob, dl_manifest], show_progress="hidden"))
 
-        # experiment: draft choices + the Benchmark tab (saved tables); the Overview result stays applied
+        # experiment: draft choices + the Benchmark tab (saved tables); the Forecast result stays applied
         refresh_benchmark(feedback(exp.input(on_experiment, [exp, var, station, ckpt, cond], exp_outputs,
                                             show_progress="hidden")
                                    .then(bench_controls, exp, [split, b_station, b_season], show_progress="hidden")))
         feedback(station.input(on_station, [exp, station], date, show_progress="hidden"))
         for c in (date, var, ckpt, cond, feats_cb, calendar, ctx, horizon, resid_vars, atmos_fields, tend_lags,
-                  systems, band, err_mode, method):
+                  systems, band, err_mode, method, main_metric):
             c.input(draft_feedback, draft_in + [applied, submission], feedback_out, queue=False,
                     show_progress="hidden")
         show_old.input(lambda s, cur: gr.update(choices=experiment_choices(s), value=cur), [show_old, exp], exp,
@@ -1678,8 +1721,10 @@ def build() -> gr.Blocks:
                    .then(finish_forecast, draft_in + [applied, submission], feedback_out, queue=False))
         refresh_benchmark(run_evt)
         for c in (metric, lead, split, b_station, b_season, statuses, lead_mode):
-            c.input(benchmark_applied, b_inputs, b_outputs)
-        b_var.input(benchmark_applied, b_inputs, b_outputs).then(matrix_html, [exp, b_var], matrix).then(
+            event = c.input(benchmark_applied, b_inputs, b_outputs)
+            if c in (metric, split):
+                event.then(matrix_html, [exp, b_var, split, metric], matrix)
+        b_var.input(benchmark_applied, b_inputs, b_outputs).then(matrix_html, [exp, b_var, split, metric], matrix).then(
             advanced_tables, [exp, b_var, split], [avail_tab, paired_tab, rt_tab, hw])
         split.input(advanced_tables, [exp, b_var, split], [avail_tab, paired_tab, rt_tab, hw])
         cache_btn.click(cache_md, None, cache_box)
@@ -1691,6 +1736,7 @@ def build() -> gr.Blocks:
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
+                   "benchmark_metric": metric,
                    "advanced": [resid_vars, atmos_fields, tend_lags, systems, band, err_mode, show_old]}
     return demo
 

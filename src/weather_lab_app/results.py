@@ -178,7 +178,8 @@ def headline(run: Run, variable: str, split: str | None = None, models: list[str
     rows = []
     for m in exp.get("headline", []) if models is None else models:
         if m in pt.index:
-            rows.append({"model": m, "name": model_name(m), "mae": pt.loc[m, "mae"], "n": int(pt.loc[m, "n"]),
+            rows.append({"model": m, "name": model_name(m), "mae": pt.loc[m, "mae"], "rmse": pt.loc[m, "rmse"],
+                         "n": int(pt.loc[m, "n"]),
                          "coverage80": pr.loc[m, "coverage80"] if m in pr.index else None})
     return pd.DataFrame(rows)
 
@@ -201,9 +202,12 @@ def headline_to(run: Run, variable: str, models: list[str], horizon_h: int, spli
                            split=split)
         rows = rows[rows["lead_h"] <= horizon_h]
         out[metric] = rows.groupby("model")[col].agg(["mean", "size"])
+        if metric == "mae":
+            out["rmse"] = rows.groupby("model")["sq_err"].mean().pow(0.5)
     pt = out.get("mae", pd.DataFrame(columns=["mean", "size"]))
     pr = out.get("coverage80", pd.DataFrame(columns=["mean", "size"]))
-    return pd.DataFrame([{"model": m, "name": model_name(m), "mae": pt.loc[m, "mean"], "n": int(pt.loc[m, "size"]),
+    return pd.DataFrame([{"model": m, "name": model_name(m), "mae": pt.loc[m, "mean"], "rmse": out["rmse"].loc[m],
+                          "n": int(pt.loc[m, "size"]),
                           "coverage80": pr.loc[m, "mean"] if m in pr.index else None}
                          for m in models if m in pt.index])
 

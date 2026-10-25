@@ -76,6 +76,21 @@ def test_forecast_scores_report_not_yet_observable_without_truth():
     assert n == 8 and int(sc.loc["exploratory x", "covers_h"]) == 72      # shared window only: 8 observed leads
 
 
+def test_mae_and_rmse_share_observed_leads_and_selected_metric_is_first():
+    from weather_lab_app import main as app
+
+    first = _rows("first", leads=[3, 6, 9]).assign(point=[0.0, 4.0, 1000.0])
+    second = _rows("second", leads=[3, 6]).assign(point=[2.0, 2.0])
+    obs = pd.DataFrame({"time": first.valid_time, "observed": [0.0, 0.0, 0.0]})
+    scores, n = app.forecast_scores(pd.concat([first, second]), obs, ["first", "second"])
+    assert n == 2 and scores["n"].tolist() == [2, 2]
+    assert scores["mae"].tolist() == [2.0, 2.0]
+    assert scores.loc["first", "rmse"] == pytest.approx(np.sqrt(8))
+    assert scores.loc["second", "rmse"] == 2.0
+    for metric, headers in (("mae", "<th>MAE</th><th>RMSE</th>"), ("rmse", "<th>RMSE</th><th>MAE</th>")):
+        assert headers in app.this_forecast_html(scores, n, "t", metric)
+
+
 def test_arome_coverage_never_pads():
     rows = np.ones((2, 24), dtype=np.float32)
     rows[:, 16:] = np.nan
@@ -124,11 +139,38 @@ def test_horizon_slice_equals_saved_scores_at_full_horizon_and_saved_predictions
     run = load_run(EXAMPLE)
     ms = [m for m in ("arome-raw", "timestral-209m-mv-cal", "timestral-209m-mv-cal-arome-archived") if m in run.models]
     a, b = headline(run, "t", models=ms).set_index("model"), headline_to(run, "t", ms, 48).set_index("model")
-    pd.testing.assert_frame_equal(a[["mae", "n"]], b[["mae", "n"]], check_dtype=False)
+    pd.testing.assert_frame_equal(a[["mae", "rmse", "n"]], b[["mae", "rmse", "n"]], check_dtype=False)
     p, t = run.predictions(), run.targets()
     x = p[(p.variable == "t") & (p.model == ms[-1]) & (p.lead_h <= 24)].merge(t, on=["case_id", "variable", "lead_h"])
     assert headline_to(run, "t", ms, 24).set_index("model").loc[ms[-1], "mae"] == pytest.approx(
         (x.point - x.observed).abs().mean())
+    assert headline_to(run, "t", ms, 24).set_index("model").loc[ms[-1], "rmse"] == pytest.approx(
+        np.sqrt((x.point - x.observed).pow(2).mean()))
+
+
+@pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")
+def test_benchmark_rmse_uses_saved_scores_in_findings_plots_and_tables(monkeypatch):
+    from weather_lab import models
+    from weather_lab_app import main as app
+    from weather_lab_app.results import load_run
+
+    run = load_run(EXAMPLE)
+    monkeypatch.setattr(app, "RUNS", {run.suite: run})
+
+    def no_model(*args, **kwargs):
+        raise AssertionError("Selecting a metric must not load a model")
+
+    monkeypatch.setattr(models.ModelCache, "get", no_model)
+    finding, _, bars, lines, _, point, _ = app.benchmark(
+        run.suite, "t", "rmse", "all", run.splits[-1], "ALL", "ALL", app.STATUSES,
+        "209M", "archived", "cumulative")
+    saved = app._select(run.tables["metrics_point"], run.splits[-1], "t", "ALL", "ALL", "all")
+    assert "root mean squared error" in finding
+    assert "Root-mean-square error" in bars.layout.xaxis.title.text
+    assert "Root-mean-square error" in lines.layout.yaxis.title.text
+    np.testing.assert_allclose(bars.data[0].x, saved.rmse.sort_values(ascending=False))
+    assert list(point.columns[:3]) == ["System", "RMSE (°C)", "MAE (°C)"]
+    np.testing.assert_allclose(point["RMSE (°C)"], saved.rmse.sort_values().round(2))
 
 
 @pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")

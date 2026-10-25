@@ -166,7 +166,8 @@ def _fake_v2_run(mae_by_model: dict[str, float], variable: str = "t", extra_mode
         source = "test fixture"
         run = {"run_id": "fake"}
         models = list(mae_by_model) + list(extra_models)      # e.g. AROME saved, but not for this variable
-        tables = {"metrics_point": pd.DataFrame({**rows, "mae": list(mae_by_model.values())}),
+        tables = {"metrics_point": pd.DataFrame({**rows, "mae": list(mae_by_model.values()),
+                                                "rmse": [v * 1.2 for v in mae_by_model.values()]}),
                   "metrics_probabilistic": pd.DataFrame({**rows, "coverage80": 0.8, "pinball": 0.5})}
 
         def predictions(self):
@@ -174,6 +175,25 @@ def _fake_v2_run(mae_by_model: dict[str, float], variable: str = "t", extra_mode
                                  "output_type": ["point" if m == "arome-raw" else "quantiles" for m in self.models]})
 
     return FakeRun()
+
+
+def test_main_metric_changes_saved_cards_finding_and_matrix(monkeypatch):
+    from weather_lab_app import main as app
+
+    mid = "timestral-209m-mv-cal-arome-archived"
+    run = _fake_v2_run({"arome-raw": 1.0, mid: 1.2})
+    point = run.tables["metrics_point"]
+    point.loc[point.model == "arome-raw", "rmse"] = 2.0
+    point.loc[point.model == mid, "rmse"] = 1.3
+    monkeypatch.setattr(app, "RUNS", {run.suite: run})
+    assert "AROME remains most accurate" in app.finding(run.suite, "t")
+    text = app.finding(run.suite, "t", metric="rmse")
+    assert "root mean squared error" in text and "is more accurate than AROME" in text
+    assert "AROME remains most accurate" not in text
+    cards = app.tiles_html(run.suite, "t", "209M", metric="rmse")
+    assert "1.30 °C</div>" in cards and "RMSE · MAE 1.20 °C" in cards
+    matrix = app.matrix_html(run.suite, "t", metric="rmse")
+    assert "Root-mean-square error: 1.30 °C" in matrix
 
 
 V2_T = {"arome-raw": 1.09, "timestral-28m-mv-cal": 2.52, "timestral-209m-mv-cal": 2.42,
