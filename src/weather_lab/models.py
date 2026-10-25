@@ -75,7 +75,7 @@ TIMESTRAL_QUANTILES = (0.01, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0
 
 FAMILIES: dict[str, Family] = {
     "timestral": Family(
-        "Timestral", adapter="timestral", past_covariates=False, known_covariates=True,
+        "Timestral", adapter="timestral", past_covariates=True, known_covariates=True,
         missing_values="NaN masked; a covariate row needs observed history to be attended (key validity)",
         native_quantiles=TIMESTRAL_QUANTILES, max_context=None, max_horizon=None,
         runtime="PyTorch (timestral @ a534bdb)", status="integrated",

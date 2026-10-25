@@ -22,6 +22,8 @@ def training_status(model: str) -> str:
         return "fitted on fitting period"
     if model == "arome-raw":
         return "external NWP (issued run)"
+    if model == "arome-biascorr":
+        return "post-processing of AROME (recent errors)"
     return "no fitting"
 
 

@@ -18,3 +18,10 @@ source_files:
   synop_2022.csv.gz: 82eb9a9e99fdc3c69642a3afddc3b4b89457d37caf8ef0e912e01fb215bdc876
   synop_2023.csv.gz: 2cdcc76c55efedf983926878844b118a8639ced9489ae90ea16cebceef945be2
 written_at: '2026-10-24T19:44:04Z'
+expected_scores:
+  torch-2.13.0/darwin-arm64|systems-5e80bade1e9f:
+    metrics_point.csv: 09e78bca609232ec60308ddc53aa656777e344dc529f59c62250601e291caef9
+    metrics_probabilistic.csv: 293f3904ed8bb6e29d05fe9ed8260720dcdf43bfb565a3b7bf62dda16a09937f
+    availability.csv: 5dfa9d5027a2a3c8e5bee7b9febf390f1edaf781dc80ed53c93f6c6127f032bb
+reference_runs:
+  torch-2.13.0/darwin-arm64|systems-5e80bade1e9f: validation-features-val-v1-20261025T115210-1d17e847

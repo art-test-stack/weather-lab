@@ -243,3 +243,67 @@ def load_observations(cfg: Config) -> tuple[pd.DataFrame, dict]:
     if not path.exists():
         raise FileNotFoundError(f"{path} missing: run `weather-lab data prepare --config {cfg.path}` first")
     return pd.read_parquet(path), read_json(path.with_suffix(".meta.json"))
+
+
+# --------------------------------------------------------------------------- auxiliary observations (features)
+
+AUX_RAW_COLUMNS = ["geo_id_wmo", "insert_time", "validity_time", "td", "n"]
+
+
+def aux_path(cfg: Config) -> Path:
+    years = cfg["data"]["years"]
+    return cfg.dir("processed") / f"synop_aux_{'-'.join(cfg.stations)}_{min(years)}-{max(years)}.parquet"
+
+
+def prepare_aux(cfg: Config, log=print) -> tuple[pd.DataFrame, dict]:
+    """Dew point and total cloud cover on the same 3-hourly axis as the main observations, for the
+    context-enrichment features only. A separate file: the frozen observation files are untouched.
+
+    td: K - 273.15 -> °C. n (total cloud cover, %): values above 100 (101 = sky obscured) -> missing.
+    Duplicates follow `clean` (latest insert_time, then last row). Nothing is filled.
+    """
+    raw_dir, stations = cfg.dir("raw"), cfg.stations
+    frames, sources = [], []
+    for y in cfg["data"]["years"]:
+        path = raw_dir / f"synop_{y}.csv.gz"
+        if not path.exists():
+            raise FileNotFoundError(f"{path} missing: run `weather-lab data fetch --config {cfg.path}` first")
+        prov = read_json(raw_dir / f"synop_{y}.csv.gz.provenance.json")
+        sources.append({"file": path.name, "sha256": prov["sha256"]})
+        with gzip.open(path, "rb") as f:
+            text = io.TextIOWrapper(f, encoding="utf-8")
+            for chunk in pd.read_csv(text, sep=";", usecols=AUX_RAW_COLUMNS, dtype={"geo_id_wmo": str},
+                                     chunksize=200_000):
+                frames.append(chunk[chunk["geo_id_wmo"].isin(stations)])
+    df = pd.concat(frames, ignore_index=True)
+    df["time"] = pd.to_datetime(df["validity_time"], utc=True)
+    df["insert_time"] = pd.to_datetime(df["insert_time"], utc=True, errors="coerce")
+    df["_row"] = np.arange(len(df))
+    df = df.sort_values(["geo_id_wmo", "time", "insert_time", "_row"], na_position="first", kind="stable")
+    df = df.drop_duplicates(["geo_id_wmo", "time"], keep="last")
+    df = df[(df["time"].dt.minute == 0) & (df["time"].dt.hour % 3 == 0)]
+    cloud = df["n"].to_numpy(dtype=float)
+    out = pd.DataFrame({"station": df["geo_id_wmo"].to_numpy(), "time": df["time"].to_numpy(),
+                        "td": df["td"].to_numpy(dtype=float) - 273.15,
+                        "cloud": np.where(cloud > 100, np.nan, cloud)})
+    obs, _ = load_observations(cfg)                       # same axis as the frozen observations
+    out = obs[["station", "time"]].merge(out, on=["station", "time"], how="left")
+    path = aux_path(cfg)
+    out.to_parquet(path, index=False)
+    meta = {"created_at": now_utc(), "file": path.name, "sha256": sha256_file(path), "rows": len(out),
+            "sources": sources, "license": LICENCE,
+            "coverage": out.groupby("station")[["td", "cloud"]].apply(lambda g: g.notna().mean()).round(4)
+            .to_dict(orient="index"),
+            "processing": ["td: K - 273.15 -> °C", "cloud: total cloud cover n (%), values > 100 -> missing",
+                           "duplicates: latest insert_time, then last row; 3-hourly grid; no filling",
+                           "axis: identical to the frozen observation file of the same config"]}
+    write_json(path.with_suffix(".meta.json"), meta)
+    log(f"wrote   {path.name} ({len(out)} rows, sha256 {meta['sha256'][:12]})")
+    return out, meta
+
+
+def load_aux(cfg: Config, log=print) -> tuple[pd.DataFrame, dict]:
+    path = aux_path(cfg)
+    if not path.exists():
+        return prepare_aux(cfg, log)
+    return pd.read_parquet(path), read_json(path.with_suffix(".meta.json"))

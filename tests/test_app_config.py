@@ -114,27 +114,40 @@ def test_defaults_are_paris_orly_and_the_largest_checkpoint(monkeypatch):
     assert app.default_context("arome-issued-v2", "209M", "archived") == 30   # from the run, not a slider default
 
 
-def test_config_status_separates_applied_settings_from_pending_drafts(monkeypatch):
+def test_status_badge_comes_from_the_applied_result_and_lists_pending_drafts(monkeypatch):
     from weather_lab_app import main as app
 
     ids = ["arome-raw", "timestral-209m-mv-cal", "timestral-209m-mv-cal-arome-archived"]
     monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _Run(ids)})
-    s = app.config_status("arome-issued-v2", "c1", "209M", "archived", 30, 48, True, app.EMPTY_EXTRA)
-    assert "saved benchmark run" in s and "Pending" not in s
-    s = app.config_status("arome-issued-v2", "c1", "209M", "archived", 30, 24, True, app.EMPTY_EXTRA)
-    assert "leads ≤ 24 h (slice)" in s and "Pending" not in s                  # shortening needs no inference
-    s = app.config_status("arome-issued-v2", "c1", "209M", "archived", 60, 72, True, app.EMPTY_EXTRA)
-    assert "Pending" in s and "context 60 d" in s and "horizon 72 h" in s
-    s = app.config_status("arome-issued-v2", "c1", "209M", "substobs", 30, 48, True, app.EMPTY_EXTRA)
-    assert "no saved result" in s                                               # honest not-run, no substitute
+    a = {"suite": "arome-issued-v2", "case": "c1", "size": "209M", "setup": "archived", "ctx": 30, "horizon": 24,
+         "source": "saved", "primary": "timestral-209m-mv-cal-arome-archived", "settings": {}, "exploratory": {},
+         "shown_h": 24}
+    s = app.status_html(a, "arome-issued-v2", "c1", "209M", "archived", 30, 24)
+    assert "Saved benchmark forecast" in s and "shown to 24 h of the saved 48 h" in s and "Pending" not in s
+    s = app.status_html(a, "arome-issued-v2", "c1", "28M", "archived", 60, 120)
+    assert "Pending" in s and "model 28M" in s and "context 60 d" in s and "horizon 120 h" in s
+    assert "shown to 24 h" in s                                      # labels from the applied result, not the draft
     st = {"checkpoint": "Timestral-209M", "context_days": 30, "context_steps": 240, "horizon_steps": 24,
-          "step_hours": 3, "calendar": True, "arome_mode": None, "size": "209M", "setup": "none", "cache_hit": True}
-    extra = {"case": "c1", "runs": {"exploratory x": _rows("exploratory x")}, "settings": {"exploratory x": st},
-             "active": "exploratory x"}
-    s = app.config_status("arome-issued-v2", "c1", "209M", "none", 30, 72, True, extra)
-    assert "exploratory forecast" in s and "inference horizon 72 h" in s and "Pending" not in s
-    s = app.config_status("arome-issued-v2", "c1", "209M", "none", 90, 72, True, extra)
-    assert "Pending" in s and "context 90 d" in s
+          "step_hours": 3, "calendar": True, "arome_mode": None, "cache_hit": True}
+    e = {**a, "setup": "none", "horizon": 72, "source": "exploratory", "primary": "exploratory x", "settings": st,
+         "exploratory": {"exploratory x": _rows("exploratory x", leads=range(3, 73, 3))}, "shown_h": 72}
+    s = app.status_html(e, "arome-issued-v2", "c1", "209M", "none", 30, 72)
+    assert "Exploratory · cached" in s and "inference horizon 72 h" in s and "Pending" not in s
+
+
+def test_stale_run_results_are_not_applied(monkeypatch):
+    from weather_lab_app import main as app
+
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _Run(["timestral-209m-mv-cal"])})
+    old = {"suite": "arome-issued-v2", "case": "c1", "size": "209M", "setup": "none", "ctx": 30, "horizon": 48}
+    new = {**old, "horizon": 72, "source": "exploratory"}
+    result = {"draft": {**old, "horizon": 72}, "applied": new}
+    got, msg = app.apply_if_current(result, "arome-issued-v2", "c1", "209M", "none", 45, 72, old, "")
+    assert got is old and "not applied" in msg                      # draft changed while running: ignored
+    got, _ = app.apply_if_current(result, "arome-issued-v2", "c1", "209M", "none", 30, 72, old, "")
+    assert got is new                                               # still current: applied as a whole
+    got, msg = app.apply_if_current(None, "arome-issued-v2", "c1", "209M", "none", 30, 72, old, "⚠️ failed")
+    assert got is old and msg.startswith("⚠️")                     # failure keeps the last result
 
 
 EXAMPLE = ROOT / "data" / "examples" / "arome-issued-v2"
@@ -152,3 +165,23 @@ def test_horizon_slice_equals_saved_scores_at_full_horizon_and_saved_predictions
     x = p[(p.variable == "t") & (p.model == ms[-1]) & (p.lead_h <= 24)].merge(t, on=["case_id", "variable", "lead_h"])
     assert headline_to(run, "t", ms, 24).set_index("model").loc[ms[-1], "mae"] == pytest.approx(
         (x.point - x.observed).abs().mean())
+
+
+@pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")
+def test_horizon_limit_and_saved_resolution_on_the_real_example(monkeypatch):
+    from weather_lab_app import main as app
+    from weather_lab_app.results import load_run
+
+    run = load_run(EXAMPLE)
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": run})
+    case = app.default_case("arome-issued-v2", "07149")
+    assert app.horizon_limit("arome-issued-v2", case, "archived")[0] == 48       # AROME run ends there
+    assert app.horizon_limit("arome-issued-v2", case, "none")[0] == app.EXPLORE_MAX_HOURS
+    upd, info, btn = app.horizon_control("arome-issued-v2", case, "archived", 96)
+    assert upd["value"] == 48 and upd["maximum"] == 48 and "48 h" in info and btn["interactive"]
+    d = app.draft("arome-issued-v2", case, "209M", "archived", 30, 24)
+    a = app.resolve(d, None, lookup_cache=False)
+    assert a["source"] == "saved" and a["primary"] == "timestral-209m-mv-cal-arome-archived" and a["shown_h"] == 24
+    assert app.resolve({**d, "ctx": 45}, None, lookup_cache=False) is None       # different context: needs Run
+    assert app.resolve({**d, "horizon": 72}, None, lookup_cache=False) is None   # beyond the saved forecast
+    assert app.on_draft("arome-issued-v2", case, "209M", "archived", 30, 96, a) is a   # unsupported: nothing applied

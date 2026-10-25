@@ -201,6 +201,22 @@ def cmd_compare(args) -> None:
             print(f"wrote {p}")
 
 
+def cmd_features_list(args) -> None:
+    from weather_lab.features import GROUPS
+
+    for g in GROUPS.values():
+        print(f"{g.name:6} v{g.version} {g.role:5} rows={','.join(g.rows)}  needs={','.join(g.needs) or '-'}  {g.description}")
+
+
+def cmd_features_select(args) -> None:
+    import json
+
+    from weather_lab.feature_selection import freeze
+
+    res = freeze([Path(d) for d in args.run_dir], Path(args.rule), Path(args.out))
+    print(json.dumps(res, indent=1, default=str))
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="weather-lab", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -275,6 +291,15 @@ def main(argv: list[str] | None = None) -> None:
     ms = msub.add_parser("status", help="checkpoint files on disk, loaded models, saved and cached predictions")
     ms.add_argument("--json", action="store_true")
     ms.set_defaults(func=cmd_models_status)
+    fe = sub.add_parser("features", help="context-enrichment feature groups: list, select on validation")
+    fsub = fe.add_subparsers(dest="features_command", required=True)
+    fl = fsub.add_parser("list", help="feature groups, roles, rows and versions")
+    fl.set_defaults(func=cmd_features_list)
+    fs = fsub.add_parser("select", help="apply configs/features/selection_rule.yaml to validation runs and freeze it")
+    fs.add_argument("--run-dir", action="append", required=True, help="validation run(s) (repeat for a combination)")
+    fs.add_argument("--rule", default="configs/features/selection_rule.yaml")
+    fs.add_argument("--out", default="configs/features/frozen_selection.yaml")
+    fs.set_defaults(func=cmd_features_select)
     dg = sub.add_parser("diagnose", help="audits and sensitivity checks")
     dgs = dg.add_subparsers(dest="diag_command", required=True)
     di = dgs.add_parser("arome-inputs", help="table of what the AROME covariate contains for one case")

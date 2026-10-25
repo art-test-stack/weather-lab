@@ -25,7 +25,7 @@ from weather_lab.baselines import Climatology, Persistence, SeasonalNaive
 from weather_lab.common import (Config, environment, git_revision, load_config, now_utc, read_json, sha256_file,
                                 write_json)
 from weather_lab.data import load_observations
-from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeRaw, CaseBatch, Timestral, qcol
+from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeBiasCorrected, AromeRaw, CaseBatch, Timestral, qcol
 from weather_lab.suite import SEASONS, case_data_checksum, cases_from_manifest, split_bounds
 
 POINT_REFERENCE = "persistence"
@@ -54,6 +54,8 @@ ADAPTERS = {
     "climatology": lambda mid, spec, cfg: Climatology(mid, cfg["variables"], **spec),
     "arome": lambda mid, spec, cfg: AromeRaw(mid, cfg["variables"], fields=cfg["arome"]["fields"]),
     "timestral": _timestral,
+    "arome_biascorr": lambda mid, spec, cfg: AromeBiasCorrected(mid, cfg["variables"], fields=cfg["arome"]["fields"],
+                                                                **spec),
 }
 
 
@@ -71,7 +73,8 @@ def build_adapters(cfg: Config) -> list[Adapter]:
 # --------------------------------------------------------------------------- batches
 
 def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_steps: int,
-               arome_df: pd.DataFrame | None = None) -> tuple[CaseBatch, np.ndarray]:
+               arome_df: pd.DataFrame | None = None, aux_df: pd.DataFrame | None = None,
+               station_coords: dict | None = None) -> tuple[CaseBatch, np.ndarray]:
     """Inputs (history <= origin, issued AROME) and, separately, the verifying targets."""
     f = cfg["forecast"]
     step = pd.Timedelta(hours=f["step_hours"])
@@ -96,8 +99,18 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
     if arome_df is not None:
         arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, cfg["arome"]["fields"], h,
                                             f["step_hours"], history_steps)
+    aux_args = {}
+    if aux_df is not None:
+        from weather_lab.features import AUX_VARIABLES
+
+        aux = np.full((n, len(AUX_VARIABLES), history_steps), np.nan, dtype=np.float32)
+        per_aux = {s: g.set_index("time")[AUX_VARIABLES] for s, g in aux_df.groupby("station")}
+        for i, c in enumerate(cases.itertuples()):
+            times = pd.date_range(end=c.origin, periods=history_steps, freq=step)   # <= origin only
+            aux[i] = per_aux[c.station].reindex(times).to_numpy(dtype=np.float32).T
+        aux_args = {"aux_history": aux, "aux_variables": list(AUX_VARIABLES)}
     batch = CaseBatch(cases.reset_index(drop=True), variables, hist, origins, future, f["step_hours"], arome_arr,
-                      **hist_args)
+                      **hist_args, **aux_args, station_coords=station_coords)
     return batch, targets
 
 
@@ -225,7 +238,16 @@ def run_evaluation(cfg: Config, log=print, reuse_from: Path | None = None) -> Pa
     step_h = cfg["forecast"]["step_hours"]
     history_steps = max([a.context_steps(step_h) for a in adapters if isinstance(a, Timestral)]
                         + [cfg["forecast"]["context_days"] * 24 // step_h])
-    batch, targets = make_batch(cfg, obs, cases, history_steps, arome_df)
+    for a in adapters:
+        if hasattr(a, "attach_arome") and arome_df is not None:
+            a.attach_arome(arome_df)
+    aux_df = aux_meta = None
+    if any("atmos" in getattr(a, "features", []) for a in adapters):
+        from weather_lab.data import load_aux
+
+        aux_df, aux_meta = load_aux(cfg, log)
+    coords = {s["id"]: (s["lat"], s["lon"]) for s in manifest["dataset"]["stations"]}
+    batch, targets = make_batch(cfg, obs, cases, history_steps, arome_df, aux_df, coords)
     log(f"suite {cfg.suite} [{cfg.get('label')}]: {len(cases)}/{len(cases_all)} eligible cases, "
         f"{len(adapters)} systems, history {history_steps} steps")
 
@@ -283,7 +305,9 @@ def run_evaluation(cfg: Config, log=print, reuse_from: Path | None = None) -> Pa
         "manifest_sha256": sha256_file(cfg.manifest_path), "protocol_sha256": manifest["protocol_sha256"],
         "data": {"observations": {"file": data_meta["file"], "sha256": data_meta["sha256"]},
                  "case_data_sha256": manifest["case_data_sha256"], "sources": data_meta["sources"],
-                 "arome": None if arome_df is None else {"sha256": manifest["arome"]["sha256"]}},
+                 "arome": None if arome_df is None else {"sha256": manifest["arome"]["sha256"]},
+                 **({"aux_observations": {"file": aux_meta["file"], "sha256": aux_meta["sha256"],
+                                          "sources": aux_meta["sources"]}} if aux_meta else {})},
         "fit_period": [str(fit_start), str(fit_end)],
         "n_cases": len(cases_all), "n_eligible": len(cases), "history_steps": history_steps,
         "systems": systems, "environment": environment(), "peak_rss_mb_start": rss0,

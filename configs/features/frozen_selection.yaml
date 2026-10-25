@@ -1,0 +1,49 @@
+# Written by `weather-lab features select`; do not edit by hand.
+frozen_at: '2026-10-25T12:17:45Z'
+rule: configs/features/selection_rule.yaml
+validation_runs:
+- validation-features-val-v1-20261025T115210-1d17e847
+base: timestral-209m-mv-cal-ctx30
+selected_features: []
+reason: 'no group met the rule: the selection is ''no features'''
+evidence:
+- group: atmos
+  model: timestral-209m-mv-cal-ctx30-f-atmos
+  t_mae: 1.8462379
+  t_mae_base: 1.8473358
+  t_mae_diff: -0.0010979149956256151
+  ci95:
+  - -0.007984727112720465
+  - 0.005724009837364625
+  n_blocks: 182
+  n_pairs: 28708
+  pmer_mae_rel_change: -0.0032806522692029327
+  t_pinball_diff: -0.0010212643016782597
+  status: rejected
+- group: solar
+  model: timestral-209m-mv-cal-ctx30-f-solar
+  t_mae: 1.8480346
+  t_mae_base: 1.8473358
+  t_mae_diff: 0.000698965392075479
+  ci95:
+  - -0.0024775016158532356
+  - 0.003934614628905934
+  n_blocks: 182
+  n_pairs: 28708
+  pmer_mae_rel_change: -0.0012100301665072255
+  t_pinball_diff: 5.832880406952956e-05
+  status: rejected
+- group: tend
+  model: timestral-209m-mv-cal-ctx30-f-tend
+  t_mae: 1.8731959
+  t_mae_base: 1.8473358
+  t_mae_diff: 0.025860102847218513
+  ci95:
+  - 0.015035966208041433
+  - 0.03690458316723043
+  n_blocks: 182
+  n_pairs: 28708
+  pmer_mae_rel_change: 0.01899447171012536
+  t_pinball_diff: 0.008109569756546642
+  status: rejected
+note: Frozen before the 2025 test; the test is run once with the base and this selection.

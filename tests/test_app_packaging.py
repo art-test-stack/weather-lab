@@ -78,7 +78,13 @@ def test_lockfile_matches_what_the_spaces_builder_installs():
         assert (major, minor) <= (2, 13)                               # ZeroGPU supports torch <= 2.13.0
 
 
-def test_explorer_systems_persist_across_variables_and_exploratory_runs(monkeypatch):
+def _applied(size="28M", setup="archived", source="saved", primary=None, exploratory=None, case="c1"):
+    return {"suite": "arome-issued-v2", "case": case, "size": size, "setup": setup, "ctx": 30, "horizon": 48,
+            "source": source, "primary": primary or f"timestral-{size.lower()}-mv-cal-arome-{setup}",
+            "settings": {}, "exploratory": exploratory or {}, "shown_h": 48}
+
+
+def test_explorer_overlays_persist_across_variables_views_and_exploratory_runs(monkeypatch):
     import pandas as pd
 
     from weather_lab_app import main as app
@@ -94,24 +100,20 @@ def test_explorer_systems_persist_across_variables_and_exploratory_runs(monkeypa
         def predictions(self):
             return preds
 
-    s_id = "arome-issued-v2"                       # defaults: AROME, Timestral 28M (+ archived, absent here)
-    monkeypatch.setattr(app, "RUNS", {s_id: FakeRun()})
-    extra = app.keep_extra_for_case("c1", app.EMPTY_EXTRA)
-    s, b = app.systems_update(s_id, "c1", "t", {}, None, extra)
-    assert s["value"] == ["arome-raw", "timestral-28m-mv-cal"] and b["value"] == "timestral-28m-mv-cal"
-    assert ("AROME", "arome-raw") in s["choices"]                      # readable names, exact ids as values
-    pref = app.update_pref(s_id, "c1", "t", ["arome-raw", "timestral-209m-mv-cal"], {}, extra)
-    s, _ = app.systems_update(s_id, "c1", "u", pref, None, extra)       # no AROME wind
-    assert "arome-raw" not in [v for _, v in s["choices"]] and s["value"] == ["timestral-209m-mv-cal"]
-    s, _ = app.systems_update(s_id, "c1", "t", pref, None, extra)       # preference restored
-    assert s["value"] == ["arome-raw", "timestral-209m-mv-cal"]
-    mid = "exploratory Timestral-209M ctx14d [cpu]"
-    extra = {"case": "c1", "runs": {mid: pd.DataFrame()}}
-    pref = {s_id: pref[s_id] + [mid]}
-    pref = app.update_pref(s_id, "c1", "t", [mid], pref, extra)         # untick the saved systems
-    s, b = app.systems_update(s_id, "c1", "t", pref, "timestral-209m-mv-cal", extra)
-    assert s["value"] == [mid] and b["value"] == mid                    # band follows the selected systems
-    assert app.keep_extra_for_case("c2", extra)["runs"] == {}           # another case starts fresh
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": FakeRun()})
+    a = _applied("28M", "none", primary="timestral-28m-mv-cal")
+    choices, value, _, band = app.select_systems(a, "t", {}, None)
+    assert value == ["arome-raw", "timestral-28m-mv-cal"] and band == "timestral-28m-mv-cal"
+    pref = app.update_pref(a, "t", ["arome-raw", "timestral-28m-mv-cal", "persistence"], {})   # add an overlay
+    _, value, _, _ = app.select_systems(a, "u", pref, None)                  # no AROME wind
+    assert "arome-raw" not in value and "persistence" in value
+    b = _applied("209M", "none", primary="timestral-209m-mv-cal")            # another applied view keeps the overlay
+    _, value, _, band = app.select_systems(b, "t", pref, "timestral-28m-mv-cal")
+    assert value == ["persistence", "arome-raw", "timestral-209m-mv-cal"] and band == "timestral-209m-mv-cal"
+    mid = "exploratory Timestral-209M ctx14d h72 [cpu]"
+    e = _applied("209M", "none", source="exploratory", primary=mid, exploratory={mid: pd.DataFrame()})
+    _, value, _, band = app.select_systems(e, "t", pref, "timestral-209m-mv-cal")
+    assert mid in value and band == mid                                      # interval source = applied result
 
 
 def test_labels_cover_every_configured_system():
@@ -164,12 +166,8 @@ def test_checkpoint_selector_switches_headline_defaults_and_preferences(monkeypa
     assert v["compare"] == {"timestral-209m-mv-cal-arome-archived": "timestral-209m-mv-cal"}
     assert v["band"] == "timestral-209m-mv-cal-arome-archived" and app.has_checkpoints("arome-issued-v2")
     assert app.experiment_view("arome-issued-v2", "28M")["headline"][1] == "timestral-28m-mv-cal"
-    s, b = app.systems_update("arome-issued-v2", "c1", "t", {}, None, app.EMPTY_EXTRA, "209M")
-    assert s["value"] == v["default_systems"] and b["value"] == "timestral-209m-mv-cal-arome-archived"
-    pref = {"arome-issued-v2": ["timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]}
-    out, view = app.switch_view("arome-issued-v2", "209M", "archived", {"size": "28M", "setup": "archived"}, pref)
-    assert out["arome-issued-v2"] == ["timestral-209m-mv-cal", "timestral-28m-mv-cal-arome-substobs", "exploratory x"]
-    assert view == {"size": "209M", "setup": "archived"}
+    _, value, _, band = app.select_systems(_applied("209M", "archived"), "t", {}, None)
+    assert value == v["default_systems"] and band == "timestral-209m-mv-cal-arome-archived"
     assert "209M" in app.tiles_html("arome-issued-v2", "t", "209M") and "1.90" in app.tiles_html(
         "arome-issued-v2", "t", "209M")
 
@@ -223,9 +221,8 @@ def test_input_setup_switches_conditioned_system_and_reports_not_run(monkeypatch
     text = app.finding("arome-issued-v2", "t", setup="substobs")
     assert "Not run: Timestral 209M + AROME (observed history)" in text
     assert "different input construction" in text
-    pref = {"arome-issued-v2": ["arome-raw", "timestral-28m-mv-cal-arome-archived"]}
-    out, _ = app.switch_view("arome-issued-v2", "28M", "substobs", {"size": "28M", "setup": "archived"}, pref)
-    assert out["arome-issued-v2"] == ["arome-raw", "timestral-28m-mv-cal-arome-substobs"]
+    _, value, _, band = app.select_systems(_applied("28M", "substobs"), "t", {}, None)
+    assert "timestral-28m-mv-cal-arome-substobs" in value and "timestral-28m-mv-cal-arome-archived" not in value
     html = app.matrix_html("arome-issued-v2", "t")
     assert html.count("not run") >= 2 and "not integrated yet" in html
 

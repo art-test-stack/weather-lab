@@ -38,6 +38,9 @@ class CaseBatch:
                   provenance `arome_history_run` (N, T) init times (NaT if none) and
                   `arome_history_lead_h` (N, T) leads. Each value comes from the most recent run that
                   was in the archive both before the origin and before the value's own valid time.
+    aux_history:  optional (N, F, T) auxiliary observations (`aux_variables`, e.g. dew point, cloud
+                  cover) at the same history times (<= origin); context-enrichment inputs only.
+    station_coords: optional {station: (lat, lon)} for astronomical features.
     """
 
     cases: pd.DataFrame
@@ -50,6 +53,9 @@ class CaseBatch:
     arome_history: np.ndarray | None = None
     arome_history_run: np.ndarray | None = None
     arome_history_lead_h: np.ndarray | None = None
+    aux_history: np.ndarray | None = None
+    aux_variables: list[str] | None = None
+    station_coords: dict | None = None
 
     def __post_init__(self) -> None:
         n, v, t = self.history.shape
@@ -70,12 +76,15 @@ class CaseBatch:
             assert (implied[has] == times[has]).all(), "archived AROME provenance does not match valid times"
             no_run = np.broadcast_to(~has[:, None, :], self.arome_history.shape)
             assert np.isnan(self.arome_history[no_run]).all(), "historical AROME value without a source run"
+        if self.aux_history is not None:
+            assert self.aux_history.shape == (n, len(self.aux_variables or []), t), "aux history shape"
 
     def subset(self, sl) -> "CaseBatch":
         pick = (lambda a: None if a is None else a[sl])
         return CaseBatch(self.cases.iloc[sl], self.variables, self.history[sl], self.origins[sl],
                          self.future_times[sl], self.step_hours, pick(self.arome), pick(self.arome_history),
-                         pick(self.arome_history_run), pick(self.arome_history_lead_h))
+                         pick(self.arome_history_run), pick(self.arome_history_lead_h), pick(self.aux_history),
+                         self.aux_variables, self.station_coords)
 
     @property
     def horizon(self) -> int:
@@ -217,6 +226,66 @@ class AromeRaw(Adapter):
         return ForecastBatch(self.id, self.revision, "point", self.variables, batch.arome[:, idx].copy())
 
 
+class AromeBiasCorrected(Adapter):
+    """Issued AROME + a shrunk mean of its recent errors at the same run lead (deterministic, point only).
+
+    For a target valid time with run lead l (valid − run init), the past residuals are
+    observation(r + l) − AROME(r, r + l) for earlier runs r available at the origin, with r + l at or
+    before the origin (so the verifying observation was available) and r within `window_days`.
+    Correction = sum(residuals) / (n + shrink_k): 0 with no residuals (then exactly raw AROME), and
+    the plain mean as n grows. `window_days` and `shrink_k` are fixed in the config, not tuned.
+    """
+
+    kind = "arome_biascorr"
+    output = "point"
+    inputs = frozenset({"arome", "history"})
+
+    def __init__(self, id: str, variables: list[str], fields: list[str], window_days: int = 7, shrink_k: float = 5.0,
+                 revision: str = "AROME 0.025 SP1 + lead bias correction", **p):
+        super().__init__(id, [v for v in variables if v in fields], window_days=window_days, shrink_k=shrink_k, **p)
+        self.window_days, self.shrink_k, self.revision = window_days, float(shrink_k), revision
+        self.table: pd.DataFrame | None = None
+
+    def attach_arome(self, arome_df: pd.DataFrame) -> None:
+        self.table = arome_df
+
+    def predict(self, batch: CaseBatch) -> ForecastBatch:
+        if batch.arome is None or self.table is None:
+            raise ValueError("arome_biascorr needs issued AROME forecasts and the AROME table")
+        a = self.table
+        avail = a.groupby("run")["available_at"].max()
+        vals = a.set_index(["station", "run", "variable", "valid_time"])["value"]
+        idx = [batch.variables.index(v) for v in self.variables]
+        out = batch.arome[:, idx].copy()
+        step = np.timedelta64(batch.step_hours, "h")
+        n_used = np.zeros(out.shape, dtype=np.int16)
+        for i, c in enumerate(batch.cases.itertuples()):
+            origin = pd.Timestamp(batch.origins[i], tz="UTC")
+            run0 = pd.Timestamp(c.arome_run)
+            hist_t = pd.DatetimeIndex(batch.history_times()[i], tz="UTC")
+            hist_pos = {t: k for k, t in enumerate(hist_t)}
+            past_runs = [r for r in avail.index if avail[r] <= origin and r < run0
+                         and r >= origin - pd.Timedelta(days=self.window_days)]
+            for jj, var in enumerate(self.variables):
+                j = batch.variables.index(var)
+                for k in range(out.shape[-1]):
+                    lead = pd.Timestamp(batch.future_times[i, k], tz="UTC") - run0
+                    res = []
+                    for r in past_runs:
+                        v = r + lead
+                        if v > origin or v not in hist_pos:
+                            continue
+                        f = vals.get((c.station, r, var, v))
+                        o = batch.history[i, j, hist_pos[v]]
+                        if f is not None and np.isfinite(o):
+                            res.append(o - f)
+                    out[i, jj, k] += sum(res) / (len(res) + self.shrink_k) if res else 0.0
+                    n_used[i, jj, k] = len(res)
+        return ForecastBatch(self.id, self.revision, "point", self.variables, out,
+                             info={"residuals_per_value_median": float(np.median(n_used)),
+                                   "share_without_residuals": round(float((n_used == 0).mean()), 4)})
+
+
 # --------------------------------------------------------------------------- Timestral
 
 def load_timestral(checkpoint: str, revision: str, device: str = "cpu") -> tuple[object, dict]:
@@ -274,14 +343,21 @@ class Timestral(Adapter):
 
     def __init__(self, id: str, variables: list[str], targets: list[str], checkpoint: str, revision: str,
                  context_days: int = 30, calendar: bool = False, arome: str | None = None,
-                 arome_fields: list[str] | None = None, batch_size: int = 32, device: str = "cpu", **p):
+                 arome_fields: list[str] | None = None, batch_size: int = 32, device: str = "cpu",
+                 features: list[str] | None = None, **p):
+        from weather_lab import features as feats
+
+        self.features = feats.validate(features or [])
+        extra = {"features": self.features, "feature_versions": {f: feats.GROUPS[f].version for f in self.features}} \
+            if self.features else {}
         super().__init__(id, targets, calendar=calendar, arome=arome, context_days=context_days,
-                         checkpoint=checkpoint, **p)
+                         checkpoint=checkpoint, **extra, **p)
         self.checkpoint, self.revision = checkpoint, revision
         self.context_days, self.calendar, self.arome_mode = context_days, calendar, arome
         self.arome_fields = [f for f in (arome_fields or []) if f in targets]
         self.batch_size, self.device = batch_size, device
-        inputs = {"history"} | ({"calendar"} if calendar else set()) | ({"arome"} if arome else set())
+        inputs = {"history"} | ({"calendar"} if calendar else set()) | ({"arome"} if arome else set()) \
+            | ({"features"} if self.features else set()) | ({"arome"} if "resid" in self.features else set())
         self.inputs = frozenset(inputs)
         if arome is not None and arome not in self.AROME_MODES:
             raise ValueError(f"arome mode {arome!r}")
@@ -318,7 +394,22 @@ class Timestral(Adapter):
                 j = batch.variables.index(f)
                 past = self.arome_history_rows(batch, j, t_ctx)
                 known_rows.append(np.concatenate([past, batch.arome[:, j]], axis=1)[:, None].astype(np.float32))
+        if self.features:
+            _, known_feat, _ = self.feature_rows(batch)
+            if known_feat is not None:
+                known_rows.append(known_feat)
         return ctx, (np.concatenate(known_rows, axis=1) if known_rows else None)
+
+    def feature_rows(self, batch: CaseBatch) -> tuple[np.ndarray | None, np.ndarray | None, dict]:
+        """(past covariates (N, Cp, T) | None, known feature rows (N, Ck, T + H) | None, report)."""
+        from weather_lab import features as feats
+
+        if not self.features:
+            return None, None, {}
+        return feats.build(self.features, batch, self.context_steps(batch.step_hours))
+
+    def past_covariates(self, batch: CaseBatch) -> np.ndarray | None:
+        return self.feature_rows(batch)[0]
 
     def predict(self, batch: CaseBatch) -> ForecastBatch:
         import torch
@@ -330,6 +421,7 @@ class Timestral(Adapter):
         t_ctx = self.context_steps(batch.step_hours)
         idx = [batch.variables.index(v) for v in self.variables]
         ctx, known = self.build_inputs(batch)
+        past, _, feat_report = self.feature_rows(batch)
         h = batch.horizon
         out = np.full((len(ctx), len(idx), h, len(fc.quantile_levels)), np.nan, dtype=np.float32)
         t0 = time.perf_counter()
@@ -338,6 +430,7 @@ class Timestral(Adapter):
                 sl = slice(s, s + self.batch_size)
                 res = fc.forecast(ctx[sl], prediction_length=h,
                                   known_covariates=None if known is None else known[sl],
+                                  past_covariates=None if past is None else past[sl],
                                   clip_nonnegative=False)  # temperatures and wind components can be negative
                 out[sl] = res.quantiles.cpu().numpy()
         elapsed = time.perf_counter() - t0
@@ -347,7 +440,9 @@ class Timestral(Adapter):
                              point, out, levels,
                              info={**load_info, "predict_s": round(elapsed, 3), "n_cases": len(ctx),
                                    "batch_size": self.batch_size, "context_steps": t_ctx,
-                                   "known_covariate_rows": 0 if known is None else known.shape[1]})
+                                   "known_covariate_rows": 0 if known is None else known.shape[1],
+                                   "past_covariate_rows": 0 if past is None else past.shape[1],
+                                   **({"feature_inputs": feat_report} if feat_report else {})})
 
     def latency_probe(self, batch: CaseBatch, repeats: int = 5) -> dict:
         """Warm single-case latency (median of `repeats`) on the first case of `batch`."""
@@ -387,7 +482,8 @@ def arome_coverage_steps(rows: np.ndarray) -> int:
 def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str], context_days: int,
                        arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
                        arome_fields: tuple[str, ...] = ("t", "pmer"), horizon_steps: int = 16,
-                       step_hours: int = 3) -> CaseBatch:
+                       step_hours: int = 3, aux_df: pd.DataFrame | None = None,
+                       station_coords: dict | None = None) -> CaseBatch:
     """A one-case batch from saved files: observations <= origin, and (optionally) issued + archived AROME
     from the station extract with the same rules as the benchmark (`evaluate.arome_inputs`)."""
     origin = pd.Timestamp(case["origin"])
@@ -416,15 +512,23 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
                              f"{covered * step_hours} h after this forecast time (run length "
                              f"{AROME_RUN_HOURS} h); request at most {covered * step_hours} h, or choose "
                              "'No AROME input' for a longer Timestral-only forecast")
+    aux_args = {}
+    if aux_df is not None:
+        from weather_lab.features import AUX_VARIABLES
+
+        a = aux_df[aux_df["station"] == case["station"]].set_index("time").reindex(axis)[AUX_VARIABLES]
+        aux_args = {"aux_history": a.to_numpy(dtype=np.float32).T[None], "aux_variables": list(AUX_VARIABLES)}
     return CaseBatch(cases, variables, hist.to_numpy(dtype=np.float32).T[None], origins, future, step_hours,
-                     arome_arr, **hist_args)
+                     arome_arr, **hist_args, **aux_args, station_coords=station_coords)
 
 
 def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str], size: str, context_days: int,
                          calendar: bool, arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
                          horizon_steps: int = 16, step_hours: int = 3, allow_download: bool = False,
                          device: str = "cpu", use_cache: bool = True,
-                         lookup_only: bool = False) -> tuple[pd.DataFrame | None, dict]:
+                         lookup_only: bool = False, features: list[str] | None = None,
+                         aux_df: pd.DataFrame | None = None,
+                         station_coords: dict | None = None) -> tuple[pd.DataFrame | None, dict]:
     """One-off Timestral run on a single case, OUTSIDE the frozen benchmark (never saved to runs/).
 
     Returns (prediction rows, info) where info says whether the prediction cache was hit. The model is
@@ -437,14 +541,19 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     from weather_lab.models import offline, prefetch
 
     ck = _registry()[size]
+    from weather_lab import features as feats
+
+    features = feats.validate(features or [])
     batch = exploratory_inputs(obs, case, variables, context_days, arome_mode, arome_df,
-                               horizon_steps=horizon_steps, step_hours=step_hours)
+                               horizon_steps=horizon_steps, step_hours=step_hours, aux_df=aux_df,
+                               station_coords=station_coords)
     horizon_h = horizon_steps * step_hours
     model = Timestral(f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
-                      f"{AROME_LABELS[arome_mode]} [{device}]", variables, targets=variables, checkpoint=ck.repo, revision=ck.revision,
+                      f"{AROME_LABELS[arome_mode]}{''.join(' +' + f for f in features)} [{device}]", variables, targets=variables, checkpoint=ck.repo, revision=ck.revision,
                       context_days=context_days, calendar=calendar, arome=arome_mode, arome_fields=["t", "pmer"],
-                      batch_size=1, device=device)
+                      batch_size=1, device=device, features=features)
     ctx, known = model.build_inputs(batch)
+    past = model.past_covariates(batch)
     payload = {"adapter": model.kind, "adapter_version": Timestral.ADAPTER_VERSION,
                "preprocessing": Timestral.PREPROCESSING_VERSION, "checkpoint": ck.repo, "revision": ck.revision,
                "variables": variables, "station": case["station"], "origin": str(case["origin"]),
@@ -452,7 +561,10 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
                "calendar": calendar, "arome_mode": arome_mode, "arome_run": case.get("arome_run") if arome_mode else None,
                "quantile_levels": list(QUANTILE_LEVELS), "device": device, "dtype": "float32",
                "torch": torch.__version__, "stochastic": "none (deterministic forward pass)"}
-    key = predcache.make_key(payload, {"context": ctx, "known_covariates": known})
+    if features:     # feature definitions (name, version, rows); their actual values/masks are hashed below
+        payload["features"] = feats.definition(features)
+    key = predcache.make_key(payload, {"context": ctx, "known_covariates": known,
+                                       **({"past_covariates": past} if features else {})})
 
     def compute() -> pd.DataFrame:
         if not offline():
@@ -464,7 +576,7 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
 
     settings = {"checkpoint": ck.name, "revision": ck.revision, "context_days": context_days,
                 "context_steps": int(ctx.shape[-1]), "horizon_steps": horizon_steps, "step_hours": step_hours,
-                "calendar": calendar, "arome_mode": arome_mode, "device": device}
+                "calendar": calendar, "arome_mode": arome_mode, "device": device, "features": features}
     if lookup_only:
         frame = predcache.lookup(key)
     elif use_cache:

@@ -58,8 +58,9 @@ uv run weather-lab --offline evaluate --config …   # no Hub access at all
 - **Exploratory cache key** (`weather_lab.predcache.make_key`): checkpoint repo + full revision, adapter
   version and preprocessing version, SHA-256 of the exact context and covariate arrays (values and NaN
   masks), station, origin, horizon, step, history length, calendar flag, AROME input setup and run, quantile
-  levels, device, dtype, torch version, and "deterministic" as the stochastic setting. A different revision
-  or input setup never hits.
+  levels, device, dtype, torch version, and "deterministic" as the stochastic setting. With context-enrichment
+  features, also their definitions (name, version, role, rows) and the SHA-256 of the actual past-covariate
+  arrays (values and masks). A different revision, input setup or feature definition never hits.
 - **Writes.** The parquet is written to a temporary file in the target directory and renamed
   (`os.replace`); its metadata JSON appears first, so an existing parquet means a complete entry.
 - **Concurrency.** Identical concurrent requests compute once: an in-process lock plus a file lock on local
