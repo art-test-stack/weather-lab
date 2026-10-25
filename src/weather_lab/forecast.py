@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab.common import unit_of
+from weather_lab.arome_inputs import AromeInputs
 
 OutputType = Literal["point", "quantiles", "ensemble"]
 # Timestral's 21 levels; empirical-quantile climatology uses the same grid so pinball losses compare.
@@ -41,6 +42,7 @@ class CaseBatch:
     aux_history:  optional (N, F, T) auxiliary observations (`aux_variables`, e.g. dew point, cloud
                   cover) at the same history times (<= origin); context-enrichment inputs only.
     station_coords: optional {station: (lat, lon)} for astronomical features.
+    arome_inputs: optional named fields, independent of targets; source runs and availability per field.
     """
 
     cases: pd.DataFrame
@@ -56,6 +58,7 @@ class CaseBatch:
     aux_history: np.ndarray | None = None
     aux_variables: list[str] | None = None
     station_coords: dict | None = None
+    arome_inputs: AromeInputs | None = None
 
     def __post_init__(self) -> None:
         n, v, t = self.history.shape
@@ -78,13 +81,16 @@ class CaseBatch:
             assert np.isnan(self.arome_history[no_run]).all(), "historical AROME value without a source run"
         if self.aux_history is not None:
             assert self.aux_history.shape == (n, len(self.aux_variables or []), t), "aux history shape"
+        if self.arome_inputs is not None:
+            self.arome_inputs.validate(self.origins, self.history_times(), self.future_times)
 
     def subset(self, sl) -> "CaseBatch":
         pick = (lambda a: None if a is None else a[sl])
         return CaseBatch(self.cases.iloc[sl], self.variables, self.history[sl], self.origins[sl],
                          self.future_times[sl], self.step_hours, pick(self.arome), pick(self.arome_history),
                          pick(self.arome_history_run), pick(self.arome_history_lead_h), pick(self.aux_history),
-                         self.aux_variables, self.station_coords)
+                         self.aux_variables, self.station_coords,
+                         None if self.arome_inputs is None else self.arome_inputs.subset(sl))
 
     @property
     def horizon(self) -> int:
