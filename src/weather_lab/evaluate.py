@@ -242,7 +242,9 @@ def run_evaluation(cfg: Config, log=print, reuse_from: Path | None = None) -> Pa
         if hasattr(a, "attach_arome") and arome_df is not None:
             a.attach_arome(arome_df)
     aux_df = aux_meta = None
-    if any("atmos" in getattr(a, "features", []) for a in adapters):
+    from weather_lab.features import GROUPS
+
+    if any("aux_history" in GROUPS[name].needs for a in adapters for name in getattr(a, "features", [])):
         from weather_lab.data import load_aux
 
         aux_df, aux_meta = load_aux(cfg, log)

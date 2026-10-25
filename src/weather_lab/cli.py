@@ -205,7 +205,12 @@ def cmd_features_list(args) -> None:
     from weather_lab.features import GROUPS
 
     for g in GROUPS.values():
-        print(f"{g.name:6} v{g.version} {g.role:5} rows={','.join(g.rows)}  needs={','.join(g.needs) or '-'}  {g.description}")
+        print(f"{g.name:6} v{g.version} {g.role:5} rows={','.join(g.rows())}  needs={','.join(g.needs) or '-'}  "
+              f"{g.description}")
+        print(f"       availability: {g.availability}\n       missing: {g.missing}")
+        if g.defaults:
+            print("       parameters: " + "; ".join(f"{k}={list(v) if isinstance(v, tuple) else v} (allowed "
+                                                  f"{list(g.choices[k])})" for k, v in g.defaults.items()))
 
 
 def cmd_features_select(args) -> None:

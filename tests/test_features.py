@@ -87,7 +87,12 @@ def test_tendencies_are_differences_of_the_target_history():
 
 def test_feature_definitions_enter_provenance_and_unknown_groups_fail():
     assert feats.definition(["solar"]) == [{"name": "solar", "version": 1, "role": "known",
-                                             "rows": ["sin_solar_elevation"]}]
+                                             "rows": ["sin_solar_elevation"], "params": {}}]
+    assert feats.definition({"tend": {"lags_h": [6]}})[0]["rows"] == ["dt_6h", "dpmer_6h"]
+    with pytest.raises(ValueError):
+        feats.normalize({"tend": {"lags_h": [5]}})                  # not an allowed value
+    with pytest.raises(ValueError):
+        feats.normalize({"tend": {"lags_h": []}})                   # empty: invalid, never silently defaulted
     with pytest.raises(ValueError):
         feats.validate(["radiation"])
 

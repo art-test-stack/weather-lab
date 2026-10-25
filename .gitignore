@@ -9,7 +9,7 @@ wheels/
 *.parquet
 *.json
 .env
-
+.tmp
 # Virtual environments
 .venv
 
