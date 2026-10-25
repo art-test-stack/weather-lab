@@ -86,6 +86,29 @@ class Run:
             return _parquet(p)
         return self.observations()
 
+    def aux_path(self) -> Path | None:
+        """The auxiliary SYNOP file (dew point, cloud cover) for this run's stations and years, if installed:
+        the file recorded in run.json (when unchanged), else the one `data.aux_path` names for its config."""
+        meta = (self.run.get("data") or {}).get("aux_observations") or {}
+        p = ROOT / "data" / "processed" / str(meta.get("file", ""))
+        if meta.get("file") and p.exists():
+            return p if _sha256(p) == meta.get("sha256") else None
+        cfg = self.path / "config.yaml"
+        if not cfg.exists():
+            return None
+        from weather_lab.common import load_config
+        from weather_lab.data import aux_path
+
+        p = aux_path(load_config(cfg))
+        return p if p.exists() else None
+
+    def aux_observations(self) -> pd.DataFrame | None:
+        p = self.aux_path()
+        return _parquet(p) if p else None
+
+    def station_coords(self) -> dict:
+        return {s["id"]: (s["lat"], s["lon"]) for s in self.stations() if "lat" in s and "lon" in s}
+
     def arome_extract(self) -> pd.DataFrame | None:
         """The AROME station extract the run's AROME inputs came from (for exploratory reruns), if present."""
         for p in (self.path / "arome_station_extract.parquet",
