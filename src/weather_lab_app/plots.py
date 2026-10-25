@@ -42,19 +42,37 @@ def _rgba(hex_color: str, alpha: float) -> str:
 
 # --------------------------------------------------------------------------- forecast
 
-def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, variable: str, systems: list[str],
-                    band_model: str | None, history_hours: int = 48, height: int = 300,
-                    error_mode: str = "signed") -> go.Figure:
-    """The forecast window first: short history, shaded forecast period, readable names, ids in hover.
+def last_observation(obs: pd.DataFrame, origin: pd.Timestamp) -> tuple[pd.Timestamp, float] | None:
+    """Latest observed (non-missing) target at or before the forecast time, with its real timestamp."""
+    o = obs[(obs["time"] <= origin) & obs["observed"].notna()]
+    if o.empty:
+        return None
+    r = o.loc[o["time"].idxmax()]
+    return pd.Timestamp(r["time"]), float(r["observed"])
 
-    error_mode "signed" / "absolute" adds an aligned panel (shared time axis) with each system's point
-    forecast minus the observation, the same point forecast the benchmark scores; "off" hides it.
+
+ERROR_LABELS = {"absolute": ("|Forecast − obs.|", "Absolute error |forecast − observation|"),
+                "signed": ("Forecast − obs.", "Signed error (forecast − observation)")}
+
+
+def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, variable: str, systems: list[str],
+                    band_model: str | None, context_hours: int = 720, view_hours: int = 48, height: int = 300,
+                    error_mode: str = "absolute") -> go.Figure:
+    """The forecast window first; the whole input context is plotted but the view opens on the last
+    `view_hours` (zoom out to see more: display only, no model input changes).
+
+    - A dotted bridge joins the last real observation at or before the forecast time to each point forecast's
+      first value. It is a drawing aid only: not a prediction, not scored, not exported, absent from the
+      error panel.
+    - error_mode "absolute" (default) / "signed" adds an aligned panel (shared time axis) with each system's
+      point forecast minus the observation, the same point forecast the benchmark scores; "off" hides it.
     """
     origin = pd.Timestamp(case["origin"])
     u = unit(variable)
     end = pd.Timestamp(rows["valid_time"].max()) if len(rows) else origin
-    start = origin - pd.Timedelta(hours=history_hours)
-    panel = error_mode in ("signed", "absolute")
+    start = origin - pd.Timedelta(hours=context_hours)
+    view_start = origin - pd.Timedelta(hours=min(view_hours, context_hours))
+    panel = error_mode in ERROR_LABELS
     fig = make_subplots(rows=2 if panel else 1, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                         row_heights=[0.73, 0.27] if panel else None)
     fig.add_vrect(x0=origin, x1=end + pd.Timedelta(hours=1.5), fillcolor=FORECAST_BG, line_width=0, layer="below",
@@ -65,7 +83,7 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
                        text="← observed  ", font={"size": 12, "color": INK2})
     sel = rows[rows["model"].isin(systems)]
     b = sel[sel["model"] == band_model] if band_model else sel.iloc[:0]
-    if len(b) and b["output_type"].iloc[0] == "quantiles":       # deterministic systems never get bands
+    if len(b) and b["output_type"].iloc[0] == "quantiles":       # bands only where quantiles were predicted
         color = model_style(band_model)[0]
         for lo, hi, alpha, label in ((0.05, 0.95, 0.12, "90%"), (0.1, 0.9, 0.24, "80%")):
             fig.add_trace(go.Scatter(
@@ -73,7 +91,7 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
                 y=list(b[qcol(hi)]) + list(b[qcol(lo)][::-1]), fill="toself", line={"width": 0},
                 fillcolor=_rgba(color, alpha), name=f"80% / 90% range · {model_name(band_model)}",
                 legendgroup="band", showlegend=label == "80%", hoverinfo="skip"), row=1, col=1)
-    hist = obs[(obs["time"] >= start) & (obs["time"] <= origin)]
+    hist = obs[(obs["time"] > start) & (obs["time"] <= origin)]
     fut = obs[(obs["time"] > origin) & (obs["time"] <= end)]
     fig.add_trace(go.Scatter(x=hist["time"], y=hist["observed"], name="Observed", mode="lines+markers",
                              line={"color": OBS_COLOR, "width": 2}, marker={"size": 4}, legendgroup="obs",
@@ -83,11 +101,18 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
                              marker={"color": OBS_COLOR, "size": 9, "symbol": "circle-open", "line": {"width": 2}},
                              hovertemplate="%{y:.1f} " + u + "<extra>Observed (not an input)</extra>"), row=1, col=1)
     verif = fut.set_index("time")["observed"]
+    last = last_observation(obs, origin)
     for model in [m for m in systems if m in set(sel["model"])]:
-        g = sel[sel["model"] == model]
+        g = sel[sel["model"] == model].sort_values("valid_time")
         color, dash, width = model_style(model)
         name = model_name(model)
         lead = ((pd.to_datetime(g["valid_time"]) - origin) / pd.Timedelta(hours=1)).round().astype(int)
+        first = g.dropna(subset=["point"]).head(1)
+        if last is not None and len(first):                   # rendering only: never part of the data
+            fig.add_trace(go.Scatter(x=[last[0], first["valid_time"].iloc[0]], y=[last[1], first["point"].iloc[0]],
+                                     mode="lines", line={"color": color, "dash": "dot", "width": max(width - 0.8, 1)},
+                                     legendgroup=model, showlegend=False, hoverinfo="skip",
+                                     name=f"bridge · {name}", meta="bridge"), row=1, col=1)
         fig.add_trace(go.Scatter(x=g["valid_time"], y=g["point"], name=name, mode="lines+markers",
                                  line={"color": color, "dash": dash, "width": width}, marker={"size": 5},
                                  legendgroup=model, customdata=lead,
@@ -99,17 +124,18 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
             fig.add_trace(go.Scatter(x=g["valid_time"], y=err, name=name, mode="lines+markers", showlegend=False,
                                      line={"color": color, "dash": dash, "width": max(width - 0.6, 1.2)},
                                      marker={"size": 4}, legendgroup=model, customdata=lead,
-                                     hovertemplate=("%{y:+.2f} " if error_mode == "signed" else "%{y:.2f} ") + u
+                                     hovertemplate=ERROR_LABELS[error_mode][0] + " "
+                                                   + ("%{y:+.2f} " if error_mode == "signed" else "%{y:.2f} ") + u
                                                    + " · %{customdata} h ahead<br>valid %{x|%a %d %b %H:%M} UTC"
                                                    f"<extra>{name}</extra>"), row=2, col=1)
     fig.add_vline(x=origin, line={"color": INK2, "width": 1, "dash": "dash"})
     fig.update_yaxes(title=variable_name(variable), row=1, col=1)
-    fig.update_xaxes(range=[start, end + pd.Timedelta(hours=1.5)], tickformat="%a %d %b\n%H:%M")
+    fig.update_xaxes(range=[view_start, end + pd.Timedelta(hours=1.5)], tickformat="%a %d %b\n%H:%M")
     if panel:
         if error_mode == "signed":
             fig.add_hline(y=0, line={"color": INK2, "width": 1}, row=2, col=1)
-        fig.update_yaxes(title=("Forecast − obs." if error_mode == "signed" else "|Forecast − obs.|") + f" ({u})",
-                         row=2, col=1, title_font={"size": 11}, zeroline=False)
+        fig.update_yaxes(title=f"{ERROR_LABELS[error_mode][0]} ({u})", row=2, col=1, title_font={"size": 11},
+                         zeroline=False)
         if error_mode == "absolute":
             fig.update_yaxes(rangemode="tozero", row=2, col=1)
     return _layout(fig, height=height + (100 if panel else 40))

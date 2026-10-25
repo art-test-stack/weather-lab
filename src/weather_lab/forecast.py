@@ -375,6 +375,15 @@ AROME_LABELS = {None: "", "archived": " +AROME archived history", "substituted_o
                 "missing": " +AROME forecast only"}
 
 
+AROME_RUN_HOURS = 51          # SP1 0.025 deg runs used by the AROME suites (manifest `arome.max_lead_h`)
+
+
+def arome_coverage_steps(rows: np.ndarray) -> int:
+    """Leading forecast steps for which every AROME field (rows (F, H)) has a value."""
+    ok = np.isfinite(rows).all(axis=0)
+    return int(ok.argmin()) if not ok.all() else int(ok.size)
+
+
 def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str], context_days: int,
                        arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
                        arome_fields: tuple[str, ...] = ("t", "pmer"), horizon_steps: int = 16,
@@ -400,6 +409,13 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
 
         arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, list(arome_fields), horizon_steps,
                                             step_hours, t_ctx)
+        rows = arome_arr[0, [variables.index(f) for f in arome_fields if f in variables]]
+        covered = arome_coverage_steps(rows)
+        if covered < horizon_steps:   # never pad: the issued run simply ends there
+            raise ValueError(f"AROME run {str(case['arome_run'])[:16].replace('T', ' ')} UTC covers only "
+                             f"{covered * step_hours} h after this forecast time (run length "
+                             f"{AROME_RUN_HOURS} h); request at most {covered * step_hours} h, or choose "
+                             "'No AROME input' for a longer Timestral-only forecast")
     return CaseBatch(cases, variables, hist.to_numpy(dtype=np.float32).T[None], origins, future, step_hours,
                      arome_arr, **hist_args)
 
@@ -423,8 +439,9 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     ck = _registry()[size]
     batch = exploratory_inputs(obs, case, variables, context_days, arome_mode, arome_df,
                                horizon_steps=horizon_steps, step_hours=step_hours)
-    model = Timestral(f"exploratory {size} ctx{context_days}d{' +cal' if calendar else ''}{AROME_LABELS[arome_mode]} "
-                      f"[{device}]", variables, targets=variables, checkpoint=ck.repo, revision=ck.revision,
+    horizon_h = horizon_steps * step_hours
+    model = Timestral(f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
+                      f"{AROME_LABELS[arome_mode]} [{device}]", variables, targets=variables, checkpoint=ck.repo, revision=ck.revision,
                       context_days=context_days, calendar=calendar, arome=arome_mode, arome_fields=["t", "pmer"],
                       batch_size=1, device=device)
     ctx, known = model.build_inputs(batch)
@@ -445,11 +462,17 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
         fb.validate(batch)
         return fb.to_frame(batch, "exploratory (outside frozen benchmark)")
 
+    settings = {"checkpoint": ck.name, "revision": ck.revision, "context_days": context_days,
+                "context_steps": int(ctx.shape[-1]), "horizon_steps": horizon_steps, "step_hours": step_hours,
+                "calendar": calendar, "arome_mode": arome_mode, "device": device}
     if lookup_only:
         frame = predcache.lookup(key)
-        return frame, {"cache_hit": frame is not None, "key": key[:16], "model": model.id}
-    if use_cache:
+    elif use_cache:
         frame, hit = predcache.get_or_compute(key, payload, compute)
     else:
         frame, hit = compute(), False
-    return frame, {"cache_hit": hit, "key": key[:16], "model": model.id}
+    if lookup_only:
+        hit = frame is not None
+    if frame is not None:
+        frame = frame.assign(model=model.id)   # the key fixes the content; the display id follows this request
+    return frame, {"cache_hit": hit, "key": key[:16], "model": model.id, "settings": settings}

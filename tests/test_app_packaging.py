@@ -188,6 +188,12 @@ def test_benchmark_finding_only_states_what_the_scores_support(monkeypatch):
     text = app.finding("arome-issued-v2", "u")
     assert "AROME is not scored for this variable" in text and "improves Timestral 209M only" in text
     assert "within what this small sample" in text
+    tiny = V2_T | {"timestral-28m-mv-cal-arome-futureonly": 2.513, "timestral-209m-mv-cal-arome-futureonly": 2.426}
+    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(tiny)})
+    text = app.finding("arome-issued-v2", "t", setup="futureonly")       # < 1 % either way: no direction claimed
+    assert "leaves Timestral's error essentially unchanged (within 1%)" in text and "improves" not in text
+    text = app.finding("arome-issued-v2", "t", setup="none")
+    assert "without AROME input, the larger Timestral checkpoint performs better" in text and "adding" not in text
     monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run({"timestral-28m-mv-cal": 2.0})})
     assert app.finding("arome-issued-v2", "t") == ""
 

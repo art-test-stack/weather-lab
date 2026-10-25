@@ -16,6 +16,8 @@ Two steps, in order, on the same frozen cases (and on a longer AROME suite once 
 
 Both are post-processing of AROME. Neither is WeatherGenerator training, and neither involves local fine-tuning of Timestral.
 
+The full plan, with success criteria, learned AROME references, the residual design, the data inventory and go/no-go criteria, is in [experiments/arome_improvement_plan.md](experiments/arome_improvement_plan.md).
+
 ## 0b. Next model family: TFC t0-gamma (interfaces prepared, not run)
 
 Registry, capability record and adapter contract are in place (`weather_lab.models.FAMILIES["t0"]`,

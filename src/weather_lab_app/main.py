@@ -22,8 +22,9 @@ from weather_lab_app import plots
 from weather_lab_app.labels import (CHECKPOINTS, DEFAULT_EXPERIMENT, DIFFERENT_INPUT, EXPERIMENTS, MODELS,
                                     SEASON_NAMES, SETUP_NAMES, SPLIT_NAMES, model_description, model_name,
                                     model_style, unit, variable_name, with_checkpoint)
-from weather_lab_app.results import (available_runs, case_forecast, forecast_csv, headline, station_label,
-                                     training_status)
+from weather_lab.forecast import qcol
+from weather_lab_app.results import (arome_history_text, available_runs, case_forecast, forecast_csv, headline,
+                                     headline_to, input_history, station_label, training_status)
 
 
 def startup_bootstrap() -> dict | None:
@@ -51,7 +52,12 @@ INTRO = ("Météo-France's **AROME**, the pretrained **Timestral** model (infere
 QUESTION = ("How do Timestral forecasts compare with AROME's at French stations, 3–48 h ahead, and does giving "
             "Timestral AROME's forecast change its error?")
 STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "external NWP (issued run)", "no fitting"]
-EMPTY_EXTRA = {"case": None, "runs": {}}
+EMPTY_EXTRA = {"case": None, "runs": {}, "settings": {}, "active": None}
+DEFAULT_STATION = "07149"            # Paris-Orly, by stable station id
+DEFAULT_SIZE = CHECKPOINTS[-1]       # the largest integrated Timestral checkpoint (209M)
+EXPLORE_MAX_HOURS = 120              # app limit for exploratory runs (Timestral itself sets no horizon limit)
+CONTEXT_DAYS = (7, 90)               # range of the Observed context control
+AROME_MODES = {"none": None, "archived": "archived", "substobs": "substituted_observations", "futureonly": "missing"}
 
 CSS = """
 .gradio-container {max-width: 1240px !important; margin: auto;}
@@ -63,6 +69,9 @@ CSS = """
                 font-weight:600; margin-right:6px; font-size:.82rem;}
 .scope .status.validation {background:#e6f4ea; color:#0f5a2e;}
 #scope {margin: -6px 0;}
+#applied .applied {font-size:.84rem; color:#3d3c39;}
+#applied .pending {font-size:.84rem; color:#7a4b00; background:#fff4e0; border-radius:6px; padding:3px 8px;
+                   margin-top:3px;}
 .tiles {display:flex; flex-wrap:wrap; gap:10px; margin:.2rem 0 0 0;}
 .tile {flex:1 1 170px; border:1px solid #e6e5e1; border-radius:10px; padding:7px 12px; background:#fcfcfb;}
 .tile .v {font-size:1.4rem; font-weight:650; color:#0b0b0b; line-height:1.1;}
@@ -127,7 +136,7 @@ def has_setups(suite: str) -> bool:
 
 def setup_choices(suite: str) -> list[tuple[str, str]]:
     mx = EXPERIMENTS[suite].get("matrix") or {}
-    return [(SETUP_NAMES[k][0], k) for k in mx.get("setups", {}) if k != "none"]
+    return [(SETUP_NAMES[k][0], k) for k in mx.get("setups", {})]
 
 
 def experiment_view(suite: str, size: str | None, setup: str | None = None) -> dict:
@@ -191,28 +200,49 @@ def default_case(suite: str, station: str) -> str:
     return (last if len(last) else cases).sort_values("origin")["case_id"].iloc[-1]
 
 
-def on_experiment(suite: str, variable: str | None):
-    """Experiment changed: reset variable (kept if available), station and date to sensible defaults."""
+def default_station(suite: str) -> str:
+    """Paris-Orly (by station id) when the experiment has it, else its first UI example / first station."""
+    stations = [s for _, s in station_choices(suite)]
+    if DEFAULT_STATION in stations:
+        return DEFAULT_STATION
+    first_example = (RUNS[suite].manifest.get("ui_examples") or [""])[0]
+    return first_example.split("/")[1] if first_example.count("/") == 2 else stations[0]
+
+
+def on_experiment(suite: str, variable: str | None, station: str | None = None, size: str | None = None,
+                  setup: str | None = None):
+    """Experiment changed: keep the user's variable, station, model and AROME input where the new experiment
+    has them; otherwise defaults. The context control takes the new run's recorded context."""
     vchoices = variable_choices(suite)
     variable = variable if variable in [v for _, v in vchoices] else "t"
     stations = station_choices(suite)
-    first_example = (RUNS[suite].manifest.get("ui_examples") or [""])[0]
-    station = first_example.split("/")[1] if first_example.count("/") == 2 else stations[0][1]
+    station = station if station in [s for _, s in stations] else default_station(suite)
+    choices = setup_choices(suite)
+    setup = setup if setup in [k for _, k in choices] else (EXPERIMENTS[suite].get("matrix") or {}).get("main")
+    size = size if size in CHECKPOINTS else DEFAULT_SIZE
     return (gr.update(choices=vchoices, value=variable), gr.update(choices=stations, value=station),
             gr.update(choices=date_choices(suite, station), value=default_case(suite, station)),
-            scope_html(suite), gr.update(visible=has_checkpoints(suite)),
-            gr.update(visible=has_setups(suite), choices=setup_choices(suite),
-                      value=(EXPERIMENTS[suite].get("matrix") or {}).get("main")))
+            scope_html(suite), gr.update(visible=has_checkpoints(suite), value=size),
+            gr.update(visible=has_setups(suite), choices=choices, value=setup),
+            gr.update(value=default_context(suite, size, setup)),
+            gr.update(value=RUNS[suite].horizon_hours))
 
 
 def on_station(suite: str, station: str):
     return gr.update(choices=date_choices(suite, station), value=default_case(suite, station))
 
 
-def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | None = None) -> str:
-    """Headline numbers for the selected experiment, checkpoint and input setup (saved score tables)."""
+def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | None = None,
+               horizon: int | None = None) -> str:
+    """Benchmark aggregate cards for the selected experiment, checkpoint and input setup (saved score tables).
+
+    With `horizon` below the run's inference horizon they are recomputed from the saved predictions on leads
+    <= horizon and labelled as an interactive slice; the frozen full-horizon scores stay in the saved tables.
+    """
     run, e = RUNS[suite], experiment_view(suite, size, setup)
-    h = headline(run, variable, models=e["headline"])
+    sliced = horizon is not None and int(horizon) < run.horizon_hours
+    h = headline_to(run, variable, e["headline"], int(horizon)) if sliced else headline(run, variable,
+                                                                                         models=e["headline"])
     not_run = "".join(f"<div class='tile missing' title='{m}'><div class='v'>not run</div><div class='n'>"
                       f"{model_name(m)}</div><div class='d'>no saved result in this experiment; nothing is "
                       "substituted</div></div>" for m in e["missing"])
@@ -252,8 +282,118 @@ def tiles_html(suite: str, variable: str, size: str | None = None, setup: str | 
                    f"<div class='d'>{model_name(band)} · nominal 80%</div></div>")
     n = int(h["n"].max())
     split_txt = f" · {SPLIT_NAMES.get(split, split)}" if len(run.splits) > 1 else ""
-    return (f"<div class='tiles'>{''.join(out)}{not_run}</div><div class='note'><b>Mean absolute error</b> over {n:,} "
-            f"forecast–observation pairs, all stations and lead times{split_txt}; lower is better.</div>")
+    what = (f"<b>Benchmark aggregate, interactive slice</b>: mean absolute error over {n:,} forecast–observation "
+            f"pairs with lead ≤ {int(horizon)} h of the saved {run.horizon_hours} h forecasts, all stations"
+            f"{split_txt}, recomputed from saved predictions. Frozen full-horizon scores: Benchmark tab."
+            if sliced else
+            f"<b>Benchmark aggregate</b> (frozen): mean absolute error over {n:,} forecast–observation pairs, all "
+            f"stations and lead times{split_txt}; lower is better.")
+    return f"<div class='tiles'>{''.join(out)}{not_run}</div><div class='note'>{what}</div>"
+
+
+# --------------------------------------------------------------------------- forecast configuration
+
+def _extra_runs(extra: dict | None, case_id: str) -> dict:
+    return extra["runs"] if extra and extra.get("case") == case_id else {}
+
+
+def keep_extra_for_case(case_id, extra):
+    return extra if extra and extra.get("case") == case_id else {**EMPTY_EXTRA, "case": case_id}
+
+
+def clear_exploratory(case_id):
+    return {**EMPTY_EXTRA, "case": case_id}
+
+
+def active_run(extra: dict | None, case_id: str) -> tuple[str, pd.DataFrame, dict] | None:
+    """The last successful exploratory forecast for this case (model id, rows, applied settings)."""
+    runs = _extra_runs(extra, case_id)
+    mid = (extra or {}).get("active")
+    return (mid, runs[mid], extra["settings"].get(mid, {})) if mid in runs else None
+
+
+def saved_settings(suite: str, size: str | None, setup: str | None) -> dict:
+    """Settings of the saved run behind the current view, from its provenance (run.json params, manifest)."""
+    run, e = RUNS[suite], experiment_view(suite, size, setup)
+    mid = e["band"] or next((m for m in e["headline"] if m.startswith("timestral") and m in run.models), None)
+    p = run.params(mid) if mid else {}
+    return {"model": mid, "context_days": p.get("context_days"), "calendar": p.get("calendar"),
+            "horizon_h": run.horizon_hours, "missing": e["missing"]}
+
+
+def default_context(suite: str, size: str | None, setup: str | None) -> int:
+    """Context-control default: the active saved run's recorded context (never the validation choice of
+    another run); the suite protocol's value when the view's system was not run."""
+    days = saved_settings(suite, size, setup)["context_days"]
+    return int(days or RUNS[suite].manifest["protocol"]["forecast"].get("context_days", 30))
+
+
+def context_md(days, suite: str) -> str:
+    step = RUNS[suite].step_hours
+    return (f"= **{int(days) * 24} hours = {int(days) * 24 // step} {'three-hourly' if step == 3 else ''} steps**. "
+            "The history supplied to inference. A saved replay's context comes from its run and is read-only; a "
+            "different value prepares an exploratory run.")
+
+
+def horizon_md(hours, suite: str) -> str:
+    run = RUNS[suite]
+    hours, step = int(hours), run.step_hours
+    saved = run.horizon_hours
+    where = (f"display/scoring slice of the saved {saved} h forecasts (no new inference)" if hours <= saved else
+             f"beyond the saved {saved} h: needs **Run forecast** (exploratory). AROME runs end {saved} h after "
+             "these forecast times, so AROME inputs allow at most that; Timestral alone up to "
+             f"{EXPLORE_MAX_HOURS} h (app limit)")
+    return f"= **{hours // step} forecast steps** of {step} h; {where}."
+
+
+def settings_text(st: dict, step: int = 3) -> str:
+    setup = next((k for k, v in AROME_MODES.items() if v == st.get("arome_mode")), "none")
+    return (f"Timestral {st.get('checkpoint', '?').split('-')[-1]} · {SETUP_NAMES[setup][0]} · context "
+            f"{st.get('context_days')} d ({st.get('context_steps')} steps) · inference horizon "
+            f"{st.get('horizon_steps', 0) * st.get('step_hours', step)} h"
+            + ("" if st.get("calendar", True) else " · no time inputs"))
+
+
+def config_status(suite, case_id, size, setup, context_days, horizon, calendar, extra) -> str:
+    """Applied settings of what the chart shows, and draft changes not yet run (pending)."""
+    run = RUNS[suite]
+    act = active_run(extra, case_id)
+    pending = []
+    if act:
+        mid, _, st = act
+        h_run = st["horizon_steps"] * st["step_hours"]
+        applied = (f"<b>Showing an exploratory forecast</b> ({'cached' if st.get('cache_hit') else 'computed'}; "
+                   f"outside the frozen benchmark): {settings_text(st)}"
+                   + (f"; displayed: leads ≤ {int(horizon)} h" if int(horizon) < h_run else ""))
+        base = {"size": st.get("size"), "setup": st.get("setup"), "context_days": st["context_days"],
+                "horizon_h": h_run, "calendar": st["calendar"]}
+        if (size, setup if has_setups(suite) else None) != (base["size"], base["setup"]):
+            pending.append(f"model / AROME input → Timestral {size}"
+                           + (f" · {SETUP_NAMES.get(setup, (setup,))[0]}" if has_setups(suite) else ""))
+    else:
+        s = saved_settings(suite, size, setup)
+        ctx = (f"{s['context_days']} d ({int(s['context_days']) * 24 // run.step_hours} steps)" if s["context_days"]
+               else "Unknown")
+        applied = (f"<b>Showing the saved benchmark run</b> <code>{run.run['run_id'][:48]}</code>: "
+                   f"{model_name(s['model']) if s['model'] else '—'} · context {ctx} · inference horizon "
+                   f"{run.horizon_hours} h"
+                   + (f" · displayed and scored here: leads ≤ {int(horizon)} h (slice)" if int(horizon) <
+                      run.horizon_hours else ""))
+        base = {"context_days": s["context_days"], "horizon_h": run.horizon_hours, "calendar": s["calendar"]}
+        if s["missing"]:
+            pending.append(f"no saved result for {', '.join(model_name(m) for m in s['missing'])} (shown as not "
+                           "run); Run forecast computes an exploratory one for this forecast")
+    if base["context_days"] is not None and int(context_days) != int(base["context_days"]):
+        pending.append(f"context {int(context_days)} d (shown: {base['context_days']} d)")
+    if int(horizon) > base["horizon_h"]:
+        pending.append(f"horizon {int(horizon)} h (shown forecast ends at {base['horizon_h']} h)")
+    if base["calendar"] is not None and bool(calendar) != bool(base["calendar"]):
+        pending.append("time-of-day / season inputs " + ("on" if calendar else "off"))
+    out = f"<div class='applied'>{applied}</div>"
+    if pending:
+        out += ("<div class='pending'>Pending, not yet run: " + "; ".join(pending)
+                + ". Press <b>Run forecast</b> in Forecast configuration.</div>")
+    return out
 
 
 def systems_update(suite, case_id, variable, pref_by, band, extra, size=None, setup=None):
@@ -270,7 +410,10 @@ def systems_update(suite, case_id, variable, pref_by, band, extra, size=None, se
     preds = run.predictions()
     prob = [m for m in saved if m in value and (preds.loc[preds["model"] == m, "output_type"] == "quantiles").any()]
     prob += [m for m in exploratory if m in value]
-    if band is None or (band != "" and band not in prob):     # None: not chosen yet; "": user chose none
+    act = active_run(extra, case_id)
+    if act and act[0] in prob:                                # the interval source follows the active run
+        band = act[0]
+    elif band is None or (band != "" and band not in prob):   # None: not chosen yet; "": user chose none
         band = e["band"] if e["band"] in prob else (prob[0] if prob else "")
     return (gr.update(choices=[(model_name(m), m) for m in choices], value=value),
             gr.update(choices=[("none", "")] + [(model_name(m), m) for m in prob], value=band))
@@ -293,6 +436,22 @@ def switch_view(suite, size, setup, prev, pref_by):
     if not (pref_by or {}).get(suite) or not has_checkpoints(suite):
         return pref_by, new
     models = set(RUNS[suite].models)
+    if has_setups(suite):
+        mx = EXPERIMENTS[suite]["matrix"]
+        o_size, o_setup = prev.get("size") or mx["sizes"][0], prev.get("setup") or mx["main"]
+        o_base, o_main = matrix_id(suite, o_size, "none"), matrix_id(suite, o_size, o_setup)
+        n_base, n_main = matrix_id(suite, size, "none"), matrix_id(suite, size, setup)
+        swapped = []
+        for m in pref_by[suite]:
+            if m == o_main and o_main != o_base:
+                swapped.append(n_main if n_main in models else m)
+            elif m == o_base:
+                swapped.append(n_base if n_base in models else m)
+                if o_main == o_base and n_main != n_base and n_main in models:
+                    swapped.append(n_main)            # from "No AROME input" to a conditioned view
+            else:
+                swapped.append(m)
+        return {**pref_by, suite: list(dict.fromkeys(swapped))}, new
     old_view = experiment_view(suite, prev.get("size"), prev.get("setup"))
     new_view = experiment_view(suite, size, setup)
     mapping = {o: n for o, n in zip(old_view["headline"], new_view["headline"]) if o != n and n in models}
@@ -300,52 +459,149 @@ def switch_view(suite, size, setup, prev, pref_by):
     return {**pref_by, suite: list(dict.fromkeys(swapped))}, new
 
 
-def _extra_runs(extra: dict | None, case_id: str) -> dict:
-    return extra["runs"] if extra and extra.get("case") == case_id else {}
+def _window(rows: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    return rows[rows["lead_h"] <= int(horizon)]
 
 
-def keep_extra_for_case(case_id, extra):
-    return extra if extra and extra.get("case") == case_id else {"case": case_id, "runs": {}}
+def forecast_scores(rows: pd.DataFrame, obs: pd.DataFrame, systems: list[str]) -> tuple[pd.DataFrame, int]:
+    """Per system on THIS forecast: leads covered, and on the leads where every listed system has a point
+    forecast and the observation exists (shared window): MAE, 80% coverage and width."""
+    r = rows[rows["model"].isin(systems)].merge(obs.rename(columns={"time": "valid_time"}), on="valid_time",
+                                                how="left")
+    covers = r.groupby("model")["lead_h"].max()
+    ok = r.dropna(subset=["point", "observed"])
+    shared = set.intersection(*(set(g["lead_h"]) for _, g in ok.groupby("model"))) if len(ok) else set()
+    have = set(ok["model"])
+    shared = shared if have == set(covers.index) else set()
+    s = ok[ok["lead_h"].isin(shared)].copy()
+    s["abs_err"] = (s["point"] - s["observed"]).abs()
+    if qcol(0.1) in s:
+        s["in80"] = ((s["observed"] >= s[qcol(0.1)]) & (s["observed"] <= s[qcol(0.9)])).where(s[qcol(0.1)].notna())
+        s["width80"] = s[qcol(0.9)] - s[qcol(0.1)]
+    out = pd.DataFrame({"covers_h": covers})
+    if len(s):
+        agg = s.groupby("model").agg(mae=("abs_err", "mean"), n=("abs_err", "size"),
+                                     **({"cov80": ("in80", "mean"), "width80": ("width80", "mean")}
+                                        if "in80" in s else {}))
+        out = out.join(agg)
+    return out.reindex([m for m in systems if m in out.index]), len(shared)
 
 
-def overview(suite, case_id, variable, systems, band_model, history_hours, extra=None, error_mode="signed"):
+def this_forecast_html(scores: pd.DataFrame, n_shared: int, variable: str) -> str:
+    u = unit(variable)
+    observable = n_shared > 0
+    cell = lambda x, f: f(x) if observable and pd.notna(x) else "Not yet observable" if not observable else "–"  # noqa: E731
+    rows = "".join(
+        f"<tr><td><span class='sw' style='background:{model_style(m)[0]}'></span>{model_name(m)}</td>"
+        f"<td>{int(r.covers_h)} h</td><td>{cell(r.get('mae'), lambda v: f'{v:.2f} {u}')}</td>"
+        f"<td>{cell(r.get('cov80'), lambda v: f'{v:.0%}')}</td></tr>" for m, r in scores.iterrows())
+    return ("<table class='mini'><thead><tr><th>System</th><th>Forecast to</th><th>Mean abs. error</th>"
+            f"<th>80% coverage</th></tr></thead><tbody>{rows}</tbody></table><div class='note'>This forecast only, "
+            f"on the {n_shared} lead(s) where every listed system has a forecast and the observation exists"
+            + ("" if observable else ": none observed yet") + ".</div>")
+
+
+def cards_html(suite, case_id, variable, size, setup, horizon, extra) -> str:
+    """Primary cards: the active exploratory forecast if any (labelled), else the benchmark aggregate."""
+    act = active_run(extra, case_id)
+    if not act:
+        return tiles_html(suite, variable, size, setup, horizon)
+    mid, frame, st = act
     run = RUNS[suite]
-    rows, obs, case = case_forecast(run, case_id, variable)
+    rows, _, case = case_forecast(run, case_id, variable)
+    obs = _station_obs(run, case["station"], variable)
+    f = _window(frame[frame["variable"] == variable], horizon)
+    u = unit(variable)
+    v = f.merge(obs.rename(columns={"time": "valid_time"}), on="valid_time", how="left")
+    seen = v.dropna(subset=["observed"])
+    n_obs, n_leads = len(seen), len(f)
+    h_run = st["horizon_steps"] * st["step_hours"]
+    head = (f"<div class='note'><b>Current forecast · Exploratory</b> — {settings_text(st)}; shown: leads ≤ "
+            f"{min(int(horizon), h_run)} h; {n_obs} of {n_leads} leads observed so far.</div>")
+    color = model_style(mid)[0]
+    nyo = "<div class='v'>Not yet observable</div>"
+    mae = f"<div class='v'>{(seen['point'] - seen['observed']).abs().mean():.2f} {u}</div>" if n_obs else nyo
+    cards = [f"<div class='tile ref' title='{mid}'>{mae}<div class='n'><span class='sw' style='background:{color}'>"
+             f"</span>Mean absolute error · this forecast</div><div class='d'>{n_obs} observed lead(s)</div></div>"]
+    if qcol(0.1) in f and f[qcol(0.1)].notna().any():
+        width = (f[qcol(0.9)] - f[qcol(0.1)]).mean()
+        inside = ((seen["observed"] >= seen[qcol(0.1)]) & (seen["observed"] <= seen[qcol(0.9)])).mean()
+        cards.append(f"<div class='tile'>{f'<div class=v>{inside:.0%}</div>' if n_obs else nyo}<div class='n'>"
+                     f"inside its 80% range</div><div class='d'>nominal 80%; {n_obs} observation(s) — too few to "
+                     "judge calibration</div></div>")
+        cards.append(f"<div class='tile'><div class='v'>{width:.1f} {u}</div><div class='n'>mean 80% range width"
+                     f"</div><div class='d'>over its {n_leads} lead(s)</div></div>")
+    others = [m for m in ["arome-raw", saved_settings(suite, size, setup)["model"]] if m and m in set(rows["model"])]
+    sc, n_shared = forecast_scores(pd.concat([_window(rows, horizon), f], ignore_index=True), obs, [mid] + others)
+    for m in others:
+        val = sc.loc[m, "mae"] if "mae" in sc and m in sc.index else None
+        cards.append(f"<div class='tile' title='{m}'><div class='v'>"
+                     + (f"{val:.2f} {u}" if val is not None and pd.notna(val) else "Not yet observable")
+                     + f"</div><div class='n'><span class='sw' style='background:{model_style(m)[0]}'></span>"
+                     f"{model_name(m)}</div><div class='d'>saved forecast, on the {n_shared} lead(s) both cover and "
+                     "observed" + (f"; the exploratory forecast scores {sc.loc[mid, 'mae']:.2f} {u} there"
+                                   if "mae" in sc and pd.notna(sc.loc[mid, "mae"]) else "") + "</div></div>")
+    return (head + f"<div class='tiles'>{''.join(cards)}</div><div class='note'>One forecast, outside the frozen "
+            "benchmark: not saved to results and never scored there. The benchmark aggregates over all cases are in "
+            "the Benchmark tab.</div>")
+
+
+def _station_obs(run, station: str, variable: str) -> pd.DataFrame:
+    obs = run.full_observations()
+    return obs[obs["station"] == station][["time", variable]].rename(columns={variable: "observed"})
+
+
+def overview(suite, case_id, variable, systems, band_model, horizon, extra=None, error_mode="absolute",
+             size=None, setup=None):
+    run = RUNS[suite]
+    rows, _, case = case_forecast(run, case_id, variable)
+    obs = _station_obs(run, case["station"], variable)
+    horizon = int(horizon or run.horizon_hours)
     exploratory = [df[df["variable"] == variable] for df in _extra_runs(extra, case_id).values()]
     if exploratory:
         rows = pd.concat([rows, *exploratory], ignore_index=True)
         for col in ("origin", "valid_time"):    # saved (ns) and fresh timestamps must share one dtype
             rows[col] = pd.to_datetime(rows[col], utc=True).astype("datetime64[us, UTC]")
+    rows = _window(rows, horizon)
     systems = systems or []
-    fig = plots.forecast_figure(rows, obs, case, variable, systems, band_model or None, int(history_hours),
-                                error_mode=error_mode or "off")
-    sc = rows[rows["model"].isin(systems)].merge(obs.rename(columns={"time": "valid_time"}), on="valid_time")
-    sc = sc.assign(err=(sc["point"] - sc["observed"]).abs()).groupby("model", sort=False)["err"].mean()
-    sc = sc.reindex([m for m in systems if m in sc.index])
-    this = ("<table class='mini'><thead><tr><th>System</th><th>Mean error, this forecast</th></tr></thead><tbody>"
-            + "".join(f"<tr><td><span class='sw' style='background:{model_style(m)[0]}'></span>{model_name(m)}</td>"
-                      f"<td>{v:.2f} {unit(variable)}</td></tr>" for m, v in sc.items())
-            + "</tbody></table>")
+    act = active_run(extra, case_id)
+    ctx_days = act[2]["context_days"] if act else (saved_settings(suite, size, setup)["context_days"]
+                                                   or default_context(suite, size, setup))
+    fig = plots.forecast_figure(rows, obs, case, variable, systems, band_model or None,
+                                context_hours=int(ctx_days) * 24, error_mode=error_mode or "off")
+    scores, n_shared = forecast_scores(rows, obs, [m for m in systems if m in set(rows["model"])])
+    this = this_forecast_html(scores, n_shared, variable)
     desc = "\n".join(f"- **{model_name(m)}**: {model_description(m)}" for m in systems)
     origin = pd.Timestamp(case["origin"])
     arome = (f" AROME run used: {case['arome_run'][:16].replace('T', ' ')} UTC (in the archive at "
              f"{case['arome_available_at'][11:16]} UTC)." if isinstance(case.get("arome_run"), str) else "")
     assumed = (" AROME availability is inferred retrospectively from archive timestamps."
                if isinstance(case.get("arome_run"), str) else "")
+    last = plots.last_observation(obs, origin)
+    gap = ("" if last is None or last[0] == origin else
+           f" The last observation before the forecast time is at {last[0]:%a %d %b %H:%M} UTC, "
+           f"{(origin - last[0]) / pd.Timedelta(hours=1):.0f} h earlier; the dotted lines start there.")
+    err_txt = {"absolute": " Lower panel: absolute error |forecast − observation|",
+               "signed": " Lower panel: signed error, forecast − observation (above zero: too high)"}
     caption = (f"**{station_label(case['station']).split(' ', 1)[-1]}**, forecast issued "
                f"{origin:%a %d %b %Y, %H:%M} UTC (historical replay: inputs restricted to data assumed available "
-               f"at the forecast time).{assumed}{arome} Shaded ranges show where the probabilistic system "
-               "expects the outcome 80% / 90% of the time; AROME and the simple references give single values."
-               + (" Lower panel: forecast minus observation" + (" (absolute)" if error_mode == "absolute" else "")
-                  + ", from the same point forecast the benchmark scores." if error_mode in ("signed", "absolute")
-                  else ""))
+               f"at the forecast time).{assumed}{arome} Model input: **{ctx_days} days** of observations "
+               f"({int(ctx_days) * 24 // run.step_hours} steps); the chart opens on the last 48 h — zoom out to see "
+               f"the rest. Shown: leads ≤ {horizon} h. Shaded ranges show where the probabilistic system expects the "
+               "outcome 80% / 90% of the time; AROME and the simple references give single values. Dotted lines "
+               "join the last observation to each forecast's first value: a drawing aid, not a prediction, never "
+               "scored or exported." + gap
+               + (err_txt[error_mode] + ", from the same point forecast the benchmark scores." if error_mode in
+                  err_txt else ""))
     path = Path(tempfile.gettempdir()) / f"forecast_{case_id.replace('/', '_')}_{variable}.csv"
-    forecast_csv(rows, obs).to_csv(path, index=False)
+    saved_only = rows[~rows["model"].astype(str).str.startswith("exploratory")]   # exploratory rows never exported
+    forecast_csv(saved_only, obs).to_csv(path, index=False)
     return fig, caption, this, desc, str(path), plots.station_map(run.stations(), case["station"])
 
 
 @zerogpu.gpu(duration=60)
-def _exploratory_on_device(obs, case, size, context_days, calendar, arome_mode, arome_df, allow_download):
+def _exploratory_on_device(obs, case, size, context_days, calendar, arome_mode, arome_df, allow_download,
+                           horizon_steps=16):
     """One labelled Timestral run; on ZeroGPU this function holds a GPU for its duration."""
     from weather_lab.forecast import exploratory_forecast
     from weather_lab.models import MODELS
@@ -354,57 +610,62 @@ def _exploratory_on_device(obs, case, size, context_days, calendar, arome_mode, 
     try:
         return exploratory_forecast(obs, case, ["t", "pmer", "u", "v"], size, context_days, calendar,
                                     arome_mode=arome_mode, arome_df=arome_df, allow_download=allow_download,
-                                    device=device)
+                                    device=device, horizon_steps=horizon_steps)
     finally:
         if device == "cuda" and zerogpu.on_zerogpu():
             MODELS.release("cuda")   # the GPU is detached after this call; never keep GPU-resident state
 
 
-EXPLORE_SETUPS = {"No AROME input": None, "AROME forecast + archived AROME history": "archived",
-                  "AROME forecast + observed history (substituted)": "substituted_observations",
-                  "AROME forecast only (diagnostic)": "missing"}
-
-
-def run_exploratory(suite, case_id, size, context_days, calendar, setup_label, allow_download, pref_by, extra,
-                    ckpt=None, setup=None):
+def run_exploratory(suite, case_id, size, setup, context_days, horizon, calendar, allow_download, pref_by, extra):
+    """Run forecast: one exploratory Timestral run from the single configuration state. On failure the last
+    successful result stays, with its own settings, and the error is shown."""
     from weather_lab import predcache
     from weather_lab.forecast import exploratory_forecast
 
     run = RUNS[suite]
     _, _, case = case_forecast(run, case_id, "t")
-    obs = run.observations()
+    obs = run.full_observations()
     obs = obs[obs["station"] == case["station"]]
     extra = keep_extra_for_case(case_id, extra)
-    arome_mode = EXPLORE_SETUPS.get(setup_label)
+    keep = " The chart keeps the last successful result with its own settings."
+    step, horizon = run.step_hours, int(horizon)
+    if horizon % step or not step <= horizon <= EXPLORE_MAX_HOURS:
+        return extra, pref_by, f"⚠️ horizon must be a multiple of {step} h between {step} and {EXPLORE_MAX_HOURS} h."
+    arome_mode = AROME_MODES.get(setup) if has_setups(suite) else None
     arome_df = run.arome_extract() if arome_mode else None
+    name = f"Timestral-{size}"
     try:
         from weather_lab.forecast import ensure_checkpoint
 
         # download on CPU first, so a cold 837 MB fetch never consumes the GPU window or quota
-        ensure_checkpoint(size, bool(allow_download))
-        args = (obs, case, size, int(context_days), bool(calendar), arome_mode, arome_df, bool(allow_download))
+        ensure_checkpoint(name, bool(allow_download))
+        args = (obs, case, name, int(context_days), bool(calendar), arome_mode, arome_df, bool(allow_download),
+                horizon // step)
         if zerogpu.on_zerogpu():
             # Cache lookup on CPU first: a hit never requests a GPU.
-            frame, info = exploratory_forecast(obs, case, ["t", "pmer", "u", "v"], size, int(context_days),
+            frame, info = exploratory_forecast(obs, case, ["t", "pmer", "u", "v"], name, int(context_days),
                                                bool(calendar), arome_mode=arome_mode, arome_df=arome_df,
-                                               device="cuda", lookup_only=True)
+                                               device="cuda", lookup_only=True, horizon_steps=horizon // step)
             if frame is None:
                 frame, info = _exploratory_on_device(*args)
         else:
             frame, info = _exploratory_on_device(*args)
     except (PermissionError, ValueError) as e:
-        return extra, pref_by, f"⚠️ {e}"
+        return extra, pref_by, f"⚠️ {e}.{keep}"
     except Exception as e:  # noqa: BLE001 - e.g. ZeroGPU quota/queue errors raised from the GPU worker
-        return extra, pref_by, f"⚠️ exploratory run failed: {type(e).__name__}: {e}"
+        return extra, pref_by, f"⚠️ exploratory run failed: {type(e).__name__}: {e}.{keep}"
     mid = frame["model"].iloc[0]
-    extra = {"case": case_id, "runs": {**extra["runs"], mid: frame}}
+    st = {**info["settings"], "size": size, "setup": setup if has_setups(suite) else None,
+          "cache_hit": info["cache_hit"], "key": info["key"]}
+    extra = {"case": case_id, "runs": {**extra["runs"], mid: frame}, "settings": {**extra.get("settings", {}), mid: st},
+             "active": mid}
     pref_by = dict(pref_by or {})
-    base = pref_by.get(suite, list(experiment_view(suite, ckpt, setup)["default_systems"]))
+    base = pref_by.get(suite, list(experiment_view(suite, size, setup)["default_systems"]))
     pref_by[suite] = base + ([mid] if mid not in base else [])
     where = predcache.location()[1]
-    return extra, pref_by, (f"Added **{model_name(mid)}** to the chart (outside the frozen benchmark; never scored). "
-                            + ("Reused a cached prediction (no model run). " if info["cache_hit"]
-                               else "Computed now and cached. ") + f"Cache: {where}.")
+    return extra, pref_by, (f"**Run forecast** done: {settings_text(st)} (outside the frozen benchmark; never "
+                            "scored). " + ("Reused a cached prediction (no model run). " if info["cache_hit"]
+                                           else "Computed now and cached. ") + f"Cache: {where}; key {info['key']}.")
 
 
 # --------------------------------------------------------------------------- benchmark
@@ -415,7 +676,8 @@ METRIC_CHOICES = [("Mean absolute error", "mae"), ("RMSE", "rmse"), ("Pinball lo
                   ("80% range coverage", "coverage80"), ("90% range coverage", "coverage90"),
                   ("80% range width", "width80"), ("90% range width", "width90")]
 LEAD_VIEWS = [("At each lead", "at"), ("Cumulative: all leads up to H", "cumulative")]
-ERROR_MODES = [("Signed (forecast − observation)", "signed"), ("Absolute", "absolute"), ("Off", "off")]
+ERROR_MODES = [("Absolute |forecast − observation|", "absolute"), ("Signed (forecast − observation)", "signed"),
+               ("Off", "off")]
 
 
 def bench_controls(suite: str):
@@ -433,6 +695,9 @@ def _select(df, split, variable, station, season, lead):
     m = (df["split"] == split) & (df["variable"] == variable) & (df["station"] == station) & (df["season"] == season)
     m &= df["lead_h"].isna() if lead == "all" else (df["lead_h"] == int(lead))
     return df[m]
+
+
+NEGLIGIBLE = 0.01   # relative MAE change below which the finding says "essentially unchanged"
 
 
 def finding(suite: str, variable: str, split: str | None = None, setup: str | None = None) -> str:
@@ -464,11 +729,19 @@ def finding(suite: str, variable: str, split: str | None = None, setup: str | No
     pairs = {s: (b, c) for s, (b, c) in ids.items() if b in allmae.index and c in allmae.index}
     missing = [s for s, (b, c) in ids.items() if b in allmae.index and c not in allmae.index]
     setup_txt = SETUP_NAMES[setup][0] if mx else "AROME"
-    if pairs:
-        better = [s for s, (b, c) in pairs.items() if allmae[c] < allmae[b]]
-        diffs += [abs(allmae[c] - allmae[b]) / allmae[b] for b, c in pairs.values()]
+    if setup == "none" and len(pairs) == 2:          # nothing added: compare the checkpoints only
+        (small, _), (large, _) = pairs.values()
+        diffs.append(abs(allmae[large] - allmae[small]) / allmae[small])
+        clauses.append("without AROME input, the larger Timestral checkpoint "
+                       + ("performs better" if allmae[large] < allmae[small] else "does not perform better"))
+    elif pairs:
+        rel ={s: (allmae[c] - allmae[b]) / allmae[b] for s, (b, c) in pairs.items()}
+        better = [s for s, r in rel.items() if r <= -NEGLIGIBLE]
+        diffs += [abs(r) for r in rel.values()]
         verb = f"adding the {setup_txt}" if mx else "conditioning on AROME"
-        cond = (f"{verb} improves Timestral" if len(better) == len(pairs) else
+        cond = (f"{verb} leaves Timestral's error essentially unchanged (within {NEGLIGIBLE:.0%})"
+                if all(abs(r) < NEGLIGIBLE for r in rel.values()) else
+                f"{verb} improves Timestral" if len(better) == len(pairs) else
                 f"{verb} improves Timestral {', '.join(better)} only" if better
                 else f"{verb} does not improve Timestral")
         conds = [c for _, c in pairs.values()]
@@ -484,6 +757,12 @@ def finding(suite: str, variable: str, split: str | None = None, setup: str | No
                          "probabilistic forecasts.")
         if setup == "substobs":
             notes.append("Observed history is a different input construction, not real AROME history.")
+    ih = input_history(run)
+    if len(ih):
+        ctxs = {ih.loc[m, "requested_days"] for pair in pairs.values() for m in pair if m in ih.index}
+        if len(ctxs) > 1:
+            notes.append("The compared systems use different input histories, so more than the input setup or "
+                         "checkpoint changes.")
     if missing:
         notes.append(f"Not run: {', '.join(model_name(ids[s][1]) for s in missing)}.")
     if diffs and min(diffs) < 0.03:
@@ -568,12 +847,48 @@ def matrix_html(suite: str, variable: str, split: str | None = None) -> str:
         for f in planned:
             ok = key == "none" or f.known_covariates
             cells.append(f"<td><i>{'not integrated yet' if ok else 'unsupported input'}</i></td>")
-        body.append(f"<tr><td><b>{SETUP_NAMES[key][0]}</b></td>{''.join(cells)}</tr>")
+        ih = input_history(run)
+        ids = [matrix_id(suite, s, key) for s in mx["sizes"]]
+        days = [ih.loc[m, "requested_days"] if m in ih.index else None for m in ids if m in pt.index]
+        if not days:
+            hist = "–"
+        elif any(d is None or pd.isna(d) for d in days):
+            hist = "Unknown"
+        elif len(set(days)) == 1:
+            m0 = next(m for m in ids if m in ih.index)
+            hist = f"{days[0]:g} d each ({int(ih.loc[m0, 'requested_steps'])} steps); AROME: {arome_history_text(ih.loc[m0])}"
+        else:
+            hist = "⚠ contexts differ (" + " vs ".join(f"{d:g} d" for d in days) + "): more than checkpoint size changes"
+        body.append(f"<tr><td><b>{SETUP_NAMES[key][0]}</b></td>{''.join(cells)}<td>{hist}</td></tr>")
     return (f"<table class='mini matrix'><thead><tr><th>Input setup ({variable_name(variable, unit=False).lower()}, "
-            f"all leads)</th>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+            f"all leads)</th>{head}<th>Input history</th></tr></thead><tbody>{''.join(body)}</tbody></table>"
             "<div class='note'>Within a row only the checkpoint differs: same cases, observations, AROME runs, "
             "history length, calendar inputs and scoring. <i>not run</i>: the model can take this input but no "
             "result is saved; <i>unsupported input</i>: the model family cannot take it.</div>")
+
+
+def context_label(run, models: list[str]) -> str:
+    """Actual model input history of the compared systems, from the run's provenance (not the chart)."""
+    ih = input_history(run)
+    ts = [m for m in models if m in ih.index and m.startswith("timestral")]
+    if not ts:
+        return ""
+    days = {ih.loc[m, "requested_days"] for m in ts}
+    if None in days or any(pd.isna(d) for d in days):
+        hist = "**Input history: Unknown** for " + ", ".join(model_name(m) for m in ts if pd.isna(
+            ih.loc[m, "requested_days"])) + " (not recorded in this run)."
+    elif len(days) == 1:
+        lo, hi = int(ih.loc[ts, "effective_min"].min()), int(ih.loc[ts, "effective_max"].max())
+        steps = int(ih.loc[ts[0], "requested_steps"])
+        hist = (f"**Input history:** every Timestral system here reads {days.pop():g} days of station observations "
+                f"({steps} × {run.step_hours} h steps; observed {lo if lo == hi else f'{lo}–{hi}'} of {steps} per case).")
+    else:
+        hist = ("**Input history differs between systems** (" + "; ".join(
+            f"{model_name(m)} {ih.loc[m, 'requested_days']:g} d" for m in ts) + "): comparisons across them change "
+            "more than one thing.")
+    arome = sorted({arome_history_text(ih.loc[m]) for m in ts if ih.loc[m, "arome_history"] not in ("", "not used")})
+    return hist + (" AROME history (separate from the observation context): " + "; ".join(arome) + "."
+                   if arome else "")
 
 
 def benchmark(suite, variable, metric, lead, split, station, season, statuses, size=None, setup=None,
@@ -604,7 +919,8 @@ def benchmark(suite, variable, metric, lead, split, station, season, statuses, s
                   + (" use" if len(hatched) > 1 else " uses") + " station observations in place of past AROME values,"
                   " a different input from real AROME history." if hatched else "")
                + " In the lead-time chart, click a legend entry to show or hide a system."
-               + (" The lead-time chart covers every season." if season != "ALL" else ""))
+               + (" The lead-time chart covers every season." if season != "ALL" else "")
+               + "\n\n" + context_label(run, list(t["model"])))
     return (finding(suite, variable, split, setup), summary, bars, lines, horizon_txt,
             *detail_tables(run, split, variable, station, season, lead, statuses))
 
@@ -613,16 +929,21 @@ def detail_tables(run, split, variable, station, season, lead, statuses):
     u = unit(variable)
     keep = lambda d: d[d["model"].map(training_status).isin(statuses or STATUSES)]  # noqa: E731
     p = keep(_select(run.tables["metrics_point"], split, variable, station, season, lead)).sort_values("mae")
+    ih = input_history(run)
+    hist = lambda m: ih.loc[m, "summary"] if m in ih.index else "Unknown"  # noqa: E731
+    ahist = lambda m: arome_history_text(ih.loc[m]) if m in ih.index else "Unknown"  # noqa: E731
     point = pd.DataFrame({"System": p["model"].map(model_name), f"MAE ({u})": p["mae"].round(2),
                           f"RMSE ({u})": p["rmse"].round(2), f"Bias ({u})": p["bias"].round(2),
                           "vs persistence": p["skill_mae_vs_persistence"].map(lambda x: f"{x:+.0%}"),
-                          "Pairs": p["n"]})
+                          "Pairs": p["n"], "Input history": p["model"].map(hist),
+                          "AROME history": p["model"].map(ahist)})
     q = keep(_select(run.tables["metrics_probabilistic"], split, variable, station, season, lead)).sort_values(
         "pinball")
     prob = pd.DataFrame({"System": q["model"].map(model_name), f"Pinball ({u})": q["pinball"].round(3),
                          "80% coverage": q["coverage80"].map("{:.0%}".format),
                          "90% coverage": q["coverage90"].map("{:.0%}".format),
-                         f"80% width ({u})": q["width80"].round(1), "Pairs": q["n"]})
+                         f"80% width ({u})": q["width80"].round(1), "Pairs": q["n"],
+                         "Input history": q["model"].map(hist)})
     return point, prob
 
 
@@ -823,14 +1144,19 @@ def build() -> gr.Blocks:
             # ---------------- overview
             with gr.Tab("Overview", id="overview"):
                 with gr.Row(equal_height=True):
-                    station = gr.Dropdown(label="Station", choices=[], scale=1, min_width=180)
-                    ckpt = gr.Radio(list(CHECKPOINTS), value=CHECKPOINTS[0], label="Timestral model", scale=1,
+                    station = gr.Dropdown(station_choices(DEFAULT_SUITE), value=default_station(DEFAULT_SUITE),
+                                          label="Station", scale=1, min_width=180)
+                    ckpt = gr.Radio(list(CHECKPOINTS), value=DEFAULT_SIZE, label="Timestral model", scale=1,
                                     min_width=150, visible=has_checkpoints(DEFAULT_SUITE))
                     setup = gr.Dropdown(setup_choices(DEFAULT_SUITE), label="Timestral + AROME input", scale=2,
                                         value=(EXPERIMENTS[DEFAULT_SUITE].get("matrix") or {}).get("main"),
                                         min_width=230, visible=has_setups(DEFAULT_SUITE))
-                    date = gr.Dropdown(label="Forecast issued", choices=[], scale=2, min_width=220)
+                    first_station = default_station(DEFAULT_SUITE)
+                    date = gr.Dropdown(date_choices(DEFAULT_SUITE, first_station),
+                                       value=default_case(DEFAULT_SUITE, first_station), label="Forecast issued",
+                                       scale=2, min_width=220)
                 fplot = gr.Plot(show_label=False)
+                status = gr.HTML(elem_id="applied")
                 tiles = gr.HTML()
                 caption = gr.Markdown(elem_classes="note")
                 with gr.Row():
@@ -838,29 +1164,38 @@ def build() -> gr.Blocks:
                         this_tab = gr.HTML()
                     with gr.Column(scale=3, min_width=280):
                         sys_desc = gr.Markdown(elem_classes="note")
-                with gr.Accordion("Advanced: systems, ranges, history, exploratory run", open=False):
+                with gr.Accordion("Forecast configuration: context, horizon, systems, Run forecast", open=False):
+                    gr.Markdown("One configuration for the chart, the cards and **Run forecast**. Model and AROME "
+                                "input are chosen above. Shortening the horizon slices the saved forecasts; a "
+                                "different context, a longer horizon or a model / input without a saved result "
+                                "needs **Run forecast** (exploratory: shown here, never saved to results or "
+                                "scored).", elem_classes="note")
+                    ctx0 = default_context(DEFAULT_SUITE, DEFAULT_SIZE,
+                                           (EXPERIMENTS[DEFAULT_SUITE].get("matrix") or {}).get("main"))
+                    h0 = RUNS[DEFAULT_SUITE].horizon_hours
+                    with gr.Row():
+                        with gr.Column(min_width=260):
+                            ctx = gr.Slider(*CONTEXT_DAYS, value=ctx0, step=1, label="Observed context (days)")
+                            ctx_info = gr.Markdown(context_md(ctx0, DEFAULT_SUITE), elem_classes="note")
+                        with gr.Column(min_width=260):
+                            horizon = gr.Slider(3, EXPLORE_MAX_HOURS, value=h0, step=3,
+                                                label="Forecast horizon (hours)")
+                            horizon_info = gr.Markdown(horizon_md(h0, DEFAULT_SUITE), elem_classes="note")
+                    with gr.Row(equal_height=True):
+                        e_cal = gr.Checkbox(value=True, label="Time-of-day / time-of-year inputs")
+                        e_dl = gr.Checkbox(value=False, label="Allow weight download")
+                        e_btn = gr.Button("Run forecast", variant="primary", size="sm")
+                        back_btn = gr.Button("Back to saved results", size="sm")
+                    e_msg = gr.Markdown(elem_classes="note")
                     with gr.Row():
                         with gr.Column(scale=2, min_width=260):
                             systems = gr.CheckboxGroup(label="Systems shown", choices=[])
                             band = gr.Dropdown(label="Shaded 80% / 90% range for", choices=[], value=None)
-                            history = gr.Slider(12, 240, value=48, step=12, label="Observed history shown (hours)")
-                            err_mode = gr.Radio(ERROR_MODES, value="signed", label="Error panel under the chart")
+                            err_mode = gr.Radio(ERROR_MODES, value="absolute", label="Error panel under the chart")
                             show_old = gr.Checkbox(False, label="Show superseded experiment versions")
-                            dl_case = gr.DownloadButton("Download this forecast (CSV)", size="sm")
+                            dl_case = gr.DownloadButton("Download this forecast (CSV, saved systems)", size="sm")
                         with gr.Column(scale=1, min_width=220):
                             smap = gr.Plot(show_label=False)
-                    gr.Markdown("**Exploratory run** — Timestral once on this forecast with custom settings; shown "
-                                "on the chart, never saved or scored.", elem_classes="note")
-                    with gr.Row():
-                        e_size = gr.Dropdown(["Timestral-5M", "Timestral-28M", "Timestral-209M"],
-                                             value="Timestral-28M", label="Checkpoint", min_width=160)
-                        e_ctx = gr.Slider(7, 30, value=14, step=1, label="History read (days)", min_width=160)
-                        e_cal = gr.Checkbox(value=True, label="Time-of-day / season inputs")
-                        e_setup = gr.Dropdown(list(EXPLORE_SETUPS), value="No AROME input", label="AROME input",
-                                              min_width=240)
-                        e_dl = gr.Checkbox(value=False, label="Allow weight download")
-                    e_btn = gr.Button("Run exploratory forecast", size="sm")
-                    e_msg = gr.Markdown(elem_classes="note")
 
             # ---------------- benchmark
             with gr.Tab("Benchmark", id="benchmark"):
@@ -906,21 +1241,23 @@ def build() -> gr.Blocks:
                     gr.Markdown(protocol_md())
 
         # ---------------- wiring
-        view = gr.State({})
-        ov_inputs = [exp, date, var, systems, band, history, extra, err_mode]
+        view = gr.State({"size": DEFAULT_SIZE, "setup": (EXPERIMENTS[DEFAULT_SUITE].get("matrix") or {}).get("main")})
+        ov_inputs = [exp, date, var, systems, band, horizon, extra, err_mode, ckpt, setup]
         ov_outputs = [fplot, caption, this_tab, sys_desc, dl_case, smap]
         sys_inputs = [exp, date, var, pref, band, extra, ckpt, setup]
         b_inputs = [exp, var, metric, lead, split, b_station, b_season, statuses, ckpt, setup, lead_mode]
         b_outputs = [b_finding, b_summary, bars, lines, b_horizon, point_tab, prob_tab]
-        exp_outputs = [var, station, date, scope, ckpt, setup]
-        tile_inputs = [exp, var, ckpt, setup]
+        exp_outputs = [var, station, date, scope, ckpt, setup, ctx, horizon]
+        card_inputs = [exp, date, var, ckpt, setup, horizon, extra]
+        st_inputs = [exp, date, ckpt, setup, ctx, horizon, e_cal, extra]
         remember = lambda size, stp: {"size": size, "setup": stp}  # noqa: E731
 
-        def refresh_overview(event):
-            return (event.then(keep_extra_for_case, [date, extra], extra)
-                    .then(systems_update, sys_inputs, [systems, band])
-                    .then(overview, ov_inputs, ov_outputs)
-                    .then(tiles_html, tile_inputs, tiles))
+        def render(event, systems_too=True):
+            """Every view of the forecast derives from the same configuration state."""
+            if systems_too:
+                event = event.then(systems_update, sys_inputs, [systems, band])
+            return (event.then(overview, ov_inputs, ov_outputs).then(cards_html, card_inputs, tiles)
+                    .then(config_status, st_inputs, status))
 
         def refresh_benchmark(event):
             return (event.then(benchmark, b_inputs, b_outputs)
@@ -928,34 +1265,35 @@ def build() -> gr.Blocks:
                     .then(advanced_tables, [exp, var, split], [avail_tab, paired_tab, rt_tab, hw])
                     .then(downloads, exp, [dl_point, dl_prob, dl_manifest]))
 
-        on_exp = exp.input(on_experiment, [exp, var], exp_outputs).then(remember, [ckpt, setup], view).then(
-            bench_controls, exp, [split, b_station, b_season])
-        refresh_benchmark(refresh_overview(on_exp))
-        refresh_benchmark(var.input(systems_update, sys_inputs, [systems, band])
-                          .then(overview, ov_inputs, ov_outputs).then(tiles_html, tile_inputs, tiles))
-        refresh_overview(station.input(on_station, [exp, station], date))
-        date.input(keep_extra_for_case, [date, extra], extra).then(
-            systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
+        def on_exp_chain(event):
+            event = (event.then(remember, [ckpt, setup], view).then(bench_controls, exp, [split, b_station, b_season])
+                     .then(keep_extra_for_case, [date, extra], extra)
+                     .then(context_md, [ctx, exp], ctx_info).then(horizon_md, [horizon, exp], horizon_info))
+            return refresh_benchmark(render(event))
+
+        exp_in = [exp, var, station, ckpt, setup]
+        on_exp_chain(exp.input(on_experiment, exp_in, exp_outputs))
+        refresh_benchmark(render(var.input(keep_extra_for_case, [date, extra], extra)))
+        render(station.input(on_station, [exp, station], date).then(keep_extra_for_case, [date, extra], extra))
+        render(date.input(keep_extra_for_case, [date, extra], extra))
         for c in (ckpt, setup):
-            refresh_benchmark(c.input(switch_view, [exp, ckpt, setup, view, pref], [pref, view])
-                              .then(systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
-                              .then(tiles_html, tile_inputs, tiles))
-        systems.input(update_pref, [exp, date, var, systems, pref, extra, ckpt, setup], pref).then(
-            systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
-        for c in (band, history, err_mode):
+            refresh_benchmark(render(c.input(switch_view, [exp, ckpt, setup, view, pref], [pref, view])))
+        render(systems.input(update_pref, [exp, date, var, systems, pref, extra, ckpt, setup], pref))
+        for c in (band, err_mode):
             c.input(overview, ov_inputs, ov_outputs)
+        render(horizon.input(horizon_md, [horizon, exp], horizon_info), systems_too=False)
+        ctx.input(context_md, [ctx, exp], ctx_info).then(config_status, st_inputs, status)
+        e_cal.input(config_status, st_inputs, status)
         show_old.input(lambda s, cur: gr.update(choices=experiment_choices(s), value=cur), [show_old, exp], exp)
-        e_btn.click(run_exploratory, [exp, date, e_size, e_ctx, e_cal, e_setup, e_dl, pref, extra, ckpt, setup],
-                    [extra, pref, e_msg], concurrency_limit=1).then(
-            systems_update, sys_inputs, [systems, band]).then(overview, ov_inputs, ov_outputs)
+        render(e_btn.click(run_exploratory, [exp, date, ckpt, setup, ctx, horizon, e_cal, e_dl, pref, extra],
+                           [extra, pref, e_msg], concurrency_limit=1))
+        render(back_btn.click(clear_exploratory, date, extra).then(lambda: "", None, e_msg))
         for c in (metric, lead, split, b_station, b_season, statuses, lead_mode):
             c.input(benchmark, b_inputs, b_outputs)
         split.input(advanced_tables, [exp, var, split], [avail_tab, paired_tab, rt_tab, hw])
         cache_btn.click(cache_md, None, cache_box)
 
-        refresh_benchmark(refresh_overview(
-            demo.load(on_experiment, [exp, var], exp_outputs).then(remember, [ckpt, setup], view).then(
-                bench_controls, exp, [split, b_station, b_season]))).then(cache_md, None, cache_box)
+        on_exp_chain(demo.load(on_experiment, exp_in, exp_outputs)).then(cache_md, None, cache_box)
     return demo
 
 
