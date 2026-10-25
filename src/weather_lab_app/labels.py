@@ -70,7 +70,7 @@ MODELS = {
 }
 
 # One colour family per kind of system: observations ink, Timestral blues, Timestral+AROME teal,
-# AROME orange, simple references greys. Line style separates members of a family.
+# AROME error correction purple, AROME orange, simple references greys.
 OBS_COLOR = "#0b0b0b"
 STYLE = {
     "arome-raw": ("#eb6834", "solid", 3.0),
@@ -102,7 +102,6 @@ STYLE = {
     "seasonal-naive-24h": ("#a3a29c", "dot", 1.6),
     "climatology": ("#8a8984", "dashdot", 1.6),
 }
-EXPLORATORY = ("#6250d6", "longdash", 2.2)
 # Colour family per model family for ids without an explicit STYLE entry (next family: TFC t0, browns).
 FAMILY_STYLE = {"t0-": ("#a0522d", "solid", 2.4)}
 # Systems whose inputs differ in kind (not just in model): hatched in comparisons, explained in the summary.
@@ -111,20 +110,28 @@ DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-2
 
 
 def model_name(mid: str) -> str:
-    if mid.startswith("exploratory"):
-        return mid.replace("exploratory ", "Exploratory · ")
+    if mid.startswith("exploratory "):
+        checkpoint = mid.split()[1].replace("Timestral-", "Timestral ")
+        method = "AROME error correction" if "+AROME error correction" in mid else \
+            "direct + AROME" if " +AROME " in mid else "direct"
+        return f"{checkpoint} · {method}"
     return MODELS.get(mid, (mid, ""))[0]
 
 
 def model_description(mid: str) -> str:
     if mid.startswith("exploratory"):
+        if "+AROME error correction" in mid:
+            return ("Issued AROME + Timestral-predicted observation-minus-AROME error; archived error history, "
+                    "forecast lead and selected inputs. Inference only, no local fine-tuning; outside the frozen benchmark.")
         return "Run in this session, outside the frozen benchmark; not saved or scored."
     return MODELS.get(mid, ("", ""))[1]
 
 
 def model_style(mid: str) -> tuple[str, str, float]:
     if mid.startswith("exploratory"):
-        return EXPLORATORY
+        if "+AROME error correction" in mid:
+            return ("#6250d6", "solid", 2.8)
+        return ("#0f7a54" if " +AROME " in mid else "#184f95", "longdash", 2.2)
     family = next((v for k, v in FAMILY_STYLE.items() if mid.startswith(k)), ("#52514e", "solid", 2.0))
     return STYLE.get(mid, family)
 

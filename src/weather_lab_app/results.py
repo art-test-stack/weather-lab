@@ -235,7 +235,8 @@ def case_forecast(run: Run, case_id: str, variable: str) -> tuple[pd.DataFrame, 
 
 def forecast_csv(rows: pd.DataFrame, obs: pd.DataFrame) -> pd.DataFrame:
     cols = ["case_id", "station", "origin", "valid_time", "lead_h", "variable", "unit", "model", "model_revision",
-            "output_type", "point"] + [qcol(q) for q in QUANTILE_LEVELS if qcol(q) in rows]
+            "output_type", "point", "arome_run", "arome_available_at", "arome_baseline", "predicted_error"] \
+        + [qcol(q) for q in QUANTILE_LEVELS if qcol(q) in rows]
     out = rows[[c for c in cols if c in rows]].merge(obs.rename(columns={"time": "valid_time"}), on="valid_time",
                                                        how="left")
     return out

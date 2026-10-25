@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from weather_lab import features as feats
 
 TARGETS = ("t", "pmer", "u", "v")
+PREDICTION_TARGETS = {"weather": "Direct weather prediction", "arome_error": "AROME + predicted error"}
 # conditioning key -> Timestral `arome` mode (benchmark configs / run.json params)
 CONDITIONING = {"none": None, "archived": "archived", "substobs": "substituted_observations", "futureonly": "missing"}
 _FROM_MODE = {None: "none", "archived": "archived", "substituted_observations": "substobs",
@@ -36,11 +37,14 @@ class ForecastConfig:
     horizon_h: int = 48
     targets: tuple[str, ...] = TARGETS
     step_hours: int = 3
+    prediction_target: str = "weather"
 
     @classmethod
     def make(cls, model: str, conditioning: str = "none", features=(), **kw) -> "ForecastConfig":
         if conditioning not in CONDITIONING:
             raise ValueError(f"conditioning {conditioning!r}; one of {list(CONDITIONING)}")
+        if kw.get("prediction_target", "weather") not in PREDICTION_TARGETS:
+            raise ValueError(f"forecast method must be one of {list(PREDICTION_TARGETS)}")
         spec = feats.normalize(features)
         return cls(model, conditioning, tuple((n, tuple(sorted(p.items()))) for n, p in spec.items()), **kw)
 
@@ -59,13 +63,13 @@ class ForecastConfig:
     def forecast_part(self) -> tuple:
         """Everything that determines the predictions except the horizon (a saved forecast can be sliced)."""
         return (self.model, self.conditioning, self.features, self.calendar, self.context_days, self.targets,
-                self.step_hours)
+                self.step_hours, self.prediction_target)
 
     def as_dict(self) -> dict:
         return {"model": self.model, "conditioning": self.conditioning, "arome_mode": self.arome_mode,
                 "features": feats.definition(self.feature_spec), "calendar": self.calendar,
                 "context_days": self.context_days, "horizon_h": self.horizon_h, "targets": list(self.targets),
-                "step_hours": self.step_hours}
+                "step_hours": self.step_hours, "prediction_target": self.prediction_target}
 
 
 def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastConfig | None:
@@ -90,7 +94,8 @@ def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastCo
     spec = {f: (p.get("feature_params") or {}).get(f, {}) for f in p.get("features", [])}
     return ForecastConfig.make(name, _FROM_MODE[p.get("arome")], spec, calendar=bool(p.get("calendar", False)),
                                context_days=int(p["context_days"]), horizon_h=horizon_h,
-                               targets=tuple(record.get("variables") or TARGETS), step_hours=step_hours)
+                               targets=tuple(record.get("variables") or TARGETS), step_hours=step_hours,
+                               prediction_target=p.get("prediction_target", "weather"))
 
 
 # --------------------------------------------------------------------------- capability / availability
@@ -107,7 +112,8 @@ class Issue:
     def subject_label(self) -> str:
         if self.subject in feats.GROUPS:
             return feats.GROUPS[self.subject].label
-        return {"conditioning": "AROME conditioning", "calendar": "Calendar inputs"}.get(self.subject,
+        return {"conditioning": "AROME conditioning", "calendar": "Calendar inputs",
+                "prediction_target": "Forecast method"}.get(self.subject,
                                                                                          self.subject.capitalize())
 
 
@@ -139,6 +145,10 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
         out.append(Issue("unsupported", "conditioning", f"{fam.name} takes no known-future covariates"))
     if cfg.calendar and not fam.known_covariates:
         out.append(Issue("unsupported", "calendar", f"{fam.name} takes no known-future covariates"))
+    correction = cfg.prediction_target == "arome_error"
+    if correction and (ck.family != "timestral" or not fam.known_covariates):
+        out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires the Timestral adapter "
+                         "and known-future forecast-lead inputs"))
     for name in cfg.feature_names:
         g = feats.GROUPS[name]
         if g.role == "past" and not fam.past_covariates:
@@ -160,15 +170,19 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
         out.append(Issue("invalid", "context", f"{cfg.context_days} days; choose {lo}–{hi} days"))
     if data is None:
         return out
-    if cfg.conditioning != "none":
+    if cfg.conditioning != "none" or correction:
         if not data.arome_issued_h:
-            out.append(Issue("unavailable", "conditioning", data.notes.get(
+            out.append(Issue("unavailable", "prediction_target" if correction else "conditioning", data.notes.get(
                 "arome", "no saved AROME run for this forecast time")))
         elif cfg.horizon_h > data.arome_issued_h:
             out.append(Issue("unavailable", "horizon", f"the AROME run {(data.arome_run or '')[:16].replace('T', ' ')}"
                                                        f" UTC ends {data.arome_issued_h} h after this forecast time; "
                                                        "AROME inputs are never extended (choose ≤ "
-                                                       f"{data.arome_issued_h} h, or no AROME conditioning)"))
+                                                       f"{data.arome_issued_h} h"
+                                                       + (")" if correction else ", or no AROME conditioning)")))
+    if correction and not data.arome_history:
+        out.append(Issue("unavailable", "prediction_target", "AROME error prediction needs observed errors from "
+                         "qualifying archived forecasts; no archived error history exists before this origin"))
     need = {"arome_history": (data.arome_history, "no archived AROME forecast was available before this forecast "
                                                   "time (needed even without AROME conditioning)"),
             "aux_history": (data.aux, "no dew point / cloud observations are installed for this experiment"),
@@ -184,8 +198,11 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
 def describe(cfg: ForecastConfig, conditioning_names: dict | None = None) -> str:
     """Compact readable summary (used for labels of applied results)."""
     cond = (conditioning_names or {}).get(cfg.conditioning, cfg.conditioning)
+    if cfg.prediction_target == "arome_error" and cfg.conditioning == "none":
+        cond = "no additional AROME covariates"
     fl = ", ".join(_feature_text(n, dict(p)) for n, p in cfg.features) or "no additional features"
-    return (f"{cfg.model} · {cond} · {fl} · calendar {'on' if cfg.calendar else 'off'} · context "
+    method = f"{PREDICTION_TARGETS[cfg.prediction_target]} · " if cfg.prediction_target != "weather" else ""
+    return (f"{cfg.model} · {method}{cond} · {fl} · calendar {'on' if cfg.calendar else 'off'} · context "
             f"{cfg.context_days} d ({cfg.context_days * 24 // cfg.step_hours} steps) · horizon {cfg.horizon_h} h")
 
 

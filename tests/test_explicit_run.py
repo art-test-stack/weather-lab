@@ -133,19 +133,25 @@ class FakeForecaster:
 
     def __call__(self, obs, case, variables, size, context_days, calendar, arome_mode=None, arome_df=None,
                  horizon_steps=16, step_hours=3, allow_download=False, device="cpu", use_cache=True,
-                 lookup_only=False, features=None, aux_df=None, station_coords=None):
+                 lookup_only=False, features=None, aux_df=None, station_coords=None, prediction_target="weather"):
         self.calls += 1
-        key = (case.name, size, context_days, calendar, arome_mode, horizon_steps, repr(features))
+        key = (case.name, size, context_days, calendar, arome_mode, horizon_steps, repr(features), prediction_target)
         mid = f"exploratory {size} ctx{context_days}d h{horizon_steps * step_hours} {sorted(features or {})}"
+        if prediction_target == "arome_error":
+            mid += " +AROME error correction"
         hit = key in self.cache
         if not hit:
             if lookup_only:
                 return None, {"cache_hit": False, "key": "k", "model": mid, "settings": {}}
             self.inference += 1
-            self.cache[key] = _frame(mid, case, horizon_steps * step_hours)
+            frame = _frame(mid, case, horizon_steps * step_hours)
+            if prediction_target == "arome_error":
+                frame["arome_baseline"] = frame["point"] - .5
+                frame["predicted_error"] = .5
+            self.cache[key] = frame[frame["variable"].isin(variables)].copy()
         st = {"checkpoint": size, "context_days": context_days, "context_steps": context_days * 8,
               "horizon_steps": horizon_steps, "step_hours": step_hours, "calendar": calendar,
-              "arome_mode": arome_mode, "features": list(features or {})}
+              "arome_mode": arome_mode, "features": list(features or {}), "prediction_target": prediction_target}
         return self.cache[key].assign(model=mid), {"cache_hit": hit, "key": "k", "model": mid, "settings": st}
 
 
@@ -183,7 +189,7 @@ def _run(app, d, applied):
 EDITS = {"station": "07110", "variable": "pmer", "size": "28M", "conditioning": "none",
          "features": ["resid", "atmos", "solar", "tend"], "calendar": False, "ctx": 45, "horizon": 24,
          "resid_vars": ["t"], "atmos_fields": ["td"], "tend_lags": [6, 12], "overlays": ["persistence"],
-         "band": "", "error_mode": "signed"}
+         "band": "", "error_mode": "signed", "prediction_target": "arome_error"}
 
 
 @needs_example
@@ -241,10 +247,13 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
         return fn
 
     draft_ids = {c._id for c in h["draft"]}
+    edit_ids = draft_ids | {c._id for c in h["advanced"]}
     for fn in fns.values():
         r = root(fn)
         writes = {o._id for o in fn.outputs} & protected
         roots = {(t[0], t[1]) for t in r.targets}
+        if any(t[0] in edit_ids and t[1] == "input" for t in roots):
+            assert fn.show_progress == "hidden", fn.name
         if writes:
             assert roots <= {(h["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
         if any(t[0] in draft_ids for t in roots) and fn.trigger_after is None:
@@ -319,6 +328,73 @@ def test_cache_hit_is_applied_only_by_run_and_display_only_runs_infer_nothing(ap
     assert back["source"] == "saved" and fake.inference == 1
     again, msg, _ = _run(app, d, back)                                    # same configuration: reused
     assert fake.inference == 1 and "cached" in msg and again["primary"] == a1["primary"]
+
+
+@needs_example
+@pytest.mark.parametrize("previous_source", ["saved", "exploratory"])
+def test_error_method_reuses_previous_direct_result_and_exports_each_configuration(
+        app_env, tmp_path, monkeypatch, previous_source):
+    app, fake, counters, previous = app_env
+    if previous_source == "exploratory":
+        previous, _, _ = _run(app, {**previous["draft"], "conditioning": "none", "features": ["tend"]}, previous)
+    direct = previous["primary"]
+    snapshot = repr(previous)
+    d = {**previous["draft"], "prediction_target": "arome_error", "horizon": 24, "features": ["solar", "tend"]}
+    before, n = counters(), fake.inference
+    assert "Changes pending" in app.draft_feedback(*_vals(app, d), previous, {"busy": False})[0]
+    assert counters() == before and repr(previous) == snapshot
+    assert app.saved_match(d, app.draft_config(d)[0]) is None
+    result, msg = app.run_forecast(*_vals(app, d), previous)
+    old, _, changed = app.apply_if_current(result, *_vals(app, {**d, "prediction_target": "weather"}), previous, msg)
+    assert old is previous and not changed  # switching methods during execution invalidates the response
+    a, _, changed = app.apply_if_current(result, *_vals(app, d), previous, msg)
+    assert changed and fake.inference == n + 1 and a["comparison"] == direct
+    assert a["config"].targets == ("t", "pmer") and a["config"].prediction_target == "arome_error"
+    assert {"arome-raw", direct, a["primary"]} <= set(a["view"]["shown"])
+    assert a["view"]["band"] == a["primary"]
+    assert a["configs_by"][direct] == previous["config"] and repr(previous) == snapshot
+    if previous_source == "exploratory":
+        pd.testing.assert_frame_equal(a["exploratory"][direct], previous["exploratory"][direct])
+    monkeypatch.setattr(app, "ROOT", tmp_path)
+    _, _, fig, caption, _, _, csv, _, cards, _ = app.render(a)
+    assert "AROME + predicted error" in app.applied_text(a) and "AROME + predicted error" in cards
+    assert "Previous direct prediction retained" in caption and "previously applied forecast" in cards
+    assert {"arome-raw", direct, a["primary"]} <= {t.legendgroup for t in fig.data}
+    assert app.model_style(a["primary"]) != app.model_style(direct)
+    corrected_traces = [t for t in fig.data if t.legendgroup == a["primary"]]
+    assert corrected_traces and all(t.line.color == "#6250d6" for t in corrected_traces)
+    assert all(t.name == "Timestral 209M · AROME error correction" for t in corrected_traces if t.meta != "bridge")
+    assert all(t.fillcolor.startswith("rgba(98,80,214,") for t in fig.data if t.legendgroup == "band")
+    out = pd.read_csv(csv)
+    methods = out.groupby("model")["prediction_method"].first()
+    assert methods[a["primary"]] == "arome_error" and methods[direct] == "weather" and methods["arome-raw"] == "raw_arome"
+    assert out[out.model == direct]["forecast_configuration"].str.contains("AROME + predicted error", regex=False).sum() == 0
+    assert out[out.model == a["primary"]]["forecast_configuration"].str.contains("AROME + predicted error", regex=False).all()
+    corrected = out[out.model == a["primary"]]
+    np.testing.assert_allclose(corrected["point"], corrected["arome_baseline"] + corrected["predicted_error"])
+    assert (corrected["inference_horizon_h"] == 24).all()
+    assert (out[out.model == direct]["inference_horizon_h"] == 48).all()
+    # Presentation-only Run keeps the comparison and uses no new predictions.
+    a2, msg, _ = _run(app, {**d, "variable": "pmer", "error_mode": "signed"}, a)
+    assert "same forecast" in msg and fake.inference == n + 1 and a2["comparison"] == direct
+    back, _, _ = _run(app, previous["draft"], a2)
+    again, msg, _ = _run(app, d, back)
+    assert "cached" in msg and fake.inference == n + 1 and again["comparison"] == direct
+
+
+@needs_example
+def test_error_method_reports_baseline_history_and_horizon_limits(app_env):
+    app, _, counters, a = app_env
+    d = {**a["draft"], "prediction_target": "arome_error", "conditioning": "none"}
+    assert app.horizon_limit(d["suite"], d["case"], "none", "arome_error")[0] == 48
+    cfg, issues = app.draft_config(d)
+    assert issues == [] and cfg.prediction_target == "arome_error"
+    assert any(i.subject == "horizon" for i in app.draft_config({**d, "horizon": 72})[1])
+    assert any("wind baseline" in i.message for i in app.draft_config({**d, "variable": "u"})[1])
+    no_history = Availability(arome_issued_h=48, arome_run=ALL_DATA.arome_run)
+    assert any("archived error history" in i.message for i in check(cfg, no_history))
+    direct = ForecastConfig.make(cfg.model, targets=cfg.targets, horizon_h=cfg.horizon_h)
+    assert cfg.forecast_part() != direct.forecast_part()
 
 
 @needs_example

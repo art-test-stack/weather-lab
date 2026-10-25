@@ -79,9 +79,12 @@ def test_lockfile_matches_what_the_spaces_builder_installs():
 
 
 def _applied(size="28M", setup="archived", source="saved", primary=None, exploratory=None, case="c1"):
+    from weather_lab.forecast_config import ForecastConfig
+
     return {"suite": "arome-issued-v2", "case": case, "size": size, "setup": setup, "ctx": 30, "horizon": 48,
             "source": source, "primary": primary or f"timestral-{size.lower()}-mv-cal-arome-{setup}",
-            "settings": {}, "exploratory": exploratory or {}, "shown_h": 48}
+            "settings": {}, "exploratory": exploratory or {}, "shown_h": 48,
+            "config": ForecastConfig.make(f"Timestral-{size}", setup)}
 
 
 def test_explorer_overlays_persist_across_variables_views_and_exploratory_runs(monkeypatch):
@@ -111,7 +114,8 @@ def test_explorer_overlays_persist_across_variables_views_and_exploratory_runs(m
     _, value, _, band = app.select_systems(b, "t", pref, "timestral-28m-mv-cal")
     assert value == ["persistence", "arome-raw", "timestral-209m-mv-cal"] and band == "timestral-209m-mv-cal"
     mid = "exploratory Timestral-209M ctx14d h72 [cpu]"
-    e = _applied("209M", "none", source="exploratory", primary=mid, exploratory={mid: pd.DataFrame()})
+    e = _applied("209M", "none", source="exploratory", primary=mid,
+                 exploratory={mid: pd.DataFrame({"variable": ["t"]})})
     _, value, _, band = app.select_systems(e, "t", pref, "timestral-209m-mv-cal")
     assert mid in value and band == mid                                      # interval source = applied result
 
@@ -125,6 +129,29 @@ def test_labels_cover_every_configured_system():
            for m in (yaml.safe_load(open(p)) or {}).get("models", []) or []}
     missing = sorted(i for i in ids if i not in MODELS or i not in STYLE)
     assert not missing, f"systems without a readable name or colour: {missing}"
+
+
+def test_custom_forecast_names_and_colours_distinguish_prediction_methods():
+    from weather_lab_app.labels import model_description, model_name, model_style
+
+    for size in ("28M", "209M"):
+        direct = f"exploratory Timestral-{size} ctx90d h48 +resid +atmos +solar +tend [cuda]"
+        assert model_name(direct) == f"Timestral {size} · direct"
+        assert model_style(direct)[0] == "#184f95"
+        for conditioning in ("archived history", "observed history", "forecast only"):
+            conditioned = direct.replace(" +resid", f" +AROME {conditioning} +resid")
+            correction = conditioned.replace(" [cuda]", " +AROME error correction [cuda]")
+            assert model_name(conditioned) == f"Timestral {size} · direct + AROME"
+            assert model_name(correction) == f"Timestral {size} · AROME error correction"
+            assert model_name(correction.replace("ctx90d", "ctx30d").replace("[cuda]", "[cpu]")) == model_name(correction)
+            assert model_style(conditioned)[0] == "#0f7a54"
+            assert model_style(correction) == ("#6250d6", "solid", 2.8)
+            assert "outside the frozen benchmark" in model_description(correction)
+        unconditioned_correction = direct.replace(" [cuda]", " +AROME error correction [cuda]")
+        assert model_name(unconditioned_correction) == f"Timestral {size} · AROME error correction"
+        assert model_style(unconditioned_correction) == model_style(correction)
+    assert model_name("timestral-209m-mv-cal-arome-archived") == "Timestral 209M + AROME"
+    assert model_name("future-model") == "future-model"
 
 
 def _fake_v2_run(mae_by_model: dict[str, float], variable: str = "t", extra_models: tuple = ()):
