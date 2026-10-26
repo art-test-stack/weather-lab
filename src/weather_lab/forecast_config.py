@@ -141,6 +141,9 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
         return [Issue("unsupported", "model", f"{cfg.model} is not a registered checkpoint")]
     if fam.status != "integrated":
         return [Issue("unsupported", "model", f"{fam.name} is not integrated yet (no adapter)")]
+    if ck.family == "t0" and cfg.conditioning == "substobs":
+        out.append(Issue("unsupported", "conditioning", "t0 requires archived AROME history or explicitly "
+                         "missing history; substituted observations are unsupported"))
     if cfg.conditioning != "none" and not fam.known_covariates:
         out.append(Issue("unsupported", "conditioning", f"{fam.name} takes no known-future covariates"))
     if cfg.calendar and not fam.known_covariates:

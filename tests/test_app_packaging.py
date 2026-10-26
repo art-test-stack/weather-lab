@@ -255,8 +255,11 @@ def test_checkpoint_selector_hidden_where_both_checkpoints_are_already_shown(mon
 
 
 def test_input_setup_switches_conditioned_system_and_reports_not_run(monkeypatch):
+    from dataclasses import replace
+    from weather_lab import models
     from weather_lab_app import main as app
 
+    monkeypatch.setitem(models.FAMILIES, "t0", replace(models.FAMILIES["t0"], status="planned"))
     monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})   # no 209M observed-history run
     v = app.experiment_view("arome-issued-v2", "28M", "substobs")
     assert v["headline"] == ["arome-raw", "timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-substobs"]

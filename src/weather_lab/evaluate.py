@@ -46,6 +46,20 @@ def _timestral(mid: str, spec: dict, cfg: Config) -> Adapter:
                      arome_fields=(cfg.get("arome") or {}).get("fields"), batch_size=tcfg.get("batch_size", 32), **spec)
 
 
+def _t0(mid: str, spec: dict, cfg: Config) -> Adapter:
+    from weather_lab.models import CHECKPOINTS
+    from weather_lab.t0_adapter import T0
+
+    ck, runtime = CHECKPOINTS["t0-gamma"], cfg.get("t0") or {}
+    return T0(mid, cfg["variables"], targets=spec.pop("targets"),
+              checkpoint=spec.pop("checkpoint", runtime.get("checkpoint", ck.repo)),
+              revision=spec.pop("revision", runtime.get("revision", ck.revision)),
+              context_days=spec.pop("context_days", cfg["forecast"]["context_days"]),
+              calendar=spec.pop("calendar", False), arome=spec.pop("arome", None),
+              arome_fields=(cfg.get("arome") or {}).get("fields"),
+              batch_size=spec.pop("batch_size", runtime.get("batch_size", 8)), **spec)
+
+
 # Config `kind` -> constructor(id, remaining spec, config). A new model family adds one entry (and its
 # adapter class); scoring, storage, caching and the app read only the shared output schema.
 ADAPTERS = {
@@ -54,6 +68,7 @@ ADAPTERS = {
     "climatology": lambda mid, spec, cfg: Climatology(mid, cfg["variables"], **spec),
     "arome": lambda mid, spec, cfg: AromeRaw(mid, cfg["variables"], fields=cfg["arome"]["fields"]),
     "timestral": _timestral,
+    "t0": _t0,
     "arome_biascorr": lambda mid, spec, cfg: AromeBiasCorrected(mid, cfg["variables"], fields=cfg["arome"]["fields"],
                                                                 **spec),
 }

@@ -516,7 +516,7 @@ class Timestral(Adapter):
 def _registry() -> dict:
     from weather_lab.models import CHECKPOINTS as REGISTRY
 
-    return REGISTRY
+    return {name: ck for name, ck in REGISTRY.items() if ck.family == "timestral"}
 
 
 CHECKPOINTS = {k: (c.repo, c.revision, c.mb) for k, c in _registry().items()}   # (repo, revision, MB)
