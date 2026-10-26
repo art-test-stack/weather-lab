@@ -12,6 +12,9 @@ wheels/
 .tmp
 # Virtual environments
 .venv
+docs/
+experiments
+.DS_Store
 
 # Bulk data, caches, runs and weights (never committed)
 data/raw/

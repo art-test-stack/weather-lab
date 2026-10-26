@@ -110,6 +110,11 @@ DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-2
 
 
 def model_name(mid: str) -> str:
+    if mid.startswith("timestral-dev "):
+        _, ck, target, conditioning, _ = mid.split()
+        method = "AROME error correction" if target == "arome_error" else \
+            "direct + AROME" if conditioning != "none" else "direct"
+        return f"{ck.replace('-', ' ')} · {method} (development)"
     if mid.startswith("exploratory "):
         checkpoint = mid.split()[1].replace("Timestral-", "Timestral ")
         method = "AROME error correction" if "+AROME error correction" in mid else \
@@ -119,6 +124,8 @@ def model_name(mid: str) -> str:
 
 
 def model_description(mid: str) -> str:
+    if mid.startswith("timestral-dev "):
+        return "Explicit full-suite development run with recorded configuration; inference only, no local fine-tuning."
     if mid.startswith("exploratory"):
         if "+AROME error correction" in mid:
             return ("Issued AROME + Timestral-predicted observation-minus-AROME error; archived error history, "
@@ -128,6 +135,9 @@ def model_description(mid: str) -> str:
 
 
 def model_style(mid: str) -> tuple[str, str, float]:
+    if mid.startswith("timestral-dev "):
+        _, _, target, conditioning, _ = mid.split()
+        return ("#6250d6" if target == "arome_error" else "#0f7a54" if conditioning != "none" else "#184f95", "solid", 2.8)
     if mid.startswith("exploratory"):
         if "+AROME error correction" in mid:
             return ("#6250d6", "solid", 2.8)

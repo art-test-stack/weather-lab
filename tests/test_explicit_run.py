@@ -276,7 +276,7 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     assert {v for _, v in main_metric.choices} == {"mae", "rmse"}
     assert {"mae", "rmse"} <= {v for _, v in h["benchmark_metric"].choices}
     assert any(c.get("props", {}).get("label") == "Forecast" for c in demo.config["components"])
-    overview = h["render"][:-1]                                     # the last output is the Benchmark tab's variable
+    overview = h["render"]
     protected = {h["applied"]._id} | {c._id for c in overview if c not in h["draft"]}
     fns = demo.fns
 
@@ -304,9 +304,93 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     worker = next(f for f in fns.values() if f.fn is app.run_captured)
     assert worker.trigger_only_on_success and worker.inputs == [h["captured_request"]]
     assert any(f.fn is app.finish_forecast for f in fns.values())
-    matrices = [f for f in fns.values() if f.fn is app.matrix_html]
-    assert matrices and all(f.inputs[-1] is h["benchmark_metric"] for f in matrices)
-    assert any((h["benchmark_metric"]._id, "input") in root(f).targets for f in matrices)
+    from weather_lab_app import benchmark as bench
+
+    b = h["benchmark"]
+    assert not draft_ids & {c._id for c in b["draft"]}
+    protected_b = {b["applied"]._id} | {c._id for c in b["render"]}
+    for fn in fns.values():
+        roots = {(t[0], t[1]) for t in root(fn).targets}
+        if {o._id for o in fn.outputs} & protected_b:
+            assert roots <= {(b["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
+        if roots & {(c._id, "input") for c in b["draft"]}:
+            assert not ({o._id for o in fn.outputs} & protected_b)
+            assert fn.fn in (bench.feedback, bench.on_suite, bench.on_saved)
+            assert fn.show_progress == "hidden"
+    click = [f for f in fns.values() if (b["run"]._id, "click") in f.targets]
+    assert len(click) == 1 and click[0].fn is bench.begin and click[0].trigger_mode == "once"
+    worker = next(f for f in fns.values() if f.fn is bench.execute)
+    assert worker.trigger_only_on_success and worker.inputs == [b["captured_request"]]
+
+
+@needs_example
+def test_benchmark_owns_its_draft_capture_guard_and_applied_result(app_env, tmp_path, monkeypatch):
+    from weather_lab_app import benchmark as bench
+
+    app, _, counters, forecast = app_env
+    d = bench.defaults(forecast["suite"])
+    previous = {"draft": d, "config": bench.configuration(d), "path": str(app.RUNS[d["suite"]].path), "kind": "frozen"}
+    guard = {"busy": False}
+    vals = lambda v: [v[k] for k in bench.KEYS]
+    before = counters()
+    monkeypatch.setattr(bench.development, "saved_runs", lambda suite: [])
+    calls = []
+
+    def run(source, cfg, **kw):
+        calls.append((source, cfg))
+        return tmp_path / "development-run"
+
+    monkeypatch.setattr(bench.development, "run", run)
+    for key, value in (("size", "28M"), ("prediction_target", "arome_error"), ("conditioning", "none"),
+                       ("features", ["tend"]), ("calendar", False), ("ctx", 90), ("horizon", 24),
+                       ("resid_vars", ["t"]), ("atmos_fields", ["td"]), ("tend_lags", [3]),
+                       ("variable", "pmer"), ("metric", "rmse"), ("lead", "6"), ("station", "07110"),
+                       ("season", "SON"), ("statuses", [app.STATUSES[0]]), ("lead_mode", "cumulative")):
+        text, button = bench.feedback(*vals({**d, key: value}), previous, guard)
+        assert "pending" in text and button["interactive"]
+    assert not calls and counters() == before
+    request, _, _ = bench.begin(*vals(d), previous, guard)
+    edited = {**d, "metric": "rmse", "features": ["tend"]}
+    assert not bench.feedback(*vals(edited), previous, guard)[1]["interactive"]
+    with pytest.raises(Exception, match="already running"):
+        bench.begin(*vals(edited), previous, guard)
+    result, message = bench.execute(request)
+    assert len(calls) == 1 and calls[0][1] == previous["config"]
+    assert bench.apply(result, *vals(edited), previous, message)[0] is previous
+    applied, _, changed = bench.apply(result, *vals(d), previous, message)
+    assert changed and applied["kind"] == "development"
+    bench.finish(*vals(d), applied, guard)
+    assert not guard["busy"] and counters() == before
+    display_only = {**d, "metric": "rmse"}
+    reused, _ = bench.execute({"draft": display_only, "applied": applied})
+    assert reused["path"] == applied["path"] and len(calls) == 1
+    bench.execute({"draft": display_only, "applied": reused})
+    assert len(calls) == 2  # unchanged settings + Rerun deliberately executes a new full-suite run
+    monkeypatch.setattr(bench.development, "run", lambda *a, **kw: (_ for _ in ()).throw(ValueError("fixture failure")))
+    failed, message = bench.execute({"draft": d, "applied": previous})
+    assert failed is None and "displayed result is unchanged" in message
+    assert bench.apply(failed, *vals(d), previous, message) == (previous, message, False)
+
+    # Saved replay fills only the draft, verifies artifacts and never calls the runner.
+    from weather_lab.common import sha256_file, write_json
+
+    saved = tmp_path / "saved"
+    saved.mkdir()
+    artifact = saved / "predictions.parquet"
+    artifact.write_bytes(b"fixture artifact")
+    write_json(saved / "run.json", {"forecast_config": previous["config"].as_dict(),
+                                   "files_sha256": {artifact.name: sha256_file(artifact)}})
+    monkeypatch.setattr(bench.development, "saved_runs", lambda suite: [("fixture", str(saved))])
+    assert bench.on_saved(str(saved), d["suite"])[:7] == (
+        d["size"], d["prediction_target"], d["conditioning"], d["features"], d["calendar"], d["ctx"], d["horizon"])
+    replay = {**d, "saved": str(saved)}
+    result, message = bench.execute({"draft": replay, "applied": previous})
+    assert result["path"] == str(saved) and "Replayed" in message and len(calls) == 2
+    failed, message = bench.execute({"draft": {**replay, "ctx": 45}, "applied": previous})
+    assert failed is None and "Settings differ" in message
+    artifact.write_bytes(b"changed")
+    failed, message = bench.execute({"draft": replay, "applied": previous})
+    assert failed is None and "checksum" in message
 
 
 @needs_example
@@ -398,7 +482,7 @@ def test_error_method_reuses_previous_direct_result_and_exports_each_configurati
     if previous_source == "exploratory":
         pd.testing.assert_frame_equal(a["exploratory"][direct], previous["exploratory"][direct])
     monkeypatch.setattr(app, "ROOT", tmp_path)
-    _, _, fig, caption, _, _, csv, _, cards, _ = app.render(a)
+    _, _, fig, caption, _, _, csv, _, cards = app.render(a)
     assert "AROME + predicted error" in app.applied_text(a) and "AROME + predicted error" in cards
     assert "Previous direct prediction retained" in caption and "previously applied forecast" in cards
     assert {"arome-raw", direct, a["primary"]} <= {t.legendgroup for t in fig.data}
@@ -467,7 +551,7 @@ def test_chart_cards_intervals_captions_and_export_share_one_applied_configurati
     app, fake, counters, a0 = app_env
     d = {**a0["draft"], "conditioning": "none", "features": ["tend"], "horizon": 72, "error_mode": "signed"}
     a, _, _ = _run(app, d, a0)
-    systems, band, fig, caption, this, desc, csv, smap, cards, bvar = app.render(a)
+    systems, band, fig, caption, this, desc, csv, smap, cards = app.render(a)
     mid = a["primary"]
     assert band["value"] == mid and mid in systems["value"]
     shaded = [t for t in fig.data if t.legendgroup == "band" and t.fill == "toself"]

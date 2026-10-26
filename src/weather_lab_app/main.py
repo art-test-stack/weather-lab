@@ -2,8 +2,8 @@
 
 Forecast (landing): what is compared, a large forecast chart and headline numbers for the selected
 experiment. Benchmark: a compact comparison, details below. Methods: scope, definitions, exact
-identifiers, previous versions and integrity details. Nothing here runs the benchmark; the only
-model call is the optional exploratory forecast, labelled as such.
+identifiers, previous versions and integrity details. Explicit development benchmarks are saved
+separately; frozen results are replayed unchanged.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab.common import ROOT, VARIABLES, sha256_text
+from weather_lab_app import benchmark as bench
 from weather_lab_app import plots
 from weather_lab_app.labels import (CHECKPOINTS, DEFAULT_EXPERIMENT, DIFFERENT_INPUT, EXPERIMENTS, MODELS,
                                     SEASON_NAMES, SETUP_NAMES, SPLIT_NAMES, model_description, model_name,
@@ -795,13 +796,13 @@ def select_systems(a: dict, variable: str, pref_by: dict | None, band: str | Non
 def render(applied, changed=True):
     """Every Forecast output from the applied result, in one step. Skipped when nothing was applied."""
     if not changed:
-        return tuple(gr.skip() for _ in range(10))
+        return tuple(gr.skip() for _ in range(9))
     a = applied
     v = a["view"]
     fig, caption, this, desc, csv, smap = overview(a, v["variable"], v["shown"], v["band"], v["error_mode"])
     return (gr.update(choices=[(model_name(m), m) for m in v["choices"]], value=v["shown"]),
             gr.update(choices=[("none", "")] + [(model_name(m), m) for m in v["prob"]], value=v["band"]),
-            fig, caption, this, desc, csv, smap, cards_html(a, v["variable"]), v["variable"])
+            fig, caption, this, desc, csv, smap, cards_html(a, v["variable"]))
 
 
 def _utc(df: pd.DataFrame) -> pd.DataFrame:
@@ -1135,22 +1136,31 @@ def finding(suite: str, variable: str, split: str | None = None, setup: str | No
             f"{' '.join(notes)}</div>")
 
 
-def lead_view(suite, variable, metric, station, split, statuses, size=None, setup=None, cumulative=False):
+def lead_view(suite, variable, metric, station, split, statuses, size=None, setup=None, cumulative=False, run=None):
     """Score against lead, recomputed from saved predictions on the matched cases of the compared systems."""
     from weather_lab.horizon import by_lead, lead_ranges, scored_rows
 
-    run, e = RUNS[suite], experiment_view(suite, size, setup)
+    run, e = run or RUNS[suite], experiment_view(suite, size, setup)
+    if run.run.get("development"):
+        e = {**e, "headline": run.models,
+             "reference": "arome-raw" if "arome-raw" in _saved_models(run, variable) else "persistence"}
     split = split or run.splits[-1]
-    models = [m for m in _saved_models(run, variable) if training_status(m) in (statuses or STATUSES)]
+    all_models = _saved_models(run, variable)
+    models = [m for m in all_models if training_status(m) in (statuses or STATUSES)]
     kind = plots.METRICS[metric][2]
     if kind == "prob":
         preds = run.predictions()
         prob = set(preds.loc[preds["output_type"] == "quantiles", "model"])
         models = [m for m in models if m in prob]
+        all_models = [m for m in all_models if m in prob]
     if not models:
         return plots.metric_by_lead(pd.DataFrame(columns=["model"]), metric, variable, []), ""
-    rows = scored_rows(run.predictions(), run.targets(), run.cases(), variable, models, metric, station, split)
+    rows = scored_rows(run.predictions(), run.targets(), run.cases(), variable,
+                       all_models if run.run.get("development") else models, metric, station, split)
+    if rows.empty:
+        return plots.metric_by_lead(pd.DataFrame(columns=["model"]), metric, variable, []), "No matched observed pairs."
     table = by_lead(rows, metric, cumulative=bool(cumulative))
+    table = table[table.model.isin(models)]
     primary = list(dict.fromkeys(e["headline"] + [e["reference"]]))
     fig = plots.metric_by_lead(table, metric, variable, models, primary, bool(cumulative))
     n_per = table.groupby("lead_h")["n_cases"].max()
@@ -1258,8 +1268,11 @@ def context_label(run, models: list[str]) -> str:
 
 
 def benchmark(suite, variable, metric, lead, split, station, season, statuses, size=None, setup=None,
-              lead_mode="at"):
-    run, e = RUNS[suite], experiment_view(suite, size, setup)
+              lead_mode="at", run=None):
+    run, e = run or RUNS[suite], experiment_view(suite, size, setup)
+    development = run.run.get("development")
+    if development:
+        e = {**e, "reference": "arome-raw" if "arome-raw" in _saved_models(run, variable) else "persistence"}
     cumulative = lead_mode == "cumulative"
     split = split or run.splits[-1]
     kind = plots.METRICS[metric][2]
@@ -1269,7 +1282,7 @@ def benchmark(suite, variable, metric, lead, split, station, season, statuses, s
     ref = e["reference"] if e["reference"] in set(t["model"]) else None
     hatched = frozenset(m for m in t["model"] if m in DIFFERENT_INPUT)
     bars = plots.comparison_bars(t, metric, variable, ref, hatched)
-    lines, horizon_txt = lead_view(suite, variable, metric, station, split, statuses, size, setup, cumulative)
+    lines, horizon_txt = lead_view(suite, variable, metric, station, split, statuses, size, setup, cumulative, run)
     n = int(t["n"].max()) if len(t) else 0
     na = run.tables.get("probabilistic_not_applicable", pd.DataFrame())
     na_names = sorted({model_name(m) for m in na.get("model", [])}) if kind == "prob" else []
@@ -1287,15 +1300,11 @@ def benchmark(suite, variable, metric, lead, split, station, season, statuses, s
                + " In the lead-time chart, click a legend entry to show or hide a system."
                + (" The lead-time chart covers every season." if season != "ALL" else "")
                + "\n\n" + context_label(run, list(t["model"])))
-    return (finding(suite, variable, split, setup, metric), summary, bars, lines, horizon_txt,
+    result_finding = ("<div class='finding'>Development benchmark on the selected suite's cases; "
+                      "no local fine-tuning or held-out performance claim.</div>" if development else
+                      finding(suite, variable, split, setup, metric))
+    return (result_finding, summary, bars, lines, horizon_txt,
             *detail_tables(run, split, variable, station, season, lead, statuses, metric))
-
-
-def benchmark_applied(suite, variable, metric, lead, split, station, season, statuses, applied, lead_mode="at"):
-    """Benchmark for the applied model / input setup (never the unapplied draft)."""
-    a = applied if applied and applied.get("suite") == suite else {}
-    return benchmark(suite, variable, metric, lead, split, station, season, statuses, a.get("size", DEFAULT_SIZE),
-                     a.get("setup") or e_main(suite), lead_mode)
 
 
 def detail_tables(run, split, variable, station, season, lead, statuses, metric="mae"):
@@ -1323,8 +1332,8 @@ def detail_tables(run, split, variable, station, season, lead, statuses, metric=
     return point, prob
 
 
-def advanced_tables(suite, variable, split):
-    run = RUNS[suite]
+def advanced_tables(suite, variable, split, run=None):
+    run = run or RUNS[suite]
     split = split or run.splits[-1]
     a = run.tables["availability"]
     a = a[(a["split"] == split) & (a["variable"] == variable)]
@@ -1332,6 +1341,8 @@ def advanced_tables(suite, variable, split):
                           "Eligible": a["cases_eligible"], "Targets observed": a["observed_targets"],
                           "Failed": a["failed_predictions"], "Scored pairs": a["valid_pairs"]})
     d = run.tables["paired_differences"]
+    d = d.reindex(columns=["split", "variable", "model", "reference", "loss", "lead_h", "mean_diff",
+                           "ci95_low", "ci95_high", "n_blocks"])
     d = d[(d["split"] == split) & (d["variable"] == variable)]
     paired = pd.DataFrame({"System": d["model"].map(model_name), "vs": d["reference"].map(model_name),
                            "Score": d["loss"].map({"abs_err": "abs. error", "pinball": "pinball"}),
@@ -1348,11 +1359,6 @@ def advanced_tables(suite, variable, split):
     hw = (f"CPU timings on {env.get('cpu')} ({env['machine']}), torch {env['torch']}, {env['torch_threads']} "
           "threads. Peak memory is process-wide and cumulative across systems.")
     return avail, paired, rt, hw
-
-
-def downloads(suite: str):
-    p = RUNS[suite].path
-    return str(p / "metrics_point.csv"), str(p / "metrics_probabilistic.csv"), str(p / "manifest.json")
 
 
 # --------------------------------------------------------------------------- methods
@@ -1415,7 +1421,7 @@ def cache_md() -> str:
     ck = "\n".join(f"| {r['checkpoint']} | `{r['repo']}@{r['revision']}` | {'on disk' if r['on_disk'] else 'absent'} "
                    f"| {r['mb']} MB |" for r in st["checkpoints"])
     loaded = ", ".join(f"{r['repo'].split('/')[-1]} on {r['device']} (~{r['approx_mb']} MB)" for r in st["loaded"]) \
-        or "none (benchmark views read saved files; a model loads only for an exploratory run that misses the cache)"
+        or "none (models load only for explicit forecast inference or new development benchmark runs)"
     runs = "\n".join(f"| {EXPERIMENTS.get(s, {}).get('name', s)} | `{r.run['run_id'][:60]}` | {len(r.models)} | "
                      f"{r.source} |" for s, r in RUNS.items())
     pc = st["prediction_cache"]
@@ -1539,7 +1545,7 @@ def on_experiment(suite: str, variable: str | None, station: str | None = None, 
     station = station if station in [s for _, s in stations] else default_station(suite)
     size = size if size in CHECKPOINTS else DEFAULT_SIZE
     conditioning = conditioning if conditioning in AROME_MODES else (e_main(suite) or "none")
-    return (gr.update(choices=vchoices, value=variable), gr.update(choices=vchoices, value=variable),
+    return (gr.update(choices=vchoices, value=variable),
             gr.update(choices=stations, value=station),
             gr.update(choices=date_choices(suite, station), value=default_case(suite, station)),
             scope_html(suite), gr.update(value=default_context(suite, size, conditioning)),
@@ -1554,9 +1560,6 @@ def build() -> gr.Blocks:
         gr.Markdown(f"# Weather-lab\n{INTRO}", elem_id="hero")
         if notice := fallback_notice(BOOT):
             gr.Markdown(f"**Note:** {notice}", elem_classes="note", elem_id="snapshot-fallback")
-        with gr.Row(equal_height=True):
-            exp = gr.Dropdown(experiment_choices(), value=DEFAULT_SUITE, label="Experiment", scale=2, min_width=240)
-        scope = gr.HTML(scope_html(DEFAULT_SUITE), elem_id="scope")
         a0 = initial_applied(DEFAULT_SUITE)
         d0 = a0["draft"]
         applied = gr.State(a0)
@@ -1568,6 +1571,8 @@ def build() -> gr.Blocks:
         with gr.Tabs(selected="overview"):
             # ---------------- forecast
             with gr.Tab("Forecast", id="overview"):
+                exp = gr.Dropdown(experiment_choices(), value=DEFAULT_SUITE, label="Experiment")
+                scope = gr.HTML(scope_html(DEFAULT_SUITE), elem_id="scope")
                 with gr.Group(elem_id="forecast-panel"):
                     with gr.Row(equal_height=True):
                         station = gr.Dropdown(station_choices(DEFAULT_SUITE), value=d0["station"], label="Station",
@@ -1636,14 +1641,52 @@ def build() -> gr.Blocks:
 
             # ---------------- benchmark
             with gr.Tab("Benchmark", id="benchmark"):
+                b0 = bench.defaults(DEFAULT_SUITE)
+                b_applied = gr.State({"draft": b0, "config": bench.configuration(b0),
+                                      "path": str(RUNS[DEFAULT_SUITE].path), "kind": "frozen"})
+                b_guard = gr.State({"busy": False})
+                b_request, b_pending, b_changed = gr.State(None), gr.State(None), gr.State(True)
+                b_exp = gr.Dropdown(experiment_choices(), value=DEFAULT_SUITE,
+                                    label="Suite — run every eligible station and origin")
+                b_saved = gr.Dropdown(bench.choices(DEFAULT_SUITE), value="", label="New run or replay a saved development run")
+                gr.Markdown("Development runs use the writable bucket when mounted; otherwise storage is local and "
+                            "Space restarts remove it. Download results you need to keep. The configured bucket is public.",
+                            elem_classes="note")
+                with gr.Row():
+                    b_ckpt = gr.Radio([(f"Timestral-{s}", s) for s in CHECKPOINTS], value=b0["size"],
+                                      label="Benchmark model (checkpoint)")
+                    b_method = gr.Radio([(label, key) for key, label in PREDICTION_TARGETS.items()],
+                                        value=b0["prediction_target"], label="Benchmark forecast method")
+                with gr.Row():
+                    b_cond = gr.Dropdown(CONDITIONING_CHOICES, value=b0["conditioning"], label="AROME conditioning")
+                    b_features = gr.CheckboxGroup(FEATURE_CHOICES, value=b0["features"], label="Additional feature groups")
+                    b_calendar = gr.Checkbox(b0["calendar"], label="Calendar inputs")
+                with gr.Row():
+                    b_ctx = gr.Slider(*CONTEXT_DAYS, value=b0["ctx"], step=1, label="Benchmark context (days)")
+                    b_length = gr.Slider(3, RUNS[DEFAULT_SUITE].horizon_hours, value=b0["horizon"], step=3,
+                                        label="Benchmark horizon (hours)")
+                with gr.Accordion("Benchmark feature parameters", open=False):
+                    b_resid = gr.CheckboxGroup(list(g["resid"].choices["variables"]), value=b0["resid_vars"],
+                                              label="Recent AROME errors: variables")
+                    b_atmos = gr.CheckboxGroup([("dew point", "td"), ("cloud cover", "cloud")], value=b0["atmos_fields"],
+                                              label="Dew point / cloud: fields")
+                    b_tend = gr.CheckboxGroup([(f"{x} h", x) for x in g["tend"].choices["lags_h"]], value=b0["tend_lags"],
+                                             label="Tendencies: lags")
                 with gr.Row(equal_height=True):
                     b_var = gr.Dropdown(variable_choices(DEFAULT_SUITE), value="t", label="Weather variable",
                                         min_width=160)
                     metric = gr.Dropdown(METRIC_CHOICES, value="mae", label="Main metric", min_width=180)
                     lead = gr.Dropdown(LEADS, value="all", label="Lead time (bars)", min_width=160)
-                    b_station = gr.Dropdown(label="Station", choices=[], min_width=180)
+                    b_station = gr.Dropdown(label="Display station (execution always uses all stations)",
+                                            choices=[("All stations", "ALL")] + station_choices(DEFAULT_SUITE),
+                                            value="ALL", min_width=180)
                     lead_mode = gr.Radio(LEAD_VIEWS, value="at", label="Lead-time chart", min_width=260)
-                    split = gr.Radio([], label="Period", visible=False, min_width=200)
+                    split = gr.Radio([(SPLIT_NAMES.get(s, s), s) for s in RUNS[DEFAULT_SUITE].splits],
+                                      value=b0["split"], label="Display period", visible=len(RUNS[DEFAULT_SUITE].splits) > 1)
+                b_feedback = gr.Markdown("Settings match the displayed result. Run benchmark executes the full suite.")
+                b_btn = gr.Button("Run benchmark", variant="primary", elem_id="run-benchmark")
+                b_message = gr.Markdown(elem_classes="note")
+                b_label = gr.Markdown(elem_classes="note")
                 b_finding = gr.HTML()
                 b_summary = gr.Markdown(elem_classes="note")
                 bars = gr.Plot(show_label=False)
@@ -1657,10 +1700,16 @@ def build() -> gr.Blocks:
                     with gr.Row():
                         dl_point = gr.DownloadButton("Point scores (CSV)", size="sm")
                         dl_prob = gr.DownloadButton("Probabilistic scores (CSV)", size="sm")
+                        dl_predictions = gr.DownloadButton("Predictions (Parquet)", size="sm")
                         dl_manifest = gr.DownloadButton("Case manifest (JSON)", size="sm")
+                        dl_provenance = gr.DownloadButton("Run provenance (JSON)", size="sm")
+                        dl_cases = gr.DownloadButton("Case availability (CSV)", size="sm")
                 with gr.Accordion("Advanced: filters, availability, uncertainty, timings", open=False):
                     with gr.Row():
-                        b_season = gr.Dropdown(label="Season (bars)", choices=[], min_width=180)
+                        seasons = sorted(set(RUNS[DEFAULT_SUITE].tables["metrics_point"]["season"]),
+                                         key=lambda s: list(SEASON_NAMES).index(s))
+                        b_season = gr.Dropdown(label="Season (bars)",
+                                               choices=[(SEASON_NAMES[s], s) for s in seasons], value="ALL", min_width=180)
                     statuses = gr.CheckboxGroup(STATUSES, value=STATUSES, label="Fitting / adaptation status")
                     avail_tab = gr.Dataframe(interactive=False, label="Availability", wrap=False)
                     paired_tab = gr.Dataframe(interactive=False, label="Paired differences (block bootstrap)",
@@ -1684,26 +1733,20 @@ def build() -> gr.Blocks:
         draft_in = [exp, station, date, var, ckpt, cond, feats_cb, calendar, ctx, horizon, resid_vars, atmos_fields,
                     tend_lags, systems, band, err_mode, method, main_metric]
         feedback_out = [status, horizon, horizon_info, ctx_info, e_btn, feat_note]
-        render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles, b_var]
-        b_inputs = [exp, b_var, metric, lead, split, b_station, b_season, statuses, applied, lead_mode]
-        b_outputs = [b_finding, b_summary, bars, lines, b_horizon, point_tab, prob_tab]
-        exp_outputs = [var, b_var, station, date, scope, ctx, horizon]
+        render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles]
+        b_draft = [b_exp, b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length, b_resid, b_atmos, b_tend,
+                   b_var, metric, lead, split, b_station, b_season, statuses, lead_mode, b_saved]
+        b_outputs = [b_label, b_finding, b_summary, bars, lines, b_horizon, point_tab, prob_tab, matrix,
+                     avail_tab, paired_tab, rt_tab, hw, dl_point, dl_prob, dl_predictions, dl_manifest,
+                     dl_provenance, dl_cases]
+        exp_outputs = [var, station, date, scope, ctx, horizon]
 
         def feedback(event):
             return event.then(draft_feedback, draft_in + [applied, submission], feedback_out, queue=False,
                               show_progress="hidden")
 
-        def refresh_benchmark(event):
-            return (event.then(benchmark_applied, b_inputs, b_outputs, show_progress="hidden")
-                    .then(matrix_html, [exp, b_var, split, metric], matrix, show_progress="hidden")
-                    .then(advanced_tables, [exp, b_var, split], [avail_tab, paired_tab, rt_tab, hw],
-                          show_progress="hidden")
-                    .then(downloads, exp, [dl_point, dl_prob, dl_manifest], show_progress="hidden"))
-
-        # experiment: draft choices + the Benchmark tab (saved tables); the Forecast result stays applied
-        refresh_benchmark(feedback(exp.input(on_experiment, [exp, var, station, ckpt, cond], exp_outputs,
-                                            show_progress="hidden")
-                                   .then(bench_controls, exp, [split, b_station, b_season], show_progress="hidden")))
+        # Forecast edits never apply or redraw either tab's results.
+        feedback(exp.input(on_experiment, [exp, var, station, ckpt, cond], exp_outputs, show_progress="hidden"))
         feedback(station.input(on_station, [exp, station], date, show_progress="hidden"))
         for c in (date, var, ckpt, cond, feats_cb, calendar, ctx, horizon, resid_vars, atmos_fields, tend_lags,
                   systems, band, err_mode, method, main_metric):
@@ -1713,30 +1756,44 @@ def build() -> gr.Blocks:
                        show_progress="hidden")
 
         # Run forecast: the only path that resolves and applies a forecast (one at a time per session)
-        run_evt = (e_btn.click(begin_forecast, draft_in + [applied, submission],
-                               [captured_request, e_btn, e_msg], trigger_mode="once", queue=False)
-                   .success(run_captured, captured_request, [pending_run, e_msg], concurrency_limit=1)
-                   .then(apply_if_current, [pending_run] + draft_in + [applied, e_msg], [applied, e_msg, changed])
-                   .then(render, [applied, changed], render_out)
-                   .then(finish_forecast, draft_in + [applied, submission], feedback_out, queue=False))
-        refresh_benchmark(run_evt)
-        for c in (metric, lead, split, b_station, b_season, statuses, lead_mode):
-            event = c.input(benchmark_applied, b_inputs, b_outputs)
-            if c in (metric, split):
-                event.then(matrix_html, [exp, b_var, split, metric], matrix)
-        b_var.input(benchmark_applied, b_inputs, b_outputs).then(matrix_html, [exp, b_var, split, metric], matrix).then(
-            advanced_tables, [exp, b_var, split], [avail_tab, paired_tab, rt_tab, hw])
-        split.input(advanced_tables, [exp, b_var, split], [avail_tab, paired_tab, rt_tab, hw])
+        (e_btn.click(begin_forecast, draft_in + [applied, submission],
+                     [captured_request, e_btn, e_msg], trigger_mode="once", queue=False)
+         .success(run_captured, captured_request, [pending_run, e_msg], concurrency_limit=1)
+         .then(apply_if_current, [pending_run] + draft_in + [applied, e_msg], [applied, e_msg, changed])
+         .then(render, [applied, changed], render_out)
+         .then(finish_forecast, draft_in + [applied, submission], feedback_out, queue=False))
+        for control in b_draft:
+            if control is b_exp:
+                event = control.input(bench.on_suite, [b_exp, b_var],
+                                      [b_var, split, b_station, b_season, b_saved, b_length], show_progress="hidden")
+            elif control is b_saved:
+                event = control.input(bench.on_saved, [b_saved, b_exp],
+                                      [b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length,
+                                       b_resid, b_atmos, b_tend], show_progress="hidden")
+            else:
+                event = control.input(bench.feedback, b_draft + [b_applied, b_guard], [b_feedback, b_btn],
+                                      queue=False, show_progress="hidden")
+                continue
+            event.then(bench.feedback, b_draft + [b_applied, b_guard], [b_feedback, b_btn],
+                       queue=False, show_progress="hidden")
+        (b_btn.click(bench.begin, b_draft + [b_applied, b_guard], [b_request, b_btn, b_message],
+                     trigger_mode="once", queue=False)
+         .success(bench.execute, b_request, [b_pending, b_message], concurrency_limit=1)
+         .then(bench.apply, [b_pending] + b_draft + [b_applied, b_message], [b_applied, b_message, b_changed])
+         .then(bench.render, [b_applied, b_changed], b_outputs)
+         .then(bench.finish, b_draft + [b_applied, b_guard], [b_feedback, b_btn, b_saved], queue=False))
         cache_btn.click(cache_md, None, cache_box)
 
-        # page load: show the default saved result once (no inference), then the Benchmark tab
-        load = (demo.load(bench_controls, exp, [split, b_station, b_season])
-                .then(render, [applied], render_out))
-        refresh_benchmark(feedback(load)).then(cache_md, None, cache_box)
+        # Page load replays each tab's default saved result once, without inference.
+        load = demo.load(render, [applied], render_out)
+        feedback(load).then(cache_md, None, cache_box)
+        demo.load(bench.render, b_applied, b_outputs)
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
                    "benchmark_metric": metric,
+                   "benchmark": {"draft": b_draft, "applied": b_applied, "run": b_btn, "render": b_outputs,
+                                  "submission": b_guard, "captured_request": b_request},
                    "advanced": [resid_vars, atmos_fields, tend_lags, systems, band, err_mode, show_old]}
     return demo
 

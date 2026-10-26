@@ -3,8 +3,8 @@
 On a ZeroGPU Space (SPACES_ZERO_GPU=true) `spaces` must be imported before CUDA is
 initialised; it then patches torch, and functions decorated with `gpu(...)` get a GPU
 for their duration. Elsewhere the decorator has no effect and inference stays on CPU.
-Only the exploratory forecast runs inside `gpu`; the frozen benchmark results are replayed
-from saved files and never recomputed in the app.
+Explicit Forecast and development Benchmark inference run inside `gpu`; frozen benchmark
+results are replayed from saved files unchanged.
 """
 
 from __future__ import annotations
