@@ -1,0 +1,57 @@
+protocol: hourly-archive-v1
+version: 1
+status: approved_collection_only
+approved: '2026-10-26'
+previous_scope: forecast-2026-scope-v1
+start: '2022-01-01T00:00:00Z'
+end: '2026-10-24T23:00:00Z'
+requested_evaluation_year: 2026
+remaining_2026: Await real observations; the snapshot does not contain the entire year.
+raw_dir: data/raw/hourly-archive-v1
+output_dir: data/processed/hourly-archive-v1
+evidence_dir: data/evidence/hourly-archive-v1
+stations:
+  - {id: '07110', national_id: '29075001', department: '29', name: BREST-GUIPAVAS, lat: 48.453833, lon: -4.391167}
+  - {id: '07149', national_id: '91027002', department: '91', name: ORLY, lat: 48.718, lon: 2.397}
+  - {id: '07190', national_id: '67124001', department: '67', name: STRASBOURG-ENTZHEIM, lat: 48.5495, lon: 7.640333}
+  - {id: '07630', national_id: '31069001', department: '31', name: TOULOUSE-BLAGNAC, lat: 43.621, lon: 1.378833}
+  - {id: '07690', national_id: '06088001', department: '06', name: NICE, lat: 43.648833, lon: 7.209}
+station_identity:
+  rule: Named national stations from the official hourly files; retain five-digit aliases and national IDs separately.
+  forecast_coordinates: Query the actual hourly observation coordinates; record the returned model grid separately.
+  differences_from_frozen_synop: Brest and Orly hourly coordinates differ by 1.875 km and 0.938 km respectively; this is a new dataset, not a replacement extraction for the old suite.
+  history: Preserve coordinate changes per observation; verify historical source positions before selecting cases.
+observations:
+  source: https://www.data.gouv.fr/datasets/donnees-climatologiques-de-base-horaires
+  fields: [t, pmer, ff, dd, u, v]
+  accepted_quality_codes: [0, 1]
+  other_quality_codes: Mask modelling values; retain original values and flags.
+  missing_samples: Keep hourly gaps; never interpolate verification targets.
+  availability: Original publication and revision times absent; a causal replay assumption is still required before benchmarking.
+products: [meteofrance_arome_france, meteofrance_arome_france_hd]
+historical_forecasts:
+  endpoint: https://historical-forecast-api.open-meteo.com/v1/forecast
+  source_kind: stitched_historical_forecast
+  fields: [temperature_2m, pressure_msl]
+  units: {temperature_2m: '°C', pressure_msl: hPa}
+  cell_selection: nearest
+  elevation: nan
+  source_role: Historical series inventory; not a complete issued-run future covariate or a 24/48-hour efficacy test.
+  missing_fields: Retain nulls, including missing HD sea-level pressure; never substitute another product.
+  provenance: Separate station/product response hashes, requested coordinates and returned grid coordinates.
+fifteen_minute:
+  status: Separate benchmark, not implemented by this hourly preparation.
+  products: [AROME France 15 min, AROME France HD 15 min]
+  verification: Genuine matching observations and archive coverage remain to be established.
+selection:
+  validation_test_split: Pending continuous issued-run coverage and prior-use audit; no selection or scoring in this stage.
+  old_periods: Preserve the existing development/observed-result labels for 2023, 2025 and the October development suite.
+  rag: Deferred; no retrieval index and no test-set size change in this stage.
+  contexts: Existing 30/90-day candidates remain distinct; native 24/48-hour forecasts remain distinct.
+budget:
+  existing_global_cpu_cap_minutes: 60
+  collection_stage_cpu_seconds: 240
+  download_cap_MiB: 300
+  model_inference_jobs: 0
+  paid_resources: false
+execution: Manual preparation only; preserve existing suites, model pins, caches, Run-only UI and deployment state.
