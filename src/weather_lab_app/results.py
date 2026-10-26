@@ -297,10 +297,12 @@ def _compute_input_history(run: Run) -> pd.DataFrame:
             rows.append({**base, "summary": "Unknown (context not recorded in this run)"})
             continue
         steps = int(days * 24 // run.step_hours)
+        delay = pd.Timedelta(hours=(sysrec.get("input_alignment") or {}).get("observation_delay_hours", 0))
         variables = [v for v in sysrec.get("variables", []) if v in obs]
         counts = []
         for c in cases.itertuples():
-            o = obs[(obs["station"] == c.station) & (obs["time"] > c.origin - steps * step) & (obs["time"] <= c.origin)]
+            end = c.origin - delay
+            o = obs[(obs["station"] == c.station) & (obs["time"] > end - steps * step) & (obs["time"] <= end)]
             counts.append(int(o[variables].notna().all(axis=1).sum()) if variables else 0)
         counts = pd.Series(counts, dtype=int)
         mode = params.get("arome")
@@ -309,7 +311,8 @@ def _compute_input_history(run: Run) -> pd.DataFrame:
             from weather_lab import arome as arome_mod
 
             origins = cases["origin"].dt.tz_convert(None).to_numpy().astype("datetime64[ns]")
-            times = origins[:, None] + (np.arange(-(steps - 1), 1) * np.timedelta64(run.step_hours, "h"))[None]
+            times = origins[:, None] - delay.to_timedelta64() + (
+                np.arange(-(steps - 1), 1) * np.timedelta64(run.step_hours, "h"))[None]
             vals, _, _ = arome_mod.archived_history(arome, cases["station"].to_numpy(), origins, times, ["t"])
             cov = pd.Series(np.isfinite(vals[:, 0]).mean(axis=1))
         rows.append({**base, "requested_days": days, "requested_steps": steps,

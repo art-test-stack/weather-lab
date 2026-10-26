@@ -17,6 +17,15 @@ SEASONS = {12: "DJF", 1: "DJF", 2: "DJF", 3: "MAM", 4: "MAM", 5: "MAM",
            6: "JJA", 7: "JJA", 8: "JJA", 9: "SON", 10: "SON", 11: "SON"}
 
 
+def observation_delay(cfg: Config) -> pd.Timedelta:
+    """Fixed replay delay; old suites retain their zero-delay input axis."""
+    hours = cfg["forecast"].get("observation_delay_hours", 0)
+    step = cfg["forecast"]["step_hours"]
+    if isinstance(hours, bool) or not isinstance(hours, int) or hours < 0 or step <= 0 or hours % step:
+        raise ValueError("observation_delay_hours must be a nonnegative integer multiple of step_hours")
+    return pd.Timedelta(hours=hours)
+
+
 def split_bounds(cfg: Config) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
     return {k: (ts(a), ts(b)) for k, (a, b) in cfg["splits"].items()}
 
@@ -52,6 +61,7 @@ def case_id(suite: str, station: str, origin: pd.Timestamp) -> str:
 def build_cases(cfg: Config, obs: pd.DataFrame, arome_runs: list[dict] | None = None) -> pd.DataFrame:
     f, e = cfg["forecast"], cfg["eligibility"]
     step = pd.Timedelta(hours=f["step_hours"])
+    delay = observation_delay(cfg)
     t_ctx = f["context_days"] * 24 // f["step_hours"]
     wide = {s: g.set_index("time") for s, g in obs.groupby("station")}
     runs = {r["origin"]: r for r in (arome_runs or [])}
@@ -59,7 +69,8 @@ def build_cases(cfg: Config, obs: pd.DataFrame, arome_runs: list[dict] | None = 
     for origin, split in build_origins(cfg):
         for station in cfg.stations:
             g = wide[station]
-            ctx = g.loc[origin - (t_ctx - 1) * step: origin]
+            history_end = origin - delay
+            ctx = g.loc[history_end - (t_ctx - 1) * step: history_end]
             fut = g.loc[origin + step: origin + f["horizon_steps"] * step]
             row = {"case_id": case_id(cfg.suite, station, origin), "station": station, "origin": origin,
                    "split": split, "season": SEASONS[origin.month]}
@@ -68,7 +79,10 @@ def build_cases(cfg: Config, obs: pd.DataFrame, arome_runs: list[dict] | None = 
                 row[f"ctx_missing_{var}"] = round(1 - ctx[var].notna().sum() / t_ctx, 4)
             # Eligibility uses inputs only (fixed before scoring); missing targets are handled at scoring.
             ev = e["variable"]
-            recent = ctx.loc[origin - pd.Timedelta(hours=e["require_observation_within_hours"]) + step:, ev]
+            recent_start = origin - pd.Timedelta(hours=e["require_observation_within_hours"])
+            if not delay:
+                recent_start += step  # preserve frozen zero-delay eligibility
+            recent = ctx.loc[recent_start:, ev]
             reasons = []
             if not complete_axis:
                 reasons.append("time axis does not cover context+horizon")
@@ -76,7 +90,7 @@ def build_cases(cfg: Config, obs: pd.DataFrame, arome_runs: list[dict] | None = 
                 reasons.append(f"{ev} context observed < {e['min_context_observed_fraction']:.0%}")
             # optional: the fraction must also hold within each shorter window (common set across contexts)
             for days in e.get("windows_days", []):
-                w = ctx.loc[origin - (days * 24 // f["step_hours"] - 1) * step: origin, ev]
+                w = ctx.loc[history_end - (days * 24 // f["step_hours"] - 1) * step: history_end, ev]
                 frac = w.notna().sum() / (days * 24 // f["step_hours"])
                 row[f"ctx_observed_{ev}_{days}d"] = round(float(frac), 4)
                 if frac < e["min_context_observed_fraction"]:
@@ -111,11 +125,12 @@ def case_data_checksum(obs: pd.DataFrame, cases: pd.DataFrame, cfg: Config) -> s
     """Checksum of exactly the observations the cases read (context + verifying targets)."""
     f = cfg["forecast"]
     step = pd.Timedelta(hours=f["step_hours"])
+    delay = observation_delay(cfg)
     t_ctx = f["context_days"] * 24 // f["step_hours"]
     parts = []
     wide = {s: g.set_index("time") for s, g in obs.groupby("station")}
     for c in cases.itertuples():
-        g = wide[c.station].loc[c.origin - (t_ctx - 1) * step: c.origin + f["horizon_steps"] * step,
+        g = wide[c.station].loc[c.origin - delay - (t_ctx - 1) * step: c.origin + f["horizon_steps"] * step,
                                 cfg["variables"]]
         parts.append((np.round(g.to_numpy(dtype=float), 4) + 0.0).tobytes())  # +0.0 folds -0.0
     return sha256_text(b"".join(parts).hex())
@@ -151,6 +166,12 @@ def write_manifest(cfg: Config, obs: pd.DataFrame, data_meta: dict, cases: pd.Da
         "ui_examples": ui_examples(cases),
         "ui_example_rule": "per station x season, earliest eligible origin in the test split",
     }
+    delay = observation_delay(cfg)
+    if delay:
+        manifest["observation_availability"] = (
+            f"declared replay: observations available {delay / pd.Timedelta(hours=1):g} hours after validity; "
+            "history axis shifted by that delay; generated bridge steps excluded from scores and exports; "
+            "original publication and revision timestamps are unknown")
     if arome_meta is not None:
         manifest["arome"] = {k: arome_meta[k] for k in ("file", "sha256", "runs", "grid", "package", "fields",
                                                          "extraction", "availability_rule", "license", "sources")}

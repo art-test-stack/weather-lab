@@ -113,6 +113,9 @@ class T0(Adapter):
                 digest.update(str(value.dtype).encode())
                 digest.update(np.ascontiguousarray(value).tobytes())
         digest.update("|".join(batch.cases.station).encode())
+        if not np.array_equal(batch.decision_origins, batch.origins):
+            digest.update(b"delayed-replay-decision-origins")
+            digest.update(np.ascontiguousarray(batch.decision_origins).tobytes())
         return digest.hexdigest()
 
     def predict(self, batch: CaseBatch) -> ForecastBatch:

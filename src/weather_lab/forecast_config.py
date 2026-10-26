@@ -104,6 +104,8 @@ def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastCo
     """
     from weather_lab.models import CHECKPOINTS
 
+    if (record.get("input_alignment") or {}).get("observation_delay_hours", 0):
+        return None  # the explorer's zero-delay inputs cannot reproduce delayed replay
     p = record.get("params") or {}
     if record.get("kind") != "timestral" or "checkpoint" not in p or "context_days" not in p:
         return None

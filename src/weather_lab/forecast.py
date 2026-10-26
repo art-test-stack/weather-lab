@@ -43,6 +43,8 @@ class CaseBatch:
                   cover) at the same history times (<= origin); context-enrichment inputs only.
     station_coords: optional {station: (lat, lon)} for astronomical features.
     arome_inputs: optional named fields, independent of targets; source runs and availability per field.
+    origins: model-axis anchors (history ends here). cases.origin retains the decision time;
+             delayed replay generates bridge steps which are excluded from exported leads.
     """
 
     cases: pd.DataFrame
@@ -67,6 +69,7 @@ class CaseBatch:
         step = np.timedelta64(self.step_hours, "h")
         # Future targets strictly after the origin; history ends at the origin.
         assert (self.future_times[:, 0] == self.origins + step).all(), "first lead must be origin + 1 step"
+        assert (self.origins <= self.decision_origins).all(), "history ends after the decision time"
         if self.arome is not None:
             assert self.arome.shape == (n, v, self.future_times.shape[1])
         if self.arome_history is not None:
@@ -82,7 +85,8 @@ class CaseBatch:
         if self.aux_history is not None:
             assert self.aux_history.shape == (n, len(self.aux_variables or []), t), "aux history shape"
         if self.arome_inputs is not None:
-            self.arome_inputs.validate(self.origins, self.history_times(), self.future_times)
+            self.arome_inputs.validate(self.origins, self.history_times(), self.future_times,
+                                       self.decision_origins)
 
     def subset(self, sl) -> "CaseBatch":
         pick = (lambda a: None if a is None else a[sl])
@@ -95,6 +99,15 @@ class CaseBatch:
     @property
     def horizon(self) -> int:
         return self.future_times.shape[1]
+
+    @property
+    def decision_origins(self) -> np.ndarray:
+        return (self.cases["origin"].to_numpy(dtype="datetime64[ns]")
+                if "origin" in self.cases else self.origins)
+
+    @property
+    def lead_hours(self) -> np.ndarray:
+        return ((self.future_times - self.decision_origins[:, None]) / np.timedelta64(1, "h")).astype(int)
 
     def history_times(self, length: int | None = None) -> np.ndarray:
         """(N, T) absolute times of the last `length` history steps."""
@@ -154,9 +167,9 @@ class ForecastBatch:
             "suite": suite,
             "case_id": cases["case_id"].to_numpy()[idx_c],
             "station": cases["station"].to_numpy()[idx_c],
-            "origin": pd.to_datetime(batch.origins[idx_c], utc=True),
+            "origin": pd.to_datetime(batch.decision_origins[idx_c], utc=True),
             "valid_time": pd.to_datetime(batch.future_times[idx_c, idx_h], utc=True),
-            "lead_h": (idx_h + 1) * batch.step_hours,
+            "lead_h": batch.lead_hours[idx_c, idx_h],
             "variable": np.array(self.variables)[idx_v],
             "model": self.model,
             "model_revision": self.revision,
@@ -173,7 +186,7 @@ class ForecastBatch:
         for col in ("arome_run", "arome_available_at"):
             if col in cases:
                 df[col] = cases[col].to_numpy()[idx_c]
-        return df
+        return df.loc[df["lead_h"] > 0].reset_index(drop=True)
 
 
 def qcol(level: float) -> str:
@@ -266,7 +279,7 @@ class AromeBiasCorrected(Adapter):
         step = np.timedelta64(batch.step_hours, "h")
         n_used = np.zeros(out.shape, dtype=np.int16)
         for i, c in enumerate(batch.cases.itertuples()):
-            origin = pd.Timestamp(batch.origins[i], tz="UTC")
+            origin = pd.Timestamp(batch.decision_origins[i], tz="UTC")
             run0 = pd.Timestamp(c.arome_run)
             hist_t = pd.DatetimeIndex(batch.history_times()[i], tz="UTC")
             hist_pos = {t: k for k, t in enumerate(hist_t)}
@@ -410,7 +423,7 @@ class Timestral(Adapter):
             if not np.isfinite(history[:, j]).any(axis=-1).all():
                 raise ValueError(f"no observed {name} errors from qualifying archived AROME in this context")
         runs = pd.to_datetime(batch.cases["arome_run"], utc=True).to_numpy(dtype="datetime64[ns]")
-        if np.isnat(runs).any() or (runs > batch.origins).any():
+        if np.isnat(runs).any() or (runs > batch.decision_origins).any():
             raise ValueError("AROME error prediction needs a source run at or before the forecast origin")
         future_leads = (batch.future_times - runs[:, None]) / np.timedelta64(1, "h")
         if not np.isfinite(future_leads).all() or (future_leads <= 0).any():

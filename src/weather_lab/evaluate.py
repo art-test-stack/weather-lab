@@ -27,7 +27,7 @@ from weather_lab.common import (Config, environment, git_revision, load_config, 
 from weather_lab.data import load_observations
 from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeBiasCorrected, AromeRaw, CaseBatch, Timestral, qcol
 from weather_lab.forecast_config import ForecastConfig, _FROM_MODE, build_adapter
-from weather_lab.suite import SEASONS, case_data_checksum, cases_from_manifest, split_bounds
+from weather_lab.suite import SEASONS, case_data_checksum, cases_from_manifest, observation_delay, split_bounds
 
 POINT_REFERENCE = "persistence"
 PROB_REFERENCE = "climatology"
@@ -93,7 +93,8 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
     """Inputs (history <= origin, issued AROME) and, separately, the verifying targets."""
     f = cfg["forecast"]
     step = pd.Timedelta(hours=f["step_hours"])
-    h = f["horizon_steps"]
+    delay = observation_delay(cfg)
+    h = f["horizon_steps"] + int(delay / step)
     variables = cfg["variables"]
     n = len(cases)
     hist = np.full((n, len(variables), history_steps), np.nan, dtype=np.float32)
@@ -102,13 +103,15 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
     for i, c in enumerate(cases.itertuples()):
         g = per_station[c.station]
         start = g.index[0]
-        pos = int((c.origin - start) / step)
-        assert g.index[pos] == c.origin
+        history_end = c.origin - delay
+        pos = int((history_end - start) / step)
+        if pos < 0 or pos >= len(g) or g.index[pos] != history_end:
+            raise ValueError(f"{c.case_id}: observations do not cover the shifted history endpoint")
         if pos - history_steps + 1 < 0 or pos + h >= len(g):
             raise ValueError(f"{c.case_id}: observations do not cover context + horizon")
         hist[i] = g.iloc[pos - history_steps + 1: pos + 1].to_numpy(dtype=np.float32).T
         targets[i] = g.iloc[pos + 1: pos + h + 1].to_numpy(dtype=np.float32).T
-    origins = cases["origin"].to_numpy(dtype="datetime64[ns]")
+    origins = (cases["origin"] - delay).to_numpy(dtype="datetime64[ns]")
     future = origins[:, None] + (np.arange(1, h + 1) * np.timedelta64(f["step_hours"], "h"))[None, :]
     arome_arr, hist_args = None, {}
     if arome_df is not None:
@@ -121,7 +124,7 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
         aux = np.full((n, len(AUX_VARIABLES), history_steps), np.nan, dtype=np.float32)
         per_aux = {s: g.set_index("time")[AUX_VARIABLES] for s, g in aux_df.groupby("station")}
         for i, c in enumerate(cases.itertuples()):
-            times = pd.date_range(end=c.origin, periods=history_steps, freq=step)   # <= origin only
+            times = pd.date_range(end=c.origin - delay, periods=history_steps, freq=step)
             aux[i] = per_aux[c.station].reindex(times).to_numpy(dtype=np.float32).T
         aux_args = {"aux_history": aux, "aux_variables": list(AUX_VARIABLES)}
     batch = CaseBatch(cases.reset_index(drop=True), variables, hist, origins, future, f["step_hours"], arome_arr,
@@ -145,9 +148,11 @@ def arome_inputs(arome_df: pd.DataFrame, cases: pd.DataFrame, origins: np.ndarra
             if var not in fields:
                 continue
             for k in range(h):
-                arome_arr[i, j, k] = a.get((run, c.station, var, c.origin + (k + 1) * step), np.nan)
+                valid = pd.Timestamp(origins[i], tz="UTC") + (k + 1) * step
+                arome_arr[i, j, k] = a.get((run, c.station, var, valid), np.nan)
     hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(step_hours, "h"))[None]
-    vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), origins, hist_times,
+    decisions = cases["origin"].to_numpy(dtype="datetime64[ns]")
+    vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), decisions, hist_times,
                                                    variables)
     return arome_arr, {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}
 
@@ -155,13 +160,14 @@ def arome_inputs(arome_df: pd.DataFrame, cases: pd.DataFrame, origins: np.ndarra
 def targets_frame(batch: CaseBatch, targets: np.ndarray) -> pd.DataFrame:
     n, v, h = targets.shape
     c, j, k = (x.ravel() for x in np.meshgrid(np.arange(n), np.arange(v), np.arange(h), indexing="ij"))
-    return pd.DataFrame({
+    frame = pd.DataFrame({
         "case_id": batch.cases["case_id"].to_numpy()[c],
         "variable": np.array(batch.variables)[j],
-        "lead_h": (k + 1) * batch.step_hours,
+        "lead_h": batch.lead_hours[c, k],
         "valid_time": pd.to_datetime(batch.future_times[c, k], utc=True),
         "observed": targets[c, j, k],
     })
+    return frame.loc[frame["lead_h"] > 0].reset_index(drop=True)
 
 
 def tail_thresholds(fit_obs: pd.DataFrame) -> dict:
@@ -174,12 +180,13 @@ def tail_thresholds(fit_obs: pd.DataFrame) -> dict:
 def observation_windows(obs: pd.DataFrame, cases: pd.DataFrame, history_steps: int, cfg: Config) -> pd.DataFrame:
     """Observations over each eligible case's context + horizon (for plots and exploratory reruns)."""
     step = pd.Timedelta(hours=cfg["forecast"]["step_hours"])
+    delay = observation_delay(cfg)
     keep = []
     for station, g in cases.groupby("station"):
         o = obs[obs["station"] == station]
         m = np.zeros(len(o), dtype=bool)
         for origin in g["origin"]:
-            m |= ((o["time"] > origin - history_steps * step)
+            m |= ((o["time"] > origin - delay - history_steps * step)
                   & (o["time"] <= origin + cfg["forecast"]["horizon_steps"] * step)).to_numpy()
         keep.append(o[m])
     return pd.concat(keep, ignore_index=True)[["station", "time"] + cfg["variables"]]
@@ -297,6 +304,12 @@ def run_evaluation(cfg: Config, log=print, reuse_from: Path | None = None) -> Pa
         rec = a.describe() | {"revision": fb.revision, "wall_s": round(elapsed, 3),
                               "per_case_ms": round(1000 * elapsed / max(len(cases), 1), 3),
                               "peak_rss_mb_after": peak_rss_mb()} | fb.info
+        if cfg["forecast"].get("observation_delay_hours", 0):
+            rec["input_alignment"] = {
+                "observation_delay_hours": cfg["forecast"]["observation_delay_hours"],
+                "generated_steps": batch.horizon, "exported_steps": cfg["forecast"]["horizon_steps"],
+                "bridge": "discard leads at or before the decision origin",
+            }
         if isinstance(a, Timestral):
             rec |= a.latency_probe(batch)
         systems.append(rec)
