@@ -25,7 +25,7 @@ from weather_lab.baselines import Climatology, Persistence, SeasonalNaive
 from weather_lab.common import (Config, environment, git_revision, load_config, now_utc, read_json, sha256_file,
                                 write_json)
 from weather_lab.data import load_observations
-from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeBiasCorrected, AromeRaw, CaseBatch, qcol
+from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeBiasCorrected, AromeRaw, CaseBatch, Timestral, qcol
 from weather_lab.forecast_config import ForecastConfig, _FROM_MODE, build_adapter
 from weather_lab.suite import SEASONS, case_data_checksum, cases_from_manifest, split_bounds
 
@@ -198,7 +198,11 @@ def _same_system(a: Adapter, rec: dict) -> bool:
 
     want = a.describe()
     norm = lambda x: json.loads(json.dumps(x, sort_keys=True, default=str))  # noqa: E731
-    revision = f"{a.checkpoint}@{a.revision[:12]}" if isinstance(a, Timestral) else a.revision
+    revision = a.revision
+    if isinstance(a, Timestral):
+        revision = f"{a.checkpoint}@{a.revision[:12]}"
+    elif a.kind == "t0":
+        revision = f"{a.checkpoint}@{a.revision}"
     return all(norm(want[k]) == norm(rec.get(k)) for k in ("id", "kind", "output", "inputs", "variables", "params")) \
         and rec.get("revision") == revision
 
@@ -251,7 +255,7 @@ def run_evaluation(cfg: Config, log=print, reuse_from: Path | None = None) -> Pa
     fit_start, fit_end = split_bounds(cfg)["fit"]
     fit_obs = obs[(obs["time"] >= fit_start) & (obs["time"] <= fit_end)]
     step_h = cfg["forecast"]["step_hours"]
-    history_steps = max([a.context_steps(step_h) for a in adapters if isinstance(a, Timestral)]
+    history_steps = max([a.context_steps(step_h) for a in adapters if hasattr(a, "context_steps")]
                         + [cfg["forecast"]["context_days"] * 24 // step_h])
     for a in adapters:
         if hasattr(a, "attach_arome") and arome_df is not None:
