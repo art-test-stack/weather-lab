@@ -16,8 +16,8 @@ import pandas as pd
 from weather_lab import features, models
 from weather_lab.common import ROOT, environment, git_revision, now_utc, read_json, sha256_file, sha256_text, write_json
 from weather_lab.evaluate import score
-from weather_lab.forecast import QUANTILE_LEVELS, Timestral, exploratory_inputs, qcol
-from weather_lab.forecast_config import ForecastConfig, check
+from weather_lab.forecast import QUANTILE_LEVELS, exploratory_inputs, qcol
+from weather_lab.forecast_config import ForecastConfig, build_adapter, check
 from weather_lab.predcache import make_key
 from weather_lab.suite import cases_from_manifest
 
@@ -104,10 +104,7 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
     ck = models.CHECKPOINTS[cfg.model]
     model_id = f"timestral-dev {cfg.model} {cfg.prediction_target} {cfg.conditioning} " + sha256_text(
         json.dumps(cfg.as_dict(), sort_keys=True))[:8]
-    adapter = Timestral(model_id, list(cfg.targets), list(cfg.targets), ck.repo, ck.revision,
-                        context_days=cfg.context_days, calendar=cfg.calendar, arome=cfg.arome_mode,
-                        arome_fields=[v for v in ("t", "pmer") if v in cfg.targets],
-                        features=cfg.feature_spec, prediction_target=cfg.prediction_target)
+    adapter = build_adapter(cfg, model_id, arome_fields=[v for v in ("t", "pmer") if v in cfg.targets])
     run_id = f"development-{now_utc().replace(':', '').replace('-', '')}-{uuid4().hex[:10]}"
     suite = f"development-{original['suite']}-{run_id.rsplit('-', 1)[-1]}"
     targets = pd.read_parquet(source / "targets.parquet")

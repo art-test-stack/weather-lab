@@ -25,7 +25,8 @@ from weather_lab.baselines import Climatology, Persistence, SeasonalNaive
 from weather_lab.common import (Config, environment, git_revision, load_config, now_utc, read_json, sha256_file,
                                 write_json)
 from weather_lab.data import load_observations
-from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeBiasCorrected, AromeRaw, CaseBatch, Timestral, qcol
+from weather_lab.forecast import QUANTILE_LEVELS, Adapter, AromeBiasCorrected, AromeRaw, CaseBatch, qcol
+from weather_lab.forecast_config import ForecastConfig, _FROM_MODE, build_adapter
 from weather_lab.suite import SEASONS, case_data_checksum, cases_from_manifest, split_bounds
 
 POINT_REFERENCE = "persistence"
@@ -37,27 +38,26 @@ TAIL_QUANTILE = 0.9
 
 # --------------------------------------------------------------------------- adapters
 
-def _timestral(mid: str, spec: dict, cfg: Config) -> Adapter:
-    tcfg = cfg["timestral"]
-    return Timestral(mid, cfg["variables"], targets=spec.pop("targets"),
-                     checkpoint=spec.pop("checkpoint", tcfg["checkpoint"]), revision=spec.pop("revision", tcfg["revision"]),
-                     context_days=spec.pop("context_days", cfg["forecast"]["context_days"]),
-                     calendar=spec.pop("calendar", False), arome=spec.pop("arome", None),
-                     arome_fields=(cfg.get("arome") or {}).get("fields"), batch_size=tcfg.get("batch_size", 32), **spec)
-
-
-def _t0(mid: str, spec: dict, cfg: Config) -> Adapter:
+def _foundation(mid: str, spec: dict, cfg: Config, kind: str) -> Adapter:
     from weather_lab.models import CHECKPOINTS
-    from weather_lab.t0_adapter import T0
 
-    ck, runtime = CHECKPOINTS["t0-gamma"], cfg.get("t0") or {}
-    return T0(mid, cfg["variables"], targets=spec.pop("targets"),
-              checkpoint=spec.pop("checkpoint", runtime.get("checkpoint", ck.repo)),
-              revision=spec.pop("revision", runtime.get("revision", ck.revision)),
-              context_days=spec.pop("context_days", cfg["forecast"]["context_days"]),
-              calendar=spec.pop("calendar", False), arome=spec.pop("arome", None),
-              arome_fields=(cfg.get("arome") or {}).get("fields"),
-              batch_size=spec.pop("batch_size", runtime.get("batch_size", 8)), **spec)
+    ck = CHECKPOINTS["t0-gamma"]
+    defaults = (cfg["timestral"] if kind == "timestral" else
+                {"checkpoint": ck.repo, "revision": ck.revision, **(cfg.get("t0") or {})})
+    checkpoint = spec.pop("checkpoint", defaults["checkpoint"])
+    revision = spec.pop("revision", defaults["revision"])
+    mode, step = spec.pop("arome", None), cfg["forecast"].get("step_hours", 3)
+    request = ForecastConfig.make(checkpoint, _FROM_MODE[mode], spec.pop("features", ()),
+                                  targets=tuple(spec.pop("targets")), calendar=spec.pop("calendar", False),
+                                  context_days=spec.pop("context_days", cfg["forecast"]["context_days"]),
+                                  horizon_h=step * cfg["forecast"].get("horizon_steps", 16), step_hours=step,
+                                  prediction_target=spec.pop("prediction_target", "weather"))
+    batch_size = spec.pop("batch_size", defaults.get("batch_size", 32 if kind == "timestral" else 8))
+    adapter = build_adapter(request, mid, variables=cfg["variables"], revision=revision, arome=mode,
+                            arome_fields=(cfg.get("arome") or {}).get("fields"), batch_size=batch_size, **spec)
+    if adapter.kind != kind:
+        raise ValueError(f"Checkpoint {checkpoint!r} is {adapter.kind}, not configured kind {kind}")
+    return adapter
 
 
 # Config `kind` -> constructor(id, remaining spec, config). A new model family adds one entry (and its
@@ -67,8 +67,8 @@ ADAPTERS = {
     "seasonal_naive": lambda mid, spec, cfg: SeasonalNaive(mid, cfg["variables"]),
     "climatology": lambda mid, spec, cfg: Climatology(mid, cfg["variables"], **spec),
     "arome": lambda mid, spec, cfg: AromeRaw(mid, cfg["variables"], fields=cfg["arome"]["fields"]),
-    "timestral": _timestral,
-    "t0": _t0,
+    "timestral": lambda mid, spec, cfg: _foundation(mid, spec, cfg, "timestral"),
+    "t0": lambda mid, spec, cfg: _foundation(mid, spec, cfg, "t0"),
     "arome_biascorr": lambda mid, spec, cfg: AromeBiasCorrected(mid, cfg["variables"], fields=cfg["arome"]["fields"],
                                                                 **spec),
 }

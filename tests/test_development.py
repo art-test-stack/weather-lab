@@ -5,7 +5,7 @@ import pytest
 
 from weather_lab import development
 from weather_lab.common import read_json, sha256_file, write_json
-from weather_lab.forecast import ForecastBatch, QUANTILE_LEVELS
+from weather_lab.forecast import ForecastBatch, QUANTILE_LEVELS, Timestral as NativeTimestral
 from weather_lab.forecast_config import ForecastConfig
 
 
@@ -73,7 +73,7 @@ def test_full_suite_saves_matched_scores_failures_and_provenance_without_modifyi
         q = point[..., None] + np.array(QUANTILE_LEVELS) - .5
         return ForecastBatch(self.id, "fixture-revision", "quantiles", ["t"], point, q, QUANTILE_LEVELS)
 
-    monkeypatch.setattr(development.Timestral, "predict", predict)
+    monkeypatch.setattr(NativeTimestral, "predict", predict)
     monkeypatch.setattr(development.models, "prefetch", lambda ck, allow_download: {"downloaded": False})
     cfg = ForecastConfig.make("Timestral-28M", context_days=7, horizon_h=6, targets=("t",))
     out = development.run(source, cfg, root=tmp_path / "results")
@@ -103,7 +103,7 @@ def test_full_suite_saves_matched_scores_failures_and_provenance_without_modifyi
 
 
 def test_missing_selected_inputs_are_unavailable_without_loading_a_model(source, tmp_path, monkeypatch):
-    monkeypatch.setattr(development.Timestral, "predict", lambda *args: pytest.fail("missing inputs ran a model"))
+    monkeypatch.setattr(NativeTimestral, "predict", lambda *args: pytest.fail("missing inputs ran a model"))
     cfg = ForecastConfig.make("Timestral-28M", features=["atmos"], context_days=7, horizon_h=6, targets=("t",))
     out = development.run(source, cfg, root=tmp_path / "results")
     availability = pd.read_csv(out / "case_availability.csv")
@@ -140,7 +140,7 @@ def test_error_correction_saves_physical_predictions_and_missing_archives_withou
         return ForecastBatch(self.id, "fixture-revision", "quantiles", ["t"], point,
                              point[..., None] + np.array(QUANTILE_LEVELS) - .5, QUANTILE_LEVELS)
 
-    monkeypatch.setattr(development.Timestral, "predict", predict)
+    monkeypatch.setattr(NativeTimestral, "predict", predict)
     monkeypatch.setattr(development.models, "prefetch", lambda ck, allow_download: None)
     cfg = ForecastConfig.make("Timestral-28M", prediction_target="arome_error", context_days=7,
                               horizon_h=6, targets=("t",))

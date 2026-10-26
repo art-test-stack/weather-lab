@@ -455,9 +455,6 @@ class Timestral(Adapter):
             return None, None, {}
         return feats.build(self.feature_spec, batch, self.context_steps(batch.step_hours))
 
-    def past_covariates(self, batch: CaseBatch) -> np.ndarray | None:
-        return self.feature_rows(batch)[0]
-
     def predict(self, batch: CaseBatch) -> ForecastBatch:
         import torch
 
@@ -616,6 +613,7 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     from weather_lab import features as feats
     from weather_lab import predcache
     from weather_lab.models import offline, prefetch
+    from weather_lab.forecast_config import ForecastConfig, _FROM_MODE, build_adapter
 
     ck = _registry()[size]
     if prediction_target not in ("weather", "arome_error"):
@@ -631,11 +629,12 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     horizon_h = horizon_steps * step_hours
     flabel = "".join(" +" + n + ("*" if feats.non_default({n: p}) else "") for n, p in spec.items())
     method_label = " +AROME error correction" if correction else ""
-    model = Timestral(f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
-                      f"{AROME_LABELS[arome_mode]}{flabel}{method_label} [{device}]", variables, targets=variables,
-                      checkpoint=ck.repo, revision=ck.revision, context_days=context_days, calendar=calendar,
-                      arome=arome_mode, arome_fields=["t", "pmer"], batch_size=1, device=device, features=spec,
-                      prediction_target=prediction_target)
+    cfg = ForecastConfig.make(ck.name, _FROM_MODE[arome_mode], spec, context_days=context_days,
+                              horizon_h=horizon_h, calendar=calendar, targets=tuple(variables),
+                              step_hours=step_hours, prediction_target=prediction_target)
+    model = build_adapter(cfg, f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
+                          f"{AROME_LABELS[arome_mode]}{flabel}{method_label} [{device}]",
+                          arome=arome_mode, arome_fields=["t", "pmer"], batch_size=1, device=device)
     ctx, known = model.build_inputs(batch)
     past, _, feat_report = model.feature_rows(batch)
     for row, share in (feat_report.get("observed_fraction") or {}).items():

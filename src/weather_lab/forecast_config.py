@@ -72,6 +72,30 @@ class ForecastConfig:
                 "step_hours": self.step_hours, "prediction_target": self.prediction_target}
 
 
+def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | None = None, **runtime):
+    """Construct a native adapter from the shared configuration, without loading weights."""
+    from weather_lab.forecast import Timestral
+    from weather_lab.models import resolve
+
+    checkpoint = resolve(cfg.model, runtime.pop("revision", None))
+    if checkpoint.family == "timestral":
+        constructor = Timestral
+    elif checkpoint.family == "t0":
+        from weather_lab.t0_adapter import T0
+
+        constructor = T0
+    else:
+        raise ValueError(f"No adapter for checkpoint family {checkpoint.family!r}")
+    mode = runtime.pop("arome", cfg.arome_mode)
+    # Preserve the recorded v1 spelling when reproducing old benchmark identities.
+    if mode != cfg.arome_mode and not (mode == "observations" and cfg.conditioning == "substobs"):
+        raise ValueError("AROME mode differs from the forecast configuration")
+    return constructor(model_id, list(cfg.targets) if variables is None else variables,
+                       targets=list(cfg.targets), checkpoint=checkpoint.repo, revision=checkpoint.revision,
+                       context_days=cfg.context_days, calendar=cfg.calendar, arome=mode,
+                       features=cfg.feature_spec, prediction_target=cfg.prediction_target, **runtime)
+
+
 def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastConfig | None:
     """A saved system (run.json `systems` entry) as a configuration, from its recorded parameters only.
 
