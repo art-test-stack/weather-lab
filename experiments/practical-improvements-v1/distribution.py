@@ -48,7 +48,9 @@ def main():
                 "min_support": 20, "quantile_method": "numpy.quantile(method=linear)", "quantiles": list(QUANTILE_LEVELS),
                 "observation_latency_h": 0, "source_forecast_anchor": "saved original-nearest AROME point float32",
                 "fit_once": True, "local_station_fits": False, "independent_calibration": False,
-                "coverage_guarantee": False, "confirmation": None, "budget_cpu_s": 120}
+                "coverage_guarantee": False, "confirmation": None, "budget_cpu_s": 120,
+                "script_sha256": sha256_file(Path(__file__)),
+                "algorithm_sha256": sha256_file(Path(__file__).parents[2] / "src/weather_lab/practical_distribution.py")}
     protocol_path.write_text(yaml.safe_dump(protocol, sort_keys=False))
     saved = pd.read_parquet(source / "predictions.parquet")
     targets = pd.read_parquet(source / "targets.parquet")

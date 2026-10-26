@@ -41,7 +41,9 @@ def main():
              "rule": "observation-minus-exact-init=valid-L issued forecast, available by origin and valid time",
              "fallback": "unavailable R2; separately labelled raw AROME fallback if selected-run anchor exists",
              "no_interpolation": True, "observation_latency_h": 0, "budget_cpu_s": 240,
-             "head_probe_only": args.probe_recovery_head, "confirmation": None}
+             "head_probe_only": args.probe_recovery_head, "confirmation": None,
+             "script_sha256": sha256_file(Path(__file__)),
+             "algorithm_sha256": sha256_file(Path(__file__).parents[2] / "src/weather_lab/practical_residual.py")}
     (out / "protocol.yaml").write_text(yaml.safe_dump(stage, sort_keys=False))
     arome, obs = pd.read_parquet(arome_path), pd.read_parquet(obs_path)
     raw = pd.read_parquet(source / "predictions.parquet")
