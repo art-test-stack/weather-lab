@@ -166,8 +166,12 @@ def collect(cfg: dict, store: Store | None = None, log=print) -> Path:
             if not cfg["collection"].get("issued_runs", False):
                 continue
             first = max(ts(cfg["evaluation"]["start"]), ts("2026-04-02"))
-            for day in pd.date_range(first.floor("D"), end.floor("D"), freq="D"):
-                run = day + pd.Timedelta(hours=cfg["collection"]["run_hour_utc"])
+            hours = cfg["collection"].get("run_hours_utc", [cfg["collection"]["run_hour_utc"]])
+            if not hours or len(set(hours)) != len(hours) or any(not isinstance(h, int) or not 0 <= h < 24 for h in hours):
+                raise ValueError("collection run hours must be distinct UTC hours from 0 through 23")
+            runs = (day + pd.Timedelta(hours=hour)
+                    for day in pd.date_range(first.floor("D"), end.floor("D"), freq="D") for hour in hours)
+            for run in runs:
                 available = run + pd.Timedelta(hours=cfg["collection"]["run_availability_lag_hours"])
                 if available > end:
                     continue
