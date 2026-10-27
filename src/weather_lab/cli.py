@@ -228,6 +228,11 @@ def main(argv: list[str] | None = None) -> None:
     from weather_lab.rag import parser as rag_parser
 
     rag_parser(sub)
+    from weather_lab.hourly_benchmark import CONFIG, command as prepare_hourly
+
+    hourly = sub.add_parser("prepare-hourly-benchmark", help="freeze the hourly 2026 benchmark from its pinned archive")
+    hourly.add_argument("--config", default=str(CONFIG))
+    hourly.set_defaults(func=prepare_hourly)
     data = sub.add_parser("data", help="download / prepare observations and AROME extracts")
     dsub = data.add_subparsers(dest="data_command", required=True)
     for name, fn, help_ in [("fetch", cmd_fetch, "download annual SYNOP files (+ AROME messages) once"),
