@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from weather_lab.common import read_json, ts, write_json
+from weather_lab.common import ROOT, read_json, ts, write_json
 from weather_lab.rag_store import Store
 
 VERSION = 1
@@ -74,7 +74,9 @@ def build(archive_id: str, cfg: dict, store: Store | None = None) -> Path:
                 vectors[m].append(embedding(block[:, t - q:t], scale, m))
     if not payload:
         raise ValueError("no complete pre-2026 context+horizon windows; inspect archive coverage")
-    with tempfile.TemporaryDirectory() as tmp:
+    temp_root = ROOT / ".tmp/codex/rag-index"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
         out = Path(tmp)
         np.save(out / "payload.npy", np.stack(payload), allow_pickle=False)
         for m in METHODS:
