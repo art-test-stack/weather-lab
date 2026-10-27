@@ -180,6 +180,58 @@ def _vals(app, d):
     return [d[k] for k in app.DRAFT_KEYS]
 
 
+@needs_example
+def test_forecast_t0_routing_and_rag_draft_validation(app_env):
+    app, fake, counters, a = app_env
+    d = {**a["draft"], "size": "t0-gamma", "conditioning": "none"}
+    before = counters()
+    cfg, issues = app.draft_config(d)
+    assert cfg.model == "t0-gamma" and not issues
+    assert counters() == before
+    result, _ = app.run_forecast(*_vals(app, d), a)
+    assert result["applied"]["config"].model == "t0-gamma"
+    assert fake.inference == 1
+    rag = {**d, "retrieval_method": "shape", "retrieval_index": "a" * 64, "ctx": 30,
+           "horizon": 24, "variable": "t", "features": []}
+    cfg, issues = app.draft_config(rag)
+    assert not issues and cfg.step_hours == 1 and cfg.targets == ("t", "pmer")
+    assert app.saved_match(rag, cfg) is None
+    assert "RAG shape" in app.applied_text({**a, "config": cfg})
+    _, issues = app.draft_config({**rag, "retrieval_index": ""})
+    assert any(i.kind == "unavailable" and i.subject == "retrieval" for i in issues)
+    _, issues = app.draft_config({**rag, "variable": "u"})
+    assert any(i.kind == "unsupported" and i.subject == "retrieval" for i in issues)
+
+
+@needs_example
+def test_forecast_rag_cache_route_and_presentation_reuse(app_env, monkeypatch):
+    from weather_lab import rag_forecast
+
+    app, fake, counters, a = app_env
+    d = {**a["draft"], "size": "t0-gamma", "conditioning": "none", "ctx": 30, "horizon": 24,
+         "retrieval_method": "shape", "retrieval_index": "a" * 64}
+    calls = []
+
+    def cached(case, cfg, **kwargs):
+        calls.append(kwargs)
+        mid = "exploratory t0-gamma ctx30d h24 +RAG shape " + cfg.retrieval_index
+        frame = _frame(mid, case, cfg.horizon_h)
+        frame = frame[frame.variable.isin(cfg.targets)]
+        return frame, {"cache_hit": True, "key": "rag-cache", "settings": {
+            "checkpoint": cfg.model, "retrieval_method": "shape", "archive_id": "b" * 64,
+            "context_days": 30, "context_steps": 720, "horizon_steps": 27, "step_hours": 1}}
+
+    monkeypatch.setattr(rag_forecast, "forecast", cached)
+    result, message = app.run_forecast(*_vals(app, d), a)
+    assert result and "cached exploratory" in message and calls == [{"device": "cpu", "lookup_only": True}]
+    new = result["applied"]
+    assert new["config"].retrieval_index == "a" * 64 and fake.calls == 0
+    again, message = app.run_forecast(*_vals(app, {**d, "variable": "pmer"}), new)
+    assert again and "presentation settings" in message and len(calls) == 1
+    applied, _, changed = app.apply_if_current(result, *_vals(app, {**d, "retrieval_index": "c" * 64}), a, "")
+    assert applied is a and not changed
+
+
 def _run(app, d, applied):
     """Run forecast followed by the apply step with the same draft (the click chain)."""
     res, msg = app.run_forecast(*_vals(app, d), applied)
@@ -274,11 +326,16 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     assert main_metric.label == h["benchmark_metric"].label == "Main metric"
     assert main_metric.value == h["benchmark_metric"].value == "mae"
     assert {v for _, v in main_metric.choices} == {"mae", "rmse"}
+    controls = dict(zip(app.DRAFT_KEYS, h["draft"]))
+    assert "t0-gamma" in {v for _, v in controls["size"].choices}
+    assert {v for _, v in controls["retrieval_method"].choices} == {"none", "level", "shape"}
     assert {"mae", "rmse"} <= {v for _, v in h["benchmark_metric"].choices}
     assert any(c.get("props", {}).get("label") == "Forecast" for c in demo.config["components"])
     overview = h["render"]
     protected = {h["applied"]._id} | {c._id for c in overview if c not in h["draft"]}
     fns = demo.fns
+    load_callbacks = {fn.name for fn in fns.values() if any(t[1] == "load" for t in fn.targets)}
+    assert {"refresh_retrieval", "refresh"} <= load_callbacks
 
     def root(fn):
         while fn.trigger_after is not None:
