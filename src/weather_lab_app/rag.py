@@ -56,7 +56,7 @@ def action(kind, archive=None, index=None, horizon=24, progress=gr.Progress()):
                 from weather_lab.common import ROOT
                 from weather_lab.rag_arome_error import build
 
-                cfg = config(ROOT / "configs/rag_arome_error_v1.yaml")
+                cfg = config(ROOT / "configs/rag_arome_error_hourly_v2.yaml")
             else:
                 from weather_lab.rag_index import build
             path = build(archive, cfg, store)
@@ -139,7 +139,7 @@ def build():
                         "downloads stay on local disk until collection finishes.")
             collect = gr.Button("Collect weather data (up to 300 MiB)")
             gr.Markdown("#### Build an index from the selected dataset\n"
-                        "Index construction runs on CPU. Weather analogues use pre-2026 observations; "
+                        "Index construction runs on CPU with a one-hour sliding stride. Weather analogues use pre-2026 observations; "
                         "AROME errors use genuine issued runs and verified outcomes for Orly and Blagnac.")
             with gr.Row():
                 create = gr.Button("Build weather-analogue index")
@@ -156,7 +156,7 @@ def build():
         gr.Markdown("### Run or view evaluations\n"
                     "#### Run a weather-analogue evaluation\n"
                     f"**{EXPERIMENTS[cfg['experiment']]['name']}** compares Timestral-209M and t0-gamma, with and "
-                    "without weather retrieval, against AROME across the configured daily 2026 cases. "
+                    "without weather retrieval, against AROME across the configured hourly 2026 windows. "
                     "This batch job can take much longer than a single forecast. Missing data stay visible; "
                     "results are labelled as development experiments.")
         with gr.Row():
