@@ -286,13 +286,41 @@ Branch `research/ts-rag-weather` extends PR #1. This independent experiment is c
 The Space has a **RAG research** tab with explicit collection, index, evaluation and saved-result actions.
 The **Forecast** tab also exposes TFC t0-gamma and optional **RAG · levels / shape** retrieval. Select a saved
 hourly index (use **Refresh retrieval indexes** after creating one), a 30-day context, a 24- or 48-hour horizon,
-temperature or pressure, direct prediction, no AROME conditioning and no additional feature groups.
+temperature or pressure, direct prediction and no additional feature groups. Genuine issued AROME may
+condition the forecast (archived history or explicitly missing history); observation substitution is refused.
 Only **Run forecast** executes or applies changes. RAG reads the index's hourly observation archive for the
 selected station/time, uses the declared three-hour observation delay, and excludes generated bridge steps.
 Missing hourly context, indexes or installed weights remain explicit failures; no data are interpolated or
 models substituted. Exploratory cache identities include model, retrieval method, verified index/archive,
 calendar, inputs and device; results never enter frozen benchmark runs. Download t0 weights explicitly under
 **RAG research → Model setup** (about 1 GB for t0; up to 1.86 GB with Timestral-209M).
+
+**AROME-error retrieval** is a separate protocol in `configs/rag_arome_error_v1.yaml`, for Orly and Blagnac.
+Its new immutable index uses standard AROME's genuinely issued runs from April 2026 onward; the older
+2022–2025 weather index stays unchanged. Choose an index labelled **AROME errors** and **archived AROME
+conditioning** in Forecast. The research tab also has an explicit **Build AROME-error index** button.
+
+Matching uses the last 72 hours of observed weather and verified AROME errors, plus the first 24 hours of
+the forecast available at issue time. Level matching preserves physical levels; shape matching anchors
+weather/forecast trajectories to the latest observation while retaining error signs and biases.
+Scaling uses only 2022–2025 station observations. The five nearest same-station, same-product cases receive
+inverse-distance weights. All completely verified earlier cases are eligible; a candidate's entire
+48-hour outcome window plus the three-hour observation delay must end strictly before the query decision.
+Unknown future outcomes and later-issued runs cannot affect the query or its eligible neighbors.
+
+Retrieved **observation-minus-issued-AROME error trajectories** enter the native known-covariate rows,
+alongside current issued AROME and vintage-checked AROME history. Missing historical steps stay missing
+when no neighbor supplies them; incomplete query or verification windows are refused. Neighbor audit
+records include run times, verification times, distances, weights and separate temperature/pressure MAE
+and bias over the declared 48-hour window. These are historical case diagnostics, not a benchmark ranking.
+This is retrieval-augmented inference without fine-tuning or a demonstrated improvement claim.
+
+```bash
+uv run weather-lab rag index --config configs/rag_arome_error_v1.yaml
+```
+
+This builds on CPU and publishes a checksum-verified index from the protocol's pinned archive; it neither
+downloads source data nor runs a model. Use `--local-only <artifact-store>` for local-only construction.
 Browsing saved runs does not call a model. The new `tfc-t0[torch]==0.6.0` dependency enables the existing
 pinned t0-gamma adapter alongside Timestral-209M; torch and all checkpoint revisions stay unchanged.
 
