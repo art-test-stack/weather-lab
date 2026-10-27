@@ -152,3 +152,4 @@ def build():
         prefetch.click(lambda: action("prefetch"), outputs=outputs, concurrency_id="rag-research", concurrency_limit=1)
         refresh_button.click(refresh, outputs=outputs)
         load.click(show, inputs=saved, outputs=[note, scores, availability, dl_scores, dl_predictions, dl_provenance])
+    return outputs
