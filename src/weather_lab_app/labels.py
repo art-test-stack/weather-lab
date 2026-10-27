@@ -139,6 +139,10 @@ def model_name(mid: str) -> str:
             "direct + AROME" if " +AROME " in mid else "direct"
         if "+RAG " in mid:
             method = "RAG · " + mid.split("+RAG ", 1)[1].split()[0]
+            if "+error-cases" in mid:
+                method = "AROME-error " + method
+            if " +AROME " in mid:
+                method += " + AROME"
         return f"{checkpoint} · {method}"
     return MODELS.get(mid, (mid, ""))[0]
 
@@ -147,6 +151,9 @@ def model_description(mid: str) -> str:
     if mid.startswith("timestral-dev "):
         return "Explicit full-suite development run with recorded configuration; inference only, no local fine-tuning."
     if mid.startswith("exploratory"):
+        if "+error-cases" in mid:
+            return ("Retrieved verified errors from earlier issued AROME cases, with archived AROME conditioning. "
+                    "Only fully verified cases before the query qualify; no fine-tuning or demonstrated improvement claim.")
         if "+RAG " in mid:
             return ("Historical measured analogue trajectories from a verified pre-2026 index, supplied as native "
                     "known covariates. Hourly observations delayed 3 h; no fine-tuning; outside frozen benchmarks.")
@@ -194,6 +201,14 @@ def unit(v: str) -> str:
 
 # Experiments shown in the app (benchmark id -> presentation). `headline` drives the overview tiles.
 EXPERIMENTS = {
+    "rag-arome-error-2026-v1": {
+        "name": "AROME-error RAG · verified earlier cases",
+        "status": "Development research",
+        "short": "Orly and Blagnac · genuine issued AROME · causal error retrieval",
+        "scope": "Past weather, recent verified errors and the issued forecast identify similar earlier AROME cases.",
+        "caveat": "Only completely verified earlier cases qualify. No fine-tuning or demonstrated improvement claim.",
+        "headline": [], "reference": "arome-raw", "default_systems": [], "band": "",
+    },
     "rag-weather-2026-v1": {
         "name": "Weather RAG · 2026 replay",
         "status": "Development research",
