@@ -1,0 +1,28 @@
+suite: hourly-2026-v2
+manifest: benchmarks/manifests/hourly-2026-v2.json
+archive_id: 003d6b33287b939ecc587378170399f69a599957fa7f666baf8034d4a058c964
+artifact_id: a3bafdcdaa62eeb3e86573882b15bc002d6be51da730589c10bb7807012d9023
+label: Hourly 2026 development replay; no local fine-tuning or held-out claim
+variables:
+- t
+- pmer
+product: meteofrance_arome_france
+origins: Every UTC hour from 2026-01-01 00:00 through each station's last measured
+  2026 record
+context: Genuine late-2025 observations supply January context; missing values remain
+  missing
+verification: Hourly measurements at leads 1 through 48; unverified trailing targets
+  remain unavailable
+arome: Latest available single issued run covering the whole window; no stitching
+  or observation substitution
+observation_availability: Historical replay assumes observations and issued AROME
+  are available after 3 hours; original publication and revision timestamps are absent
+stations:
+- id: 07149
+  name: Paris-Orly
+  lat: 48.718
+  lon: 2.397
+- id: '07630'
+  name: Toulouse-Blagnac
+  lat: 43.621
+  lon: 1.378833
