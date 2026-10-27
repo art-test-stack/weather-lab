@@ -38,6 +38,8 @@ class ForecastConfig:
     targets: tuple[str, ...] = TARGETS
     step_hours: int = 3
     prediction_target: str = "weather"
+    retrieval_method: str = "none"
+    retrieval_index: str = ""
 
     @classmethod
     def make(cls, model: str, conditioning: str = "none", features=(), **kw) -> "ForecastConfig":
@@ -45,6 +47,8 @@ class ForecastConfig:
             raise ValueError(f"conditioning {conditioning!r}; one of {list(CONDITIONING)}")
         if kw.get("prediction_target", "weather") not in PREDICTION_TARGETS:
             raise ValueError(f"forecast method must be one of {list(PREDICTION_TARGETS)}")
+        if kw.get("retrieval_method", "none") not in ("none", "level", "shape"):
+            raise ValueError("retrieval method must be none, level or shape")
         spec = feats.normalize(features)
         return cls(model, conditioning, tuple((n, tuple(sorted(p.items()))) for n, p in spec.items()), **kw)
 
@@ -63,17 +67,23 @@ class ForecastConfig:
     def forecast_part(self) -> tuple:
         """Everything that determines the predictions except the horizon (a saved forecast can be sliced)."""
         return (self.model, self.conditioning, self.features, self.calendar, self.context_days, self.targets,
-                self.step_hours, self.prediction_target)
+                self.step_hours, self.prediction_target, self.retrieval_method, self.retrieval_index)
 
     def as_dict(self) -> dict:
-        return {"model": self.model, "conditioning": self.conditioning, "arome_mode": self.arome_mode,
+        result = {"model": self.model, "conditioning": self.conditioning, "arome_mode": self.arome_mode,
                 "features": feats.definition(self.feature_spec), "calendar": self.calendar,
                 "context_days": self.context_days, "horizon_h": self.horizon_h, "targets": list(self.targets),
                 "step_hours": self.step_hours, "prediction_target": self.prediction_target}
+        if self.retrieval_method != "none":
+            result.update(retrieval_method=self.retrieval_method, retrieval_index=self.retrieval_index,
+                          observation_delay_hours=3)
+        return result
 
 
 def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | None = None, **runtime):
     """Construct a native adapter from the shared configuration, without loading weights."""
+    if cfg.retrieval_method != "none":
+        raise ValueError("Hourly RAG requires the verified index/archive path in rag_forecast.forecast")
     from weather_lab.forecast import Timestral
     from weather_lab.models import resolve
 
@@ -175,6 +185,15 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
     if cfg.calendar and not fam.known_covariates:
         out.append(Issue("unsupported", "calendar", f"{fam.name} takes no known-future covariates"))
     correction = cfg.prediction_target == "arome_error"
+    if cfg.retrieval_method != "none":
+        if not cfg.retrieval_index:
+            out.append(Issue("unavailable", "retrieval", "select a saved hourly retrieval index; create one in RAG research"))
+        if cfg.context_days != 30 or cfg.step_hours != 1 or cfg.horizon_h not in (24, 48):
+            out.append(Issue("invalid", "retrieval", "hourly RAG requires 30 days of context and a 24 or 48 h horizon"))
+        if cfg.targets != ("t", "pmer"):
+            out.append(Issue("unsupported", "retrieval", "the hourly index covers temperature and pressure only"))
+        if cfg.conditioning != "none" or cfg.features or correction:
+            out.append(Issue("unsupported", "retrieval", "this RAG protocol uses direct weather prediction without AROME conditioning or additional feature groups"))
     if correction and (ck.family != "timestral" or not fam.known_covariates):
         out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires the Timestral adapter "
                          "and known-future forecast-lead inputs"))
@@ -231,6 +250,8 @@ def describe(cfg: ForecastConfig, conditioning_names: dict | None = None) -> str
         cond = "no additional AROME covariates"
     fl = ", ".join(_feature_text(n, dict(p)) for n, p in cfg.features) or "no additional features"
     method = f"{PREDICTION_TARGETS[cfg.prediction_target]} · " if cfg.prediction_target != "weather" else ""
+    if cfg.retrieval_method != "none":
+        method += f"RAG {cfg.retrieval_method} · index {cfg.retrieval_index[:12]} · hourly archive · observations delayed 3 h · "
     return (f"{cfg.model} · {method}{cond} · {fl} · calendar {'on' if cfg.calendar else 'off'} · context "
             f"{cfg.context_days} d ({cfg.context_days * 24 // cfg.step_hours} steps) · horizon {cfg.horizon_h} h")
 
