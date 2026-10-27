@@ -57,7 +57,9 @@ class Store:
         if not (path / "artifact.json").is_file() and not (self.mounted or self.local_only):
             api = self._api()
             prefix = f"{PREFIX}/{kind}/{ident}"
-            with tempfile.TemporaryDirectory() as tmp:
+            temp_root = ROOT / ".tmp/codex/rag-store"
+            temp_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
                 stage = Path(tmp)
                 api.download_bucket_files(DEFAULT_BUCKET, [(f"{prefix}/artifact.json", str(stage / "artifact.json"))],
                                           raise_on_missing_files=True)
@@ -103,7 +105,9 @@ class Store:
             api, prefix = self._api(), f"{PREFIX}/{kind}/{ident}"
             # Verify uploaded bytes before publishing the remote commit marker.
             api.batch_bucket_files(DEFAULT_BUCKET, add=[(str(destination / n), f"{prefix}/{n}") for n in files])
-            with tempfile.TemporaryDirectory() as tmp:
+            temp_root = ROOT / ".tmp/codex/rag-store"
+            temp_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
                 for name in files:
                     (Path(tmp) / name).parent.mkdir(parents=True, exist_ok=True)
                 api.download_bucket_files(DEFAULT_BUCKET, [(f"{prefix}/{n}", str(Path(tmp) / n)) for n in files],
