@@ -106,3 +106,19 @@ def test_hourly_suite_preserves_january_context_and_unverified_tail(tmp_path, mo
     assert residual[residual.variable.eq("pmer")].arome_baseline.eq(1000.).all()
     assert residual.predicted_error.eq(residual.point - residual.arome_baseline).all()
     assert residual.lead_h.min() == 1 and residual.lead_h.max() == 48
+
+
+def test_benchmark_only_offers_hourly_indexes_of_its_pinned_archive(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from weather_lab import rag_store
+    from weather_lab_app import benchmark as bench, main as app
+
+    choices = [('current', 'a' * 64), ('old archive', 'b' * 64), ('daily', 'c' * 64)]
+    for (_, ident), archive, stride in zip(choices, ('current-archive', 'old-archive', 'current-archive'), (1, 1, 24)):
+        directory = tmp_path / 'indexes' / ident
+        directory.mkdir(parents=True)
+        (directory / 'index.json').write_text(json.dumps({'archive_id': archive, 'retrieval': {'stride_hours': stride}}))
+    monkeypatch.setattr(rag_store, 'Store', lambda: SimpleNamespace(root=tmp_path, list=lambda kind: choices))
+    monkeypatch.setitem(app.RUNS, 'fixture', SimpleNamespace(run={'archive_id': 'current-archive'}))
+    assert bench.index_choices('fixture') == choices[:1]
