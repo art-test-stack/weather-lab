@@ -56,7 +56,7 @@ class RetrievedT0(Retrieved, T0):
     pass
 
 
-def foundation(name, index, method=None, k=5, device="cpu", calendar=True, arome=None):
+def foundation(name, index, method=None, k=5, device="cpu", calendar=True, arome=None, prediction_target="weather"):
     from weather_lab.models import CHECKPOINTS
 
     ck = CHECKPOINTS[name]
@@ -68,4 +68,4 @@ def foundation(name, index, method=None, k=5, device="cpu", calendar=True, arome
     return kind(ident, variables=index.meta["variables"], targets=index.meta["variables"], checkpoint=ck.repo,
                 revision=ck.revision, context_days=index.meta["context_hours"] // 24,
                 calendar=calendar, device=device, batch_size=8, arome=arome,
-                arome_fields=index.meta["variables"] if arome else [], **kwargs)
+                arome_fields=index.meta["variables"] if arome else [], prediction_target=prediction_target, **kwargs)
