@@ -204,6 +204,21 @@ def test_forecast_t0_routing_and_rag_draft_validation(app_env):
 
 
 @needs_example
+def test_rag_conditioning_draft_uses_no_frozen_arome_availability(app_env, monkeypatch):
+    app, fake, counters, applied = app_env
+    d = {**applied["draft"], "conditioning": "archived", "retrieval_method": "shape",
+         "retrieval_index": "a" * 64, "ctx": 30, "horizon": 48, "features": []}
+    def no_frozen_availability(*args):
+        pytest.fail("RAG conditioning must resolve the selected archive on Run")
+    monkeypatch.setattr(app, "availability", no_frozen_availability)
+    before = counters()
+    cfg, issues = app.draft_config(d)
+    assert not issues and cfg.conditioning == "archived"
+    app.draft_feedback(*_vals(app, d), applied, {"busy": False})
+    assert counters() == before
+
+
+@needs_example
 def test_forecast_rag_cache_route_and_presentation_reuse(app_env, monkeypatch):
     from weather_lab import rag_forecast
 
