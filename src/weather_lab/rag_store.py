@@ -11,7 +11,7 @@ from pathlib import Path
 from weather_lab.common import ROOT, read_json, sha256_file, sha256_text, write_json
 from weather_lab.publish import DEFAULT_BUCKET
 
-KINDS = {"archives", "indexes", "runs"}
+KINDS = {"archives", "indexes", "runs", "suites"}
 PREFIX = "rag/weather-v1"
 
 
@@ -131,8 +131,12 @@ class Store:
                 if sha256_text(json.dumps(rec["files_sha256"], sort_keys=True)) != rec["id"]:
                     continue
                 label = rec["id"][:12]
-                if kind == "indexes" and read_json(p.parent / "index.json").get("kind") == "arome_error":
-                    label = f"AROME errors · {label}"
+                if kind == "indexes":
+                    meta = read_json(p.parent / "index.json")
+                    if meta.get("kind") == "arome_error":
+                        label = f"AROME errors · {label}"
+                    if meta.get("retrieval", {}).get("stride_hours") == 1:
+                        label = f"Hourly {'weather · ' if meta.get('kind') != 'arome_error' else ''}{label}"
                 found.append((label, rec["id"]))
             except (ValueError, OSError, KeyError):
                 continue
