@@ -757,7 +757,7 @@ def draft_feedback(*vals):
 
 def feature_note(d: dict) -> str:
     """Draft feature selection in words (roles; parameters live under Advanced)."""
-    method = ("**AROME + predicted error:** Timestral predicts observation − archived AROME, then adds the issued "
+    method = ("**AROME + predicted error:** the selected model predicts observation − archived AROME, then adds the issued "
               "AROME baseline. Forecast lead is an input; Calendar inputs add hour of day and time of year. "
               "The context is a maximum window: missing archived errors stay missing. "
               if d["prediction_target"] == "arome_error" else "")
@@ -1021,7 +1021,7 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
                     + "Selected engineered features use the original observation history. "
                     + (f"Previous direct prediction retained: {model_name(a['comparison'])}. "
                        if a.get("comparison") else "No previous direct prediction exists for this case. ")
-                    + "Intervals are Timestral error quantiles shifted by the issued AROME baseline; their "
+                    + "Intervals are model error quantiles shifted by the issued AROME baseline; their "
                     "coverage has not been established by this single forecast.")
     csv_rows = rows[rows["model"].isin(systems)]            # what is plotted, over the applied horizon
     out = forecast_csv(csv_rows, obs)
@@ -1641,7 +1641,7 @@ def build() -> gr.Blocks:
                         retrieval_index = gr.Dropdown(Store().list("indexes"), label="Saved hourly retrieval index")
                         refresh_indexes = gr.Button("Refresh retrieval indexes", size="sm")
                     gr.Markdown("RAG uses the selected station/time with the index's hourly archive: **30-day context**, "
-                                "**24 or 48 h**, **temperature/pressure**, direct prediction and no additional features. "
+                                "**24 or 48 h**, **temperature/pressure**, direct or AROME-error prediction and no additional features. "
                                 "AROME conditioning uses genuine issued runs. **AROME-error indexes require archived "
                                 "conditioning** and retrieve only cases fully verified before this forecast. Missing "
                                 "archive coverage is unavailable. Create an index or "
@@ -1715,10 +1715,12 @@ def build() -> gr.Blocks:
                             "Space restarts remove it. Download results you need to keep. The configured bucket is public.",
                             elem_classes="note")
                 with gr.Row():
-                    b_ckpt = gr.Radio([(f"Timestral-{s}", s) for s in CHECKPOINTS], value=b0["size"],
+                    b_ckpt = gr.Radio(FORECAST_MODELS, value=b0["size"],
                                       label="Benchmark model (checkpoint)")
                     b_method = gr.Radio([(label, key) for key, label in PREDICTION_TARGETS.items()],
                                         value=b0["prediction_target"], label="Benchmark forecast method")
+                gr.Markdown("Model weights must already be installed. Setup: **RAG research → Prepare data → Model setup**.",
+                            elem_classes="note")
                 with gr.Row():
                     b_cond = gr.Dropdown(CONDITIONING_CHOICES, value=b0["conditioning"], label="AROME conditioning")
                     b_features = gr.CheckboxGroup(FEATURE_CHOICES, value=b0["features"], label="Additional feature groups")
