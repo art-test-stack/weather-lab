@@ -200,3 +200,120 @@ def collect(cfg: dict, store: Store | None = None, log=print) -> Path:
                    "issued_start_limitation": "Open-Meteo named runs start 2026-04-02; January–March remain unavailable",
                    "issued_availability": "Assumed run lag; original publication/revision times are not established"})
         return store.put("archives", out)
+
+
+def extend_issued(archive_id: str, cfg: dict, store: Store | None = None, log=print) -> Path:
+    """Resume missing three-hourly standard AROME issues; reuse all observations and existing runs."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import shutil
+    import threading
+
+    from weather_lab.common import read_json
+
+    store = store or Store()
+    base = store.get("archives", archive_id)
+    obs = observations(pd.read_parquet(base / "observations.parquet"), cfg["variables"])
+    original = issued_forecasts(pd.read_parquet(base / "issued.parquet"))
+    stations = [s for s in cfg["stations"] if s["id"] in set(obs.station)]
+    if len(stations) != 2 or {s["id"] for s in stations} != {"07149", "07630"}:
+        raise ValueError("issued extension is restricted to Paris-Orly and Toulouse-Blagnac")
+    product = "meteofrance_arome_france"
+    end = min(obs.time.max(), pd.Timestamp.now(tz="UTC").floor("h"))
+    existing = set(zip(original.station, original["product"], original.run))
+    runs = [r for r in pd.date_range(ts("2026-04-02"), end, freq="3h")
+            if r + pd.Timedelta(hours=3) <= end
+            and any((s["id"], product, r) not in existing for s in stations)]
+    work = ROOT / ".tmp/codex/arome-all-issues" / archive_id
+    raw = work / "responses"
+    raw.mkdir(parents=True, exist_ok=True)
+    local = threading.local()
+    endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+
+    def fetch(run):
+        dest = raw / f"issued-both-{product}-{run:%Y%m%dT%H}.json"
+        marker = dest.with_suffix(".meta.json")
+        params = {"latitude": ",".join(str(s["lat"]) for s in stations),
+                  "longitude": ",".join(str(s["lon"]) for s in stations),
+                  "hourly": ",".join(FIELDS), "models": product, "cell_selection": "nearest",
+                  "elevation": ",".join("nan" for _ in stations), "run": run.strftime("%Y-%m-%dT%H:%M"), "forecast_days": 3}
+        rec = read_json(marker) if marker.exists() and dest.exists() else None
+        if rec and (rec.get("params") != params or rec.get("sha256") != sha256_file(dest)):
+            rec = None
+        if not rec:
+            if not hasattr(local, "session"):
+                local.session = requests.Session()
+            for attempt in range(5):
+                time.sleep(.35 if attempt == 0 else min(2 ** attempt, 30))
+                response = local.session.get(endpoint, params=params, timeout=60)
+                if response.status_code in (429, 500, 502, 503, 504):
+                    continue
+                if response.status_code not in (200, 400, 404):
+                    response.raise_for_status()
+                try:
+                    data = response.json()
+                except ValueError:
+                    continue
+                if response.status_code == 400 and "parameter" in str(data.get("reason", "")).lower():
+                    raise ValueError(f"invalid issue request: {data}")
+                if response.status_code == 200 and (not isinstance(data, list) or len(data) != len(stations)):
+                    raise ValueError(f"unexpected multi-station response for {run}")
+                pending = dest.with_suffix(".pending")
+                pending.write_bytes(response.content)
+                pending.replace(dest)
+                rec = {"url": response.url, "params": params, "status": response.status_code,
+                       "sha256": sha256_file(dest), "retrieved_at": now_utc(), "bytes": dest.stat().st_size,
+                       "path": f"raw/additional-issued/{dest.name}"}
+                write_json(marker, rec)
+                break
+            else:
+                raise RuntimeError(f"issue {run} could not be downloaded; saved responses retained at {raw}")
+        if rec["status"] != 200:
+            return [], rec, {"run": str(run), "product": product, "kind": "issued",
+                             "stations": [s["id"] for s in stations], "reason": json.loads(dest.read_text())}
+        data = json.loads(dest.read_text())
+        frames = []
+        for station, weather in zip(stations, data):
+            if abs(weather["latitude"] - station["lat"]) > .1 or abs(weather["longitude"] - station["lon"]) > .1:
+                raise ValueError("multi-station response order or grid coordinates differ from the requested stations")
+            if (station["id"], product, run) not in existing:
+                frames.append(_parse(weather, station, product, rec, run, run + pd.Timedelta(hours=3),
+                                     "assumed_run_plus_3h"))
+        return frames, rec, None
+
+    added, evidence, failures = [], [], []
+    consumed = 0
+    log(f"Collecting {len(runs)} remaining issue requests for both stations; verified cached responses are reused", flush=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(fetch, r) for r in runs]
+        for number, result in enumerate(as_completed(futures), 1):
+            frames, rec, gap = result.result()
+            consumed += rec["bytes"]
+            if consumed > cfg["collection"]["download_cap_mib"] * 2**20:
+                raise RuntimeError("issued extension exceeded the download budget; responses retained")
+            added.extend(frames)
+            evidence.append(rec)
+            if gap:
+                failures.append(gap)
+            if number % 20 == 0 or number == len(runs):
+                log(f"Issues {number}/{len(runs)} · unavailable {len(failures)} · {consumed / 2**20:.1f} MiB", flush=True)
+    out = work / "archive"
+    out.mkdir(exist_ok=True)
+    for name in ("observations.parquet", "historical.parquet"):
+        if (base / name).exists():
+            shutil.copy2(base / name, out / name)
+    if (base / "raw").exists():
+        shutil.copytree(base / "raw", out / "raw", dirs_exist_ok=True)
+    target = out / "raw/additional-issued"
+    target.mkdir(parents=True, exist_ok=True)
+    for rec in evidence:
+        shutil.copy2(raw / Path(rec["path"]).name, out / rec["path"])
+    write_json(target / "sources.json", sorted(evidence, key=lambda r: r["path"]))
+    issued_forecasts(pd.concat([original, *added], ignore_index=True)).to_parquet(out / "issued.parquet", index=False)
+    previous = read_json(base / "archive.json")
+    write_json(out / "archive.json", {**previous, "created_at": now_utc(), "parent_archive_id": archive_id,
+               "extension": {"product": product, "stations": [s["id"] for s in stations],
+                             "run_hours_utc": list(range(0, 24, 3)), "requests": len(runs),
+                             "sources": evidence, "unavailable_requests": failures,
+                             "observation_sha256": sha256_file(base / "observations.parquet")},
+               "issued_availability": "Assumed run plus 3 h; original publication/revision times are not established"})
+    return store.put("archives", out)
