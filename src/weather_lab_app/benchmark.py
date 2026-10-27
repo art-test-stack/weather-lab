@@ -49,6 +49,20 @@ def choices(suite):
     return [("New development run", "")] + development.saved_runs(suite)
 
 
+def index_choices(suite):
+    from weather_lab.rag_store import Store
+    from weather_lab_app import main as app
+
+    store = Store()
+    archive = app.RUNS[suite].run.get("archive_id")
+    found = []
+    for label, ident in store.list("indexes"):
+        meta = read_json(store.root / "indexes" / ident / "index.json")
+        if meta.get("archive_id") == archive and meta["retrieval"].get("stride_hours") == 1:
+            found.append((label, ident))
+    return found
+
+
 def feedback(*values):
     from weather_lab_app import main as app
 
