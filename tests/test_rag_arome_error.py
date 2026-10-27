@@ -113,6 +113,18 @@ def test_unverified_case_missing_arome_and_wrong_station_are_refused(error_cases
         index.retrieve(wrong_product, "shape", 2)
 
 
+def test_t0_residual_identity_includes_baseline_without_conditioning(error_cases):
+    cfg, obs, issued, store, archive, index = error_cases
+    batch = query(cfg, obs, issued)
+    model = foundation("t0-gamma", index, prediction_target="arome_error")
+    changed = batch.arome.copy() + 1
+    other = replace(batch, arome=changed, arome_inputs=replace(batch.arome_inputs, future=changed))
+    original_native, other_native = model.build_inputs(batch), model.build_inputs(other)
+    np.testing.assert_allclose(original_native[0], other_native[0], equal_nan=True)
+    np.testing.assert_allclose(original_native[1], other_native[1], equal_nan=True)
+    assert model.input_identity(batch) != model.input_identity(other)
+
+
 def test_conditioned_forecast_lookup_has_distinct_cache_identity(error_cases, monkeypatch):
     from weather_lab import predcache, rag_forecast
 
@@ -134,3 +146,47 @@ def test_conditioned_forecast_lookup_has_distinct_cache_identity(error_cases, mo
     with pytest.raises(ValueError, match="requires archived AROME"):
         rag_forecast.forecast(case, replace(selected, conditioning="none"), lookup_only=True, store=store)
     assert check(replace(selected, conditioning="substobs"))
+
+
+@pytest.mark.parametrize("model_name", ["Timestral-209M", "t0-gamma"])
+def test_residual_rag_shifts_quantiles_once_and_excludes_bridge(error_cases, tmp_path, monkeypatch, model_name):
+    import threading
+    from types import SimpleNamespace
+    import torch
+    from weather_lab import models, predcache, rag_forecast
+    from weather_lab.forecast import QUANTILE_LEVELS
+
+    cfg, obs, issued, store, archive, _ = error_cases
+    cfg["context_hours"] = 720
+    index = ErrorIndex(build(archive.name, cfg, store))
+    batch = query(cfg, obs, issued)
+    errors = batch.history - batch.arome_inputs.history
+    calls = []
+    def generate(context, **kwargs):
+        calls.append(kwargs)
+        np.testing.assert_allclose(context[:, :2], errors, equal_nan=True)
+        h = kwargs.get("horizon", kwargs.get("prediction_length"))
+        quantiles = np.broadcast_to(.2 + np.array(QUANTILE_LEVELS) - .5,
+                                   (*context.shape[:2], h, len(QUANTILE_LEVELS))).copy().astype(np.float32)
+        return SimpleNamespace(quantiles=torch.from_numpy(quantiles), quantile_levels=QUANTILE_LEVELS)
+    native = SimpleNamespace(config=SimpleNamespace(quantile_levels=QUANTILE_LEVELS),
+                             quantile_levels=QUANTILE_LEVELS, predict=generate, forecast=generate)
+    monkeypatch.setattr(models.MODELS, "get", lambda *a: SimpleNamespace(forecaster=native, lock=threading.Lock(), info={}))
+    monkeypatch.setattr(rag_forecast, "prefetch", lambda *a, **k: None)
+    monkeypatch.setattr(predcache, "location", lambda: (tmp_path / "predictions", "test"))
+    case = pd.Series({"station": "07149", "origin": pd.Timestamp("2026-04-24T06:00Z")}, name="residual-case")
+    selected = ForecastConfig.make(model_name, "archived", context_days=30, horizon_h=24,
+                                   targets=("t", "pmer"), step_hours=1, prediction_target="arome_error",
+                                   retrieval_method="shape", retrieval_index=index.ident)
+    assert not check(selected)
+    frame, info = rag_forecast.forecast(case, selected, store=store)
+    assert len(calls) == 1 and len(frame) == 48
+    assert frame.lead_h.min() == 1 and frame.lead_h.max() == 24
+    np.testing.assert_allclose(frame.predicted_error, .2, atol=1e-4)
+    np.testing.assert_allclose(frame["q0.90"] - frame["q0.10"], .8, atol=1e-4)
+    expected = batch.arome[0][:, batch.lead_hours[0] > 0].ravel()
+    np.testing.assert_allclose(frame.arome_baseline, expected)
+    assert info["settings"]["prediction_target"] == "arome_error" and info["settings"]["error_history"]
+    cached, hit = rag_forecast.forecast(case, selected, lookup_only=True, store=store)
+    assert hit["cache_hit"] and len(calls) == 1
+    pd.testing.assert_frame_equal(frame, cached)
