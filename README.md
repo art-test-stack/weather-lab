@@ -284,6 +284,15 @@ tests/                      unit tests; test_real_timestral.py is opt-in
 Branch `research/ts-rag-weather` extends PR #1. This independent experiment is configured in
 `configs/rag_weather_v1.yaml`; it never rewrites an existing frozen suite or its scores.
 The Space has a **RAG research** tab with explicit collection, index, evaluation and saved-result actions.
+The **Forecast** tab also exposes TFC t0-gamma and optional **RAG · levels / shape** retrieval. Select a saved
+hourly index (use **Refresh retrieval indexes** after creating one), a 30-day context, a 24- or 48-hour horizon,
+temperature or pressure, direct prediction, no AROME conditioning and no additional feature groups.
+Only **Run forecast** executes or applies changes. RAG reads the index's hourly observation archive for the
+selected station/time, uses the declared three-hour observation delay, and excludes generated bridge steps.
+Missing hourly context, indexes or installed weights remain explicit failures; no data are interpolated or
+models substituted. Exploratory cache identities include model, retrieval method, verified index/archive,
+calendar, inputs and device; results never enter frozen benchmark runs. Download t0 weights explicitly under
+**RAG research → Model setup** (about 1 GB for t0; up to 1.86 GB with Timestral-209M).
 Browsing saved runs does not call a model. The new `tfc-t0[torch]==0.6.0` dependency enables the existing
 pinned t0-gamma adapter alongside Timestral-209M; torch and all checkpoint revisions stay unchanged.
 
