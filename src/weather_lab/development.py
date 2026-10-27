@@ -108,7 +108,29 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
         code_files.append(Path(__file__).with_name("t0_adapter.py"))
     model_id = f"{ck.family}-dev {cfg.model} {cfg.prediction_target} {cfg.conditioning} " + sha256_text(
         json.dumps(cfg.as_dict(), sort_keys=True))[:8]
-    adapter = build_adapter(cfg, model_id, arome_fields=[v for v in ("t", "pmer") if v in cfg.targets])
+    if cfg.retrieval_method != "none":
+        from weather_lab.rag_adapters import foundation
+        from weather_lab.rag_index import load_index
+        from weather_lab.rag_store import Store
+
+        index = load_index(Store().get("indexes", cfg.retrieval_index))
+        if (index.meta["variables"] != list(cfg.targets) or index.meta["context_hours"] != cfg.context_days * 24
+                or index.meta["observation_delay_hours"] != 3):
+            raise ValueError("The retrieval index variables, context or observation delay differ from the benchmark")
+        if index.meta["retrieval"].get("stride_hours") != 1:
+            raise ValueError("Select an hourly sliding retrieval index for this benchmark")
+        if index.meta["archive_id"] != original.get("archive_id"):
+            raise ValueError("The retrieval index must belong to the benchmark's pinned archive")
+        if index.meta.get("kind") == "arome_error" and cfg.conditioning != "archived":
+            raise ValueError("The error index requires archived AROME conditioning")
+        adapter = foundation(cfg.model, index, cfg.retrieval_method, k=index.meta["retrieval"]["k"],
+                             calendar=cfg.calendar, arome=cfg.arome_mode, prediction_target=cfg.prediction_target)
+        adapter.id = model_id
+        code_files.extend(Path(__file__).with_name(n) for n in ("rag_adapters.py", "rag_index.py", "rag_arome_error.py"))
+    else:
+        adapter = build_adapter(cfg, model_id, arome_fields=[v for v in ("t", "pmer") if v in cfg.targets])
+    if original.get("hourly_benchmark"):
+        code_files.append(Path(__file__).with_name("hourly_benchmark.py"))
     run_id = f"development-{now_utc().replace(':', '').replace('-', '')}-{uuid4().hex[:10]}"
     suite = f"development-{original['suite']}-{run_id.rsplit('-', 1)[-1]}"
     targets = pd.read_parquet(source / "targets.parquet")
@@ -118,6 +140,10 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
                                           range(cfg.step_hours, cfg.horizon_h + 1, cfg.step_hours)])
     assert expected.isin(pd.MultiIndex.from_frame(targets[["case_id", "variable", "lead_h"]])).all()
     saved = pd.read_parquet(source / "predictions.parquet")
+    if original.get("hourly_benchmark") and (cfg.conditioning != "none" or cfg.prediction_target == "arome_error"):
+        baseline_path = source / "arome_reference.parquet"
+        source_hashes[baseline_path.name] = sha256_file(baseline_path)
+        saved = pd.concat([saved, pd.read_parquet(baseline_path)], ignore_index=True)
     refs = [m for m in ("persistence", "seasonal-naive-24h", "climatology", "arome-raw", "arome-biascorr")
             if m in set(saved.model)]
     reference = saved[saved.model.isin(refs) & saved.variable.isin(cfg.targets)
@@ -136,7 +162,7 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
             frame = result.to_frame(batch, suite)
             if cfg.prediction_target == "arome_error":
                 _, baseline, _ = adapter.error_inputs(batch)
-                frame["arome_baseline"] = baseline.ravel()
+                frame["arome_baseline"] = baseline[0][:, batch.lead_hours[0] > 0].ravel()
                 frame["predicted_error"] = frame.point - frame.arome_baseline
             rows.append(frame)
 
@@ -154,13 +180,23 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
     for number, (_, case) in enumerate(cases.set_index("case_id", drop=False).iterrows(), 1):
         if not case.eligible:
             availability.append({"case_id": case.name, "station": case.station, "origin": case.origin,
-                                 "model": model_id, "status": "ineligible", "reason": "source suite eligibility"})
+                                 "model": model_id, "status": "ineligible", "reason": case.get("reason", "source suite eligibility")})
             continue
         try:
-            batch = exploratory_inputs(obs[obs.station.eq(case.station)], case, list(cfg.targets), cfg.context_days,
-                                       cfg.arome_mode, arome, horizon_steps=cfg.horizon_h // cfg.step_hours,
-                                       step_hours=cfg.step_hours, aux_df=aux, station_coords=coords,
-                                       arome_history=need_history, arome_baseline=cfg.prediction_target == "arome_error")
+            if original.get("hourly_benchmark"):
+                from weather_lab.hourly_benchmark import inputs
+
+                station_obs = obs[obs.station.eq(case.station)]
+                relevant = None if arome is None else arome[arome.station.eq(case.station)
+                    & (arome.available_at <= case.origin)
+                    & (arome.valid_time >= case.origin - pd.Timedelta(days=cfg.context_days, hours=3))]
+                batch = inputs(station_obs, relevant, case, cfg)
+                batch.station_coords = coords
+            else:
+                batch = exploratory_inputs(obs[obs.station.eq(case.station)], case, list(cfg.targets), cfg.context_days,
+                                           cfg.arome_mode, arome, horizon_steps=cfg.horizon_h // cfg.step_hours,
+                                           step_hours=cfg.step_hours, aux_df=aux, station_coords=coords,
+                                           arome_history=need_history, arome_baseline=cfg.prediction_target == "arome_error")
             native = adapter.build_inputs(batch)
             ctx, known = native[:2]
             if ck.family == "t0":
@@ -233,6 +269,8 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
         write_json(out / "manifest.json", derived)
         write_json(out / "forecast_config.json", cfg.as_dict())
         systems = [s | {"reused_from": original["run_id"]} for s in original["systems"] if s["id"] in refs]
+        if "arome-raw" in refs and not any(s["id"] == "arome-raw" for s in systems):
+            systems.append({"id": "arome-raw", "kind": "arome", "per_case_ms": None, "peak_rss_mb_after": None})
         systems.append(adapter.describe() | {"revision": f"{ck.repo}@{ck.revision[:12]}",
                                              "per_case_ms": None, "peak_rss_mb_after": None})
         write_json(out / "run.json", {"run_id": run_id, "suite": suite, "development": True,
@@ -240,6 +278,7 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
                    "source_suite": original["suite"], "source_run_id": original["run_id"],
                    "source_sha256": source_hashes, "forecast_config": cfg.as_dict(),
                    "checkpoint": {"repo": ck.repo, "revision": ck.revision, "sha256": ck.sha256},
+                   "hourly_benchmark": bool(original.get("hourly_benchmark")), "archive_id": original.get("archive_id"),
                    "adapter_version": adapter.ADAPTER_VERSION, "preprocessing_version": adapter.PREPROCESSING_VERSION,
                    "input_sha256": fingerprints, "case_info": case_info,
                    "code_sha256": {p.name: sha256_file(p) for p in code_files},
