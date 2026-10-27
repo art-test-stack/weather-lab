@@ -298,3 +298,14 @@ SETUP_NAMES = {
 DEFAULT_EXPERIMENT = "arome-issued-v2"
 EXPERIMENT_ORDER = ["arome-issued-v2", "synop-ctxval-2023-v1", "synop-historical-v1", "arome-issued-v1"]
 
+
+EXPERIMENTS["hourly-2026-v2"] = {
+    "name": "2026 · hourly 48-hour windows · Orly and Blagnac", "status": "Development replay",
+    "scope": "Every UTC hour from January 2026 through the last measured record; 1–48 h leads.",
+    "caveat": "Overlapping windows; observations and issued AROME use a 3-hour replay availability assumption.",
+    "headline": ["persistence"], "reference": "persistence", "default_systems": ["persistence"],
+    "band": None, "sample": "Hourly 2026 station observations", "benchmark_only": True,
+}
+for _new, _old in [("rag-weather-2026-hourly-v2", "rag-weather-2026-v1"),
+                   ("rag-arome-error-2026-hourly-v2", "rag-arome-error-2026-v1")]:
+    EXPERIMENTS[_new] = {**EXPERIMENTS[_old], "name": EXPERIMENTS[_old]["name"] + " · hourly sliding windows"}
