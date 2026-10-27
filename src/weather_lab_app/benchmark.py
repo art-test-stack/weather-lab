@@ -27,7 +27,8 @@ def draft(*values):
 def configuration(d):
     from weather_lab_app import main as app
 
-    return ForecastConfig.make(f"Timestral-{d['size']}", d["conditioning"], app.feature_spec(d),
+    model = "t0-gamma" if d["size"] == "t0-gamma" else f"Timestral-{d['size']}"
+    return ForecastConfig.make(model, d["conditioning"], app.feature_spec(d),
                                calendar=bool(d["calendar"]), context_days=int(d["ctx"]), horizon_h=int(d["horizon"]),
                                step_hours=app.RUNS[d["suite"]].step_hours,
                                targets=("t", "pmer") if d["prediction_target"] == "arome_error" else ("t", "pmer", "u", "v"),
@@ -153,7 +154,8 @@ def on_saved(path, suite):
         raise gr.Error("Select a saved development run of this suite")
     c = read_json(Path(path) / "run.json")["forecast_config"]
     spec = {f["name"]: f["params"] for f in c["features"]}
-    return (c["model"].split("-")[-1], c["prediction_target"], c["conditioning"], list(spec), c["calendar"],
+    size = "t0-gamma" if c["model"] == "t0-gamma" else c["model"].removeprefix("Timestral-")
+    return (size, c["prediction_target"], c["conditioning"], list(spec), c["calendar"],
             c["context_days"], c["horizon_h"], spec.get("resid", features.GROUPS["resid"].defaults)["variables"],
             spec.get("atmos", features.GROUPS["atmos"].defaults)["fields"],
             spec.get("tend", features.GROUPS["tend"].defaults)["lags_h"])
