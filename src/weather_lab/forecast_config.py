@@ -192,8 +192,10 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
             out.append(Issue("invalid", "retrieval", "hourly RAG requires 30 days of context and a 24 or 48 h horizon"))
         if cfg.targets != ("t", "pmer"):
             out.append(Issue("unsupported", "retrieval", "the hourly index covers temperature and pressure only"))
-        if cfg.conditioning != "none" or cfg.features or correction:
-            out.append(Issue("unsupported", "retrieval", "this RAG protocol uses direct weather prediction without AROME conditioning or additional feature groups"))
+        if cfg.conditioning == "substobs":
+            out.append(Issue("unsupported", "conditioning", "RAG requires genuine issued AROME; observation substitution is unsupported"))
+        if cfg.features or correction:
+            out.append(Issue("unsupported", "retrieval", "RAG supports direct weather prediction with optional AROME conditioning and no additional feature groups"))
     if correction and (ck.family != "timestral" or not fam.known_covariates):
         out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires the Timestral adapter "
                          "and known-future forecast-lead inputs"))
