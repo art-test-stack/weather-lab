@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.common import read_json
+from weather_lab.common import ROOT, read_json
 from weather_lab.forecast import CaseBatch
 from weather_lab.rag import config
 from weather_lab.rag_adapters import Analog, foundation
@@ -23,7 +23,7 @@ from weather_lab.rag_store import Store
 
 @pytest.fixture
 def setup(tmp_path):
-    cfg = copy.deepcopy(config())
+    cfg = copy.deepcopy(config(ROOT / "configs/rag_weather_v1.yaml"))
     cfg.update(context_hours=24, foundation_models=[], stations=[cfg["stations"][0]])
     cfg["retrieval"].update(query_hours=12, k=1, seasonal_days=None)
     times = pd.date_range("2025-11-01", "2026-01-04T23:00", freq="h", tz="UTC")
@@ -331,3 +331,13 @@ def test_research_panel_builds_without_loading_or_running_models(setup, monkeypa
                for c in panel.config["components"])
     assert all(event == "click" for d in panel.config["dependencies"] for _, event in d["targets"])
     assert rag.show(None)[0] == "Select a saved RAG run."
+
+
+def test_hourly_index_slides_across_utc_hours_without_crossing_cutoff(setup):
+    cfg, frame, store, archive, _ = setup
+    hourly = copy.deepcopy(cfg)
+    hourly['retrieval']['stride_hours'] = 1
+    index = Index(build(archive.name, hourly, store))
+    assert set(index.windows.origin.dt.hour) == set(range(24))
+    assert index.windows.origin.diff().dropna().eq(pd.Timedelta(hours=1)).all()
+    assert index.windows.available_at.lt(pd.Timestamp('2026-01-01T00:00Z')).all()
