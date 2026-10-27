@@ -325,5 +325,9 @@ def test_research_panel_builds_without_loading_or_running_models(setup, monkeypa
         with gr.Tabs():
             rag.build()
     assert len(panel.config["dependencies"]) == 7
+    text = "\n".join(str(c.get("props", {}).get("value", "")) for c in panel.config["components"])
+    assert all(title in text for title in ("Available data and indexes", "Run or view evaluations"))
+    assert any(c.get("props", {}).get("label") == "Prepare data" and not c["props"]["open"]
+               for c in panel.config["components"])
     assert all(event == "click" for d in panel.config["dependencies"] for _, event in d["targets"])
     assert rag.show(None)[0] == "Select a saved RAG run."
