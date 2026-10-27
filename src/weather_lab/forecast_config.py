@@ -194,10 +194,10 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
             out.append(Issue("unsupported", "retrieval", "the hourly index covers temperature and pressure only"))
         if cfg.conditioning == "substobs":
             out.append(Issue("unsupported", "conditioning", "RAG requires genuine issued AROME; observation substitution is unsupported"))
-        if cfg.features or correction:
-            out.append(Issue("unsupported", "retrieval", "RAG supports direct weather prediction with optional AROME conditioning and no additional feature groups"))
-    if correction and (ck.family != "timestral" or not fam.known_covariates):
-        out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires the Timestral adapter "
+        if cfg.features:
+            out.append(Issue("unsupported", "retrieval", "RAG supports weather or residual prediction with no additional feature groups"))
+    if correction and (ck.family not in ("timestral", "t0") or not fam.known_covariates):
+        out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires a native residual adapter "
                          "and known-future forecast-lead inputs"))
     for name in cfg.feature_names:
         g = feats.GROUPS[name]
