@@ -1,0 +1,23 @@
+# Separate development protocol: retrieve genuinely issued forecasts and their verified errors.
+experiment: rag-arome-error-2026-v1
+archive_id: 003d6b33287b939ecc587378170399f69a599957fa7f666baf8034d4a058c964
+variables: [t, pmer]
+stations: ['07149', '07630']
+product: meteofrance_arome_france
+context_hours: 720
+horizons_hours: [24, 48]
+observation_delay_hours: 3
+observation_availability: "Historical replay assumption: observations available 3 h after validity; original publication/revision timestamps are absent. No operational-latency claim."
+min_context_observed_fraction: 0.8
+retrieval:
+  kind: arome_error
+  start: '2026-04-02T00:00:00Z'
+  scale_start: '2022-01-01T00:00:00Z'
+  scale_end_exclusive: '2026-01-01T00:00:00Z'
+  query_hours: 72
+  forecast_query_hours: 24
+  k: 5
+  methods: [level, shape]
+  eligibility: Entire forecast verified plus observation delay strictly before query issue time; same station and product.
+  missing: Incomplete query or verification windows refused; unavailable historical error steps remain NaN.
+label: Development retrieval-augmented inference; no fine-tuning or held-out improvement claim.
