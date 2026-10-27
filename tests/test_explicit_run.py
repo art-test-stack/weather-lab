@@ -343,6 +343,8 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     assert {v for _, v in main_metric.choices} == {"mae", "rmse"}
     controls = dict(zip(app.DRAFT_KEYS, h["draft"]))
     assert "t0-gamma" in {v for _, v in controls["size"].choices}
+    benchmark_controls = dict(zip(app.bench.KEYS, h["benchmark"]["draft"]))
+    assert "t0-gamma" in {v for _, v in benchmark_controls["size"].choices}
     assert {v for _, v in controls["retrieval_method"].choices} == {"none", "level", "shape"}
     assert {"mae", "rmse"} <= {v for _, v in h["benchmark_metric"].choices}
     assert any(c.get("props", {}).get("label") == "Forecast" for c in demo.config["components"])
