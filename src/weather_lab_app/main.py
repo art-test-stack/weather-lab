@@ -110,7 +110,7 @@ table.mini .sw {display:inline-block; width:10px; height:10px; border-radius:2px
 # --------------------------------------------------------------------------- shared helpers
 
 def experiment_choices(show_superseded: bool = False) -> list[tuple[str, str]]:
-    return [(EXPERIMENTS[s]["name"], s) for s in RUNS if show_superseded or not EXPERIMENTS[s].get("superseded")]
+    return [(EXPERIMENTS[s]["name"], s) for s in RUNS if not EXPERIMENTS[s].get("benchmark_only") and (show_superseded or not EXPERIMENTS[s].get("superseded"))]
 
 
 def variable_choices(suite: str) -> list[tuple[str, str]]:
@@ -1189,7 +1189,7 @@ def lead_view(suite, variable, metric, station, split, statuses, size=None, setu
     from weather_lab.horizon import by_lead, lead_ranges, scored_rows
 
     run, e = run or RUNS[suite], experiment_view(suite, size, setup)
-    if run.run.get("development"):
+    if run.run.get("development") or run.run.get("hourly_benchmark"):
         e = {**e, "headline": run.models,
              "reference": "arome-raw" if "arome-raw" in _saved_models(run, variable) else "persistence"}
     split = split or run.splits[-1]
@@ -1204,7 +1204,7 @@ def lead_view(suite, variable, metric, station, split, statuses, size=None, setu
     if not models:
         return plots.metric_by_lead(pd.DataFrame(columns=["model"]), metric, variable, []), ""
     rows = scored_rows(run.predictions(), run.targets(), run.cases(), variable,
-                       all_models if run.run.get("development") else models, metric, station, split)
+                       all_models if run.run.get("development") or run.run.get("hourly_benchmark") else models, metric, station, split)
     if rows.empty:
         return plots.metric_by_lead(pd.DataFrame(columns=["model"]), metric, variable, []), "No matched observed pairs."
     table = by_lead(rows, metric, cumulative=bool(cumulative))
@@ -1318,7 +1318,7 @@ def context_label(run, models: list[str]) -> str:
 def benchmark(suite, variable, metric, lead, split, station, season, statuses, size=None, setup=None,
               lead_mode="at", run=None):
     run, e = run or RUNS[suite], experiment_view(suite, size, setup)
-    development = run.run.get("development")
+    development = run.run.get("development") or run.run.get("hourly_benchmark")
     if development:
         e = {**e, "reference": "arome-raw" if "arome-raw" in _saved_models(run, variable) else "persistence"}
     cumulative = lead_mode == "cumulative"
@@ -1703,14 +1703,26 @@ def build() -> gr.Blocks:
 
             # ---------------- benchmark
             with gr.Tab("Benchmark", id="benchmark"):
-                b0 = bench.defaults(DEFAULT_SUITE)
+                benchmark_suite = "hourly-2026-v2" if "hourly-2026-v2" in RUNS else DEFAULT_SUITE
+                b0 = bench.defaults(benchmark_suite)
                 b_applied = gr.State({"draft": b0, "config": bench.configuration(b0),
-                                      "path": str(RUNS[DEFAULT_SUITE].path), "kind": "frozen"})
+                                      "path": str(RUNS[benchmark_suite].path), "kind": "reference" if RUNS[benchmark_suite].run.get("hourly_benchmark") else "frozen"})
                 b_guard = gr.State({"busy": False})
                 b_request, b_pending, b_changed = gr.State(None), gr.State(None), gr.State(True)
-                b_exp = gr.Dropdown(experiment_choices(), value=DEFAULT_SUITE,
+                b_exp = gr.Dropdown([(EXPERIMENTS[benchmark_suite]["name"], benchmark_suite)], value=benchmark_suite,
                                     label="Suite — run every eligible station and origin")
-                b_saved = gr.Dropdown(bench.choices(DEFAULT_SUITE), value="", label="New run or replay a saved development run")
+                if RUNS[benchmark_suite].run.get("hourly_benchmark"):
+                    cases = RUNS[benchmark_suite].cases()
+                    gr.Markdown(f"### 2026 · hourly sliding windows\n"
+                                f"**Paris-Orly and Toulouse-Blagnac · {len(cases):,} scheduled windows · "
+                                f"{cases.origin.min():%d %B %Y %H:%M}–{cases.origin.max():%d %B %Y %H:%M} UTC.** "
+                                "A new origin every hour, predicting the next 48 hours. Late-2025 measurements supply January context. "
+                                "Missing targets and unverified trailing windows remain unavailable. AROME uses a single issued run "
+                                "available at each origin; the saved archive contains daily 03:00 UTC issues from 2 April. "
+                                "Observations and issues use an assumed 3-hour publication delay. "
+                                "Direct models are evaluated across the full observed year; AROME methods compare on their shared available dates. "
+                                "Overlapping windows are dependent; this is a development replay, not an untouched test set.")
+                b_saved = gr.Dropdown(bench.choices(benchmark_suite), value="", label="New run or replay a saved development run")
                 gr.Markdown("Development runs use the writable bucket when mounted; otherwise storage is local and "
                             "Space restarts remove it. Download results you need to keep. The configured bucket is public.",
                             elem_classes="note")
@@ -1726,8 +1738,12 @@ def build() -> gr.Blocks:
                     b_features = gr.CheckboxGroup(FEATURE_CHOICES, value=b0["features"], label="Additional feature groups")
                     b_calendar = gr.Checkbox(b0["calendar"], label="Calendar inputs")
                 with gr.Row():
+                    b_retrieval = gr.Radio([("None", "none"), ("RAG · levels", "level"), ("RAG · shape", "shape")],
+                                           value="none", label="Benchmark retrieval")
+                    b_index = gr.Dropdown(Store().list("indexes"), label="Benchmark hourly retrieval index")
+                with gr.Row():
                     b_ctx = gr.Slider(*CONTEXT_DAYS, value=b0["ctx"], step=1, label="Benchmark context (days)")
-                    b_length = gr.Slider(3, RUNS[DEFAULT_SUITE].horizon_hours, value=b0["horizon"], step=3,
+                    b_length = gr.Slider(RUNS[benchmark_suite].step_hours, RUNS[benchmark_suite].horizon_hours, value=b0["horizon"], step=RUNS[benchmark_suite].step_hours,
                                         label="Benchmark horizon (hours)")
                 with gr.Accordion("Benchmark feature parameters", open=False):
                     b_resid = gr.CheckboxGroup(list(g["resid"].choices["variables"]), value=b0["resid_vars"],
@@ -1737,16 +1753,16 @@ def build() -> gr.Blocks:
                     b_tend = gr.CheckboxGroup([(f"{x} h", x) for x in g["tend"].choices["lags_h"]], value=b0["tend_lags"],
                                              label="Tendencies: lags")
                 with gr.Row(equal_height=True):
-                    b_var = gr.Dropdown(variable_choices(DEFAULT_SUITE), value="t", label="Weather variable",
+                    b_var = gr.Dropdown(variable_choices(benchmark_suite), value="t", label="Weather variable",
                                         min_width=160)
                     metric = gr.Dropdown(METRIC_CHOICES, value="mae", label="Main metric", min_width=180)
                     lead = gr.Dropdown(LEADS, value="all", label="Lead time (bars)", min_width=160)
                     b_station = gr.Dropdown(label="Display station (execution always uses all stations)",
-                                            choices=[("All stations", "ALL")] + station_choices(DEFAULT_SUITE),
+                                            choices=[("All stations", "ALL")] + station_choices(benchmark_suite),
                                             value="ALL", min_width=180)
                     lead_mode = gr.Radio(LEAD_VIEWS, value="at", label="Lead-time chart", min_width=260)
-                    split = gr.Radio([(SPLIT_NAMES.get(s, s), s) for s in RUNS[DEFAULT_SUITE].splits],
-                                      value=b0["split"], label="Display period", visible=len(RUNS[DEFAULT_SUITE].splits) > 1)
+                    split = gr.Radio([(SPLIT_NAMES.get(s, s), s) for s in RUNS[benchmark_suite].splits],
+                                      value=b0["split"], label="Display period", visible=len(RUNS[benchmark_suite].splits) > 1)
                 b_feedback = gr.Markdown("Settings match the displayed result. Run benchmark executes the full suite.")
                 b_btn = gr.Button("Run benchmark", variant="primary", elem_id="run-benchmark")
                 b_message = gr.Markdown(elem_classes="note")
@@ -1770,7 +1786,7 @@ def build() -> gr.Blocks:
                         dl_cases = gr.DownloadButton("Case availability (CSV)", size="sm")
                 with gr.Accordion("Advanced: filters, availability, uncertainty, timings", open=False):
                     with gr.Row():
-                        seasons = sorted(set(RUNS[DEFAULT_SUITE].tables["metrics_point"]["season"]),
+                        seasons = sorted(set(RUNS[benchmark_suite].tables["metrics_point"]["season"]),
                                          key=lambda s: list(SEASON_NAMES).index(s))
                         b_season = gr.Dropdown(label="Season (bars)",
                                                choices=[(SEASON_NAMES[s], s) for s in seasons], value="ALL", min_width=180)
@@ -1803,7 +1819,7 @@ def build() -> gr.Blocks:
         feedback_out = [status, horizon, horizon_info, ctx_info, e_btn, feat_note]
         render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles]
         b_draft = [b_exp, b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length, b_resid, b_atmos, b_tend,
-                   b_var, metric, lead, split, b_station, b_season, statuses, lead_mode, b_saved]
+                   b_var, metric, lead, split, b_station, b_season, statuses, lead_mode, b_saved, b_retrieval, b_index]
         b_outputs = [b_label, b_finding, b_summary, bars, lines, b_horizon, point_tab, prob_tab, matrix,
                      avail_tab, paired_tab, rt_tab, hw, dl_point, dl_prob, dl_predictions, dl_manifest,
                      dl_provenance, dl_cases]
@@ -1842,7 +1858,7 @@ def build() -> gr.Blocks:
             elif control is b_saved:
                 event = control.input(bench.on_saved, [b_saved, b_exp],
                                       [b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length,
-                                       b_resid, b_atmos, b_tend], show_progress="hidden")
+                                       b_resid, b_atmos, b_tend, b_retrieval, b_index], show_progress="hidden")
             else:
                 event = control.input(bench.feedback, b_draft + [b_applied, b_guard], [b_feedback, b_btn],
                                       queue=False, show_progress="hidden")
@@ -1863,6 +1879,7 @@ def build() -> gr.Blocks:
         demo.load(bench.render, b_applied, b_outputs)
         feedback(demo.load(refresh_retrieval, retrieval_index, retrieval_index))
         demo.load(rag_panel.refresh, outputs=rag_outputs)
+        demo.load(refresh_retrieval, b_index, b_index)
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
@@ -1878,6 +1895,13 @@ def init(run_bootstrap: bool = True) -> gr.Blocks:
     global BOOT, RUNS, DEFAULT_SUITE
     BOOT = startup_bootstrap() if run_bootstrap else None
     RUNS = available_runs()
+    from weather_lab.hourly_benchmark import configuration
+    from weather_lab.rag_store import Store
+    from weather_lab_app.results import load_run
+
+    annual = configuration()
+    if annual.get("artifact_id"):
+        RUNS[annual["suite"]] = load_run(Store().get("suites", annual["artifact_id"]))
     DEFAULT_SUITE = DEFAULT_EXPERIMENT if DEFAULT_EXPERIMENT in RUNS else next(iter(RUNS), None)
     return failure_ui(BOOT) if (BOOT or {}).get("status") == "failed" and not RUNS else build()
 
