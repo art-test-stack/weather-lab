@@ -16,7 +16,7 @@ from weather_lab_app.results import load_run
 
 KEYS = ("suite", "size", "prediction_target", "conditioning", "features", "calendar", "ctx", "horizon",
         "resid_vars", "atmos_fields", "tend_lags", "variable", "metric", "lead", "split", "station", "season",
-        "statuses", "lead_mode", "saved")
+        "statuses", "lead_mode", "saved", "retrieval_method", "retrieval_index")
 _LOCK = threading.Lock()
 
 
@@ -31,8 +31,9 @@ def configuration(d):
     return ForecastConfig.make(model, d["conditioning"], app.feature_spec(d),
                                calendar=bool(d["calendar"]), context_days=int(d["ctx"]), horizon_h=int(d["horizon"]),
                                step_hours=app.RUNS[d["suite"]].step_hours,
-                               targets=("t", "pmer") if d["prediction_target"] == "arome_error" else ("t", "pmer", "u", "v"),
-                               prediction_target=d["prediction_target"])
+                               targets=("t", "pmer") if d["prediction_target"] == "arome_error" else tuple(app.RUNS[d["suite"]].manifest["protocol"].get("variables", ("t", "pmer", "u", "v"))),
+                               prediction_target=d["prediction_target"], retrieval_method=d.get("retrieval_method", "none"),
+                               retrieval_index=(d.get("retrieval_index") or "") if d.get("retrieval_method", "none") != "none" else "")
 
 
 def defaults(suite):
@@ -64,11 +65,12 @@ def feedback(*values):
         issues = [str(exc)]
     status = ("Changes pending — click Run benchmark. The displayed results are unchanged." if pending else
               "Settings match the displayed result. Run benchmark replays the selected saved run." if d["saved"] else
+              "Selected model has not run. Click Run benchmark to evaluate all hourly windows." if applied and applied["kind"] == "reference" else
               "Settings match the displayed result. Rerun creates a new development run.")
     if issues:
         status += "\n\n" + "; ".join(i.text() if hasattr(i, "text") else i for i in issues)
     return status, gr.update(interactive=not issues and not guard["busy"],
-                             value="Running…" if guard["busy"] else "Run benchmark" if pending or d["saved"] else "Rerun")
+                             value="Running…" if guard["busy"] else "Run benchmark" if pending or d["saved"] or (applied and applied["kind"] == "reference") else "Rerun")
 
 
 def begin(*values):
@@ -149,7 +151,7 @@ def on_suite(suite, variable):
 
 def on_saved(path, suite):
     if not path:
-        return tuple(gr.skip() for _ in range(10))
+        return tuple(gr.skip() for _ in range(12))
     if path not in {p for _, p in development.saved_runs(suite)}:
         raise gr.Error("Select a saved development run of this suite")
     c = read_json(Path(path) / "run.json")["forecast_config"]
@@ -158,7 +160,7 @@ def on_saved(path, suite):
     return (size, c["prediction_target"], c["conditioning"], list(spec), c["calendar"],
             c["context_days"], c["horizon_h"], spec.get("resid", features.GROUPS["resid"].defaults)["variables"],
             spec.get("atmos", features.GROUPS["atmos"].defaults)["fields"],
-            spec.get("tend", features.GROUPS["tend"].defaults)["lags_h"])
+            spec.get("tend", features.GROUPS["tend"].defaults)["lags_h"], c.get("retrieval_method", "none"), c.get("retrieval_index", ""))
 
 
 def render(applied, changed=True):
@@ -177,14 +179,17 @@ def render(applied, changed=True):
         out = app.benchmark(d["suite"], d["variable"], d["metric"], d["lead"], d["split"], d["station"], d["season"],
                             d["statuses"], d["size"], d["conditioning"], d["lead_mode"], run=run)
         matrix = "Development run: one selected configuration. " + describe(applied["config"])
-        label = (f"Development benchmark · {run.run['run_id']} · {describe(applied['config'])} · "
+        label = "" if applied["kind"] == "reference" else (f"Development benchmark · {run.run['run_id']} · {describe(applied['config'])} · "
                  f"checkpoint revision {run.run['checkpoint']['revision'][:12]}")
+    if applied["kind"] == "reference":
+        matrix = "Reference forecasts only. The selected foundation model has not run."
+        label = "2026 hourly benchmark · persistence reference · selected model not run"
     advanced = app.advanced_tables(d["suite"], d["variable"], d["split"], run=run)
-    if applied["kind"] == "development":
+    if applied["kind"] in ("development", "reference"):
         advanced = (pd.read_csv(run.path / "case_availability.csv", dtype={"station": str}), *advanced[1:3],
                     "Reference timings were copied from the source run. Development-model timings are not measured "
                     "separately; these are not comparable hardware measurements.")
     return (label, *out, matrix, *advanced, str(run.path / "metrics_point.csv"),
             str(run.path / "metrics_probabilistic.csv"), str(run.path / "predictions.parquet"),
             str(run.path / "manifest.json"), str(run.path / "run.json"),
-            str(run.path / "case_availability.csv") if applied["kind"] == "development" else None)
+            str(run.path / "case_availability.csv") if applied["kind"] in ("development", "reference") else None)
