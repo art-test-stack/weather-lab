@@ -1,0 +1,57 @@
+experiment: rag-weather-2026-hourly-v2
+variables:
+- t
+- pmer
+context_hours: 720
+horizons_hours:
+- 24
+- 48
+origin_hour_utc: 6
+observation_delay_hours: 3
+observation_availability: 'Historical replay assumption: station observations available
+  3 h after validity; original publication/revision timestamps are absent. Not evidence
+  of operational latency.'
+min_context_observed_fraction: 0.8
+evaluation:
+  start: '2026-01-01T00:00:00Z'
+  end_exclusive: '2027-01-01T00:00:00Z'
+  label: Development replay; no held-out claim or model selection on 2026 outcomes.
+  stride_hours: 1
+retrieval:
+  start: '2022-01-01T00:00:00Z'
+  end_exclusive: '2026-01-01T00:00:00Z'
+  query_hours: 72
+  stride_hours: 1
+  seasonal_days: 45
+  k: 5
+  methods:
+  - level
+  - shape
+foundation_models:
+- Timestral-209M
+- t0-gamma
+product: meteofrance_arome_france
+collection:
+  download_cap_mib: 300
+  products:
+  - meteofrance_arome_france
+  - meteofrance_arome_france_hd
+  issued_runs: true
+  run_hour_utc: 3
+  run_availability_lag_hours: 3
+  historical_spacing_seconds: 4
+  request_spacing_seconds: 0.25
+stations:
+- id: 07149
+  national_id: '91027002'
+  department: '91'
+  name: ORLY
+  lat: 48.718
+  lon: 2.397
+- id: '07630'
+  national_id: '31069001'
+  department: '31'
+  name: TOULOUSE-BLAGNAC
+  lat: 43.621
+  lon: 1.378833
+archive_id: 003d6b33287b939ecc587378170399f69a599957fa7f666baf8034d4a058c964
