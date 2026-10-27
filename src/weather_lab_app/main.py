@@ -59,6 +59,7 @@ STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "ext
             "post-processing of AROME (recent errors)", "no fitting"]
 DEFAULT_STATION = "07149"            # Paris-Orly, by stable station id
 DEFAULT_SIZE = CHECKPOINTS[-1]       # the largest integrated Timestral checkpoint (209M)
+FORECAST_MODELS = [(f"Timestral-{s}", s) for s in CHECKPOINTS] + [("TFC t0-gamma", "t0-gamma")]
 EXPLORE_MAX_HOURS = 120              # app limit for exploratory runs (Timestral itself sets no horizon limit)
 CONTEXT_DAYS = (7, 90)               # range of the Observed context control
 AROME_MODES = {"none": None, "archived": "archived", "substobs": "substituted_observations", "futureonly": "missing"}
@@ -317,7 +318,8 @@ def settings_text(st: dict, step: int = 3) -> str:
     feats_txt = ", ".join(FEATURE_LABELS.get(f, f) for f in st.get("features") or []) or "no additional features"
     method = "AROME + predicted error · forecast lead input · " if st.get("prediction_target") == "arome_error" else ""
     cond = "no additional AROME covariates" if method and setup == "none" else SETUP_NAMES[setup][0]
-    return (f"Timestral {st.get('checkpoint', '?').split('-')[-1]} · {method}{cond} · {feats_txt} · "
+    retrieval = f"RAG {st['retrieval_method']} · hourly archive · observations delayed 3 h · " if st.get("retrieval_method") else ""
+    return (f"{st.get('checkpoint', '?')} · {retrieval}{method}{cond} · {feats_txt} · "
             f"calendar {'on' if st.get('calendar', True) else 'off'} · context {st.get('context_days')} d "
             f"({st.get('context_steps')} steps) · inference horizon {st.get('horizon_steps', 0) * st.get('step_hours', step)} h")
 
@@ -354,8 +356,8 @@ FEATURE_LABELS = {n: g.label for n, g in FEATS.GROUPS.items()}
 FEATURE_CHOICES = [(g.label, n) for n, g in FEATS.GROUPS.items()]
 DRAFT_KEYS = ("suite", "station", "case", "variable", "size", "conditioning", "features", "calendar", "ctx",
               "horizon", "resid_vars", "atmos_fields", "tend_lags", "overlays", "band", "error_mode", "prediction_target",
-              "metric")
-FORECAST_KEYS = DRAFT_KEYS[:13] + ("prediction_target",)
+              "metric", "retrieval_method", "retrieval_index")
+FORECAST_KEYS = DRAFT_KEYS[:13] + ("prediction_target", "retrieval_method", "retrieval_index")
 PRESENTATION_KEYS = ("variable", "overlays", "band", "error_mode", "metric")
 COUNTERS = {"applied": 0, "runs": 0}      # forecast applications / Run forecast clicks (this process)
 _SUBMISSION_LOCK = threading.Lock()
@@ -364,7 +366,8 @@ DRAFT_LABELS = {"suite": "experiment", "station": "station", "case": "forecast t
                 "calendar": "calendar inputs", "ctx": "context", "horizon": "horizon",
                 "resid_vars": "AROME-error variables", "atmos_fields": "dew point / cloud fields",
                 "tend_lags": "tendency lags", "overlays": "comparison overlays", "band": "shaded range",
-                "error_mode": "error panel", "prediction_target": "forecast method", "metric": "main metric"}
+                "error_mode": "error panel", "prediction_target": "forecast method", "metric": "main metric",
+                "retrieval_method": "retrieval method", "retrieval_index": "retrieval index"}
 
 
 def make_draft(*vals) -> dict:
@@ -372,6 +375,8 @@ def make_draft(*vals) -> dict:
     d = dict(zip(DRAFT_KEYS, vals))
     d.setdefault("prediction_target", "weather")
     d.setdefault("metric", "mae")
+    d.setdefault("retrieval_method", "none")
+    d["retrieval_index"] = d.get("retrieval_index") or ""
     if d["metric"] not in ("mae", "rmse"):
         raise ValueError("Main metric must be MAE or RMSE")
     d["features"] = [n for n in FEATS.GROUPS if n in (d.get("features") or [])]
@@ -474,13 +479,18 @@ def draft_config(d: dict) -> tuple[ForecastConfig | None, list]:
         name = next((n for n in d["features"] if f"'{n}'" in str(e)), "features")
         return None, [Issue("invalid", name, str(e).split(": ", 1)[-1])]
     correction = d["prediction_target"] == "arome_error"
-    cfg = ForecastConfig.make(f"Timestral-{d['size']}", d["conditioning"] or "none", spec, calendar=d["calendar"],
-                              context_days=d["ctx"], horizon_h=d["horizon"], step_hours=run.step_hours,
+    retrieval = d["retrieval_method"] != "none"
+    cfg = ForecastConfig.make("t0-gamma" if d["size"] == "t0-gamma" else f"Timestral-{d['size']}",
+                              d["conditioning"] or "none", spec, calendar=d["calendar"],
+                              context_days=d["ctx"], horizon_h=d["horizon"], step_hours=1 if retrieval else run.step_hours,
                               prediction_target=d["prediction_target"],
-                              targets=("t", "pmer") if correction else ("t", "pmer", "u", "v"))
+                              targets=("t", "pmer") if correction or retrieval else ("t", "pmer", "u", "v"),
+                              retrieval_method=d["retrieval_method"], retrieval_index=d["retrieval_index"] if retrieval else "")
     if d["case"] not in set(run.cases()["case_id"]):
         return cfg, [Issue("invalid", "forecast time", "select a forecast time of this experiment and station")]
     issues = check(cfg, availability(d["suite"], d["case"]), EXPLORE_MAX_HOURS, CONTEXT_DAYS)
+    if retrieval and d["variable"] not in cfg.targets:
+        issues.append(Issue("unsupported", "retrieval", "select temperature or mean sea-level pressure"))
     if correction and d["variable"] not in cfg.targets:
         issues.append(Issue("unavailable", "prediction_target", "the installed AROME archive supplies correction "
                             "baselines for temperature and mean sea-level pressure; no wind baseline is installed"))
@@ -617,12 +627,22 @@ def run_forecast(*vals):
         return {"draft": d, "applied": present(new, d, applied)}, "Applied the saved benchmark forecast (no model run)."
     step = RUNS[d["suite"]].step_hours
     try:
-        obs, case, arome_df, aux_df, coords = _explore_inputs(d, cfg)
-        kw = _explore_kwargs(cfg, arome_df, aux_df, coords, step)
-        frame, info = exploratory_forecast(obs, case, list(cfg.targets), cfg.model, cfg.context_days, cfg.calendar,
-                                           device=_device(), lookup_only=True, **kw)
+        if cfg.retrieval_method != "none":
+            from weather_lab.rag_forecast import forecast
+
+            case = RUNS[d["suite"]].cases().set_index("case_id").loc[d["case"]]
+            obs, kw = None, {}
+            frame, info = forecast(case, cfg, device=_device(), lookup_only=True)
+        else:
+            obs, case, arome_df, aux_df, coords = _explore_inputs(d, cfg)
+            kw = _explore_kwargs(cfg, arome_df, aux_df, coords, step)
+            frame, info = exploratory_forecast(obs, case, list(cfg.targets), cfg.model, cfg.context_days, cfg.calendar,
+                                               device=_device(), lookup_only=True, **kw)
         if frame is None:
-            ensure_checkpoint(cfg.model, False)   # weights must be cached (Space: preloaded); no cold fetch here
+            try:
+                ensure_checkpoint(cfg.model, False)
+            except PermissionError as e:
+                raise PermissionError(f"{e}. Install pinned weights under RAG research → Model setup") from e
             frame, info = _exploratory_on_device(obs, case, cfg, kw)
     except (PermissionError, ValueError) as e:
         return None, f"⚠️ {e}.{keep}"
@@ -719,12 +739,15 @@ def draft_feedback(*vals):
     h_upd, h_info = horizon_control(d["suite"], d["case"], d["conditioning"], d["horizon"],
                                    d["prediction_target"]) if d["case"] in \
         set(RUNS[d["suite"]].cases()["case_id"]) else (gr.update(), "")
+    if d["retrieval_method"] != "none":
+        h_upd, h_info = gr.update(maximum=48), "Hourly RAG supports 24 or 48 h, with a 3 h observation delay."
     if isinstance(h_upd, dict) and "value" in h_upd:
         dvals = list(dvals)
         dvals[DRAFT_KEYS.index("horizon")] = h_upd["value"]
         d = make_draft(*dvals)
     _, issues = draft_config(d)
-    return (status_html(applied, *dvals), h_upd, h_info, context_md(d["ctx"], d["suite"]),
+    context_info = "RAG requires 30 days = 720 hourly steps from the index's saved archive." if d["retrieval_method"] != "none" else context_md(d["ctx"], d["suite"])
+    return (status_html(applied, *dvals), h_upd, h_info, context_info,
             gr.update(interactive=not issues and not submission["busy"],
                       value="Running…" if submission["busy"] else "Run forecast"), feature_note(d))
 
@@ -874,7 +897,7 @@ def cards_html(applied, variable) -> str:
     run, mid, st = RUNS[a["suite"]], a["primary"], a["settings"]
     frame = a["exploratory"][mid]
     rows, _, case = case_forecast(run, a["case"], variable)
-    obs = _station_obs(run, case["station"], variable)
+    obs = _station_obs(run, case["station"], variable, a)
     f = _window(frame[frame["variable"] == variable], a["shown_h"])
     u = unit(variable)
     v = f.merge(obs.rename(columns={"time": "valid_time"}), on="valid_time", how="left")
@@ -923,8 +946,14 @@ def cards_html(applied, variable) -> str:
             "the Benchmark tab.</div>")
 
 
-def _station_obs(run, station: str, variable: str) -> pd.DataFrame:
-    obs = run.full_observations()
+def _station_obs(run, station: str, variable: str, applied=None) -> pd.DataFrame:
+    if applied and applied["config"].retrieval_method != "none":
+        from weather_lab.rag_store import Store
+
+        path = Store().get("archives", applied["settings"]["archive_id"])
+        obs = pd.read_parquet(path / "observations.parquet")
+    else:
+        obs = run.full_observations()
     return obs[obs["station"] == station][["time", variable]].rename(columns={variable: "observed"})
 
 
@@ -932,7 +961,7 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
     a = applied
     run = RUNS[a["suite"]]
     rows, _, case = case_forecast(run, a["case"], variable)
-    obs = _station_obs(run, case["station"], variable)
+    obs = _station_obs(run, case["station"], variable, a)
     exploratory = [df[df["variable"] == variable] for df in a.get("exploratory", {}).values()]
     if exploratory:
         rows = _utc(pd.concat([_utc(rows), *map(_utc, exploratory)], ignore_index=True))
@@ -961,14 +990,18 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
     caption = (f"**{station_label(case['station']).split(' ', 1)[-1]}**, forecast issued "
                f"{origin:%a %d %b %Y, %H:%M} UTC (historical replay: inputs restricted to data assumed available "
                f"at the forecast time).{assumed}{arome} {context_label} **{ctx_days} days** of observations "
-               f"({int(ctx_days) * 24 // run.step_hours} steps); the chart opens on the last 48 h — zoom out to see "
-               f"the rest. Plotted: leads 3–{plotted} h. Shaded ranges show where the probabilistic system expects "
+               f"({int(ctx_days) * 24 // a['config'].step_hours} steps); the chart opens on the last 48 h — zoom out to see "
+               f"the rest. Plotted: leads {a['config'].step_hours}–{plotted} h. Shaded ranges show where the probabilistic system expects "
                "the outcome 80% / 90% of the time; AROME and the simple references give single values. Dotted lines "
                "join the last observation to each forecast's first value: a drawing aid, not a prediction, never "
                "scored or exported." + gap
                + (err_txt[error_mode] + ", from the same point forecast the benchmark scores." if error_mode in
                   err_txt else ""))
     caption += f" Main metric: {metric.upper()}; MAE and RMSE use the same observed leads."
+    if a["config"].retrieval_method != "none":
+        caption += (" RAG inputs end 3 h before the decision; generated bridge steps are excluded. "
+                    "Observations on this display come from the selected index's hourly archive. "
+                    "Saved benchmark overlays retain their original inputs and cadence.")
     if a["config"].prediction_target == "arome_error":
         coverage = "; ".join(f"{name}: {r['observed_steps']} of {r['total_steps']} steps, "
                               f"{r['first'][:16]} to {r['last'][:16]} UTC"
@@ -1016,6 +1049,10 @@ def _exploratory_on_device(obs, case, cfg, kw):
 
     device = zerogpu.inference_device()
     try:
+        if cfg.retrieval_method != "none":
+            from weather_lab.rag_forecast import forecast
+
+            return forecast(case, cfg, device=device)
         return exploratory_forecast(obs, case, list(cfg.targets), cfg.model, cfg.context_days, cfg.calendar,
                                     allow_download=False, device=device, **kw)
     finally:
@@ -1543,7 +1580,7 @@ def on_experiment(suite: str, variable: str | None, station: str | None = None, 
     variable = variable if variable in [v for _, v in vchoices] else "t"
     stations = station_choices(suite)
     station = station if station in [s for _, s in stations] else default_station(suite)
-    size = size if size in CHECKPOINTS else DEFAULT_SIZE
+    size = size if size in {value for _, value in FORECAST_MODELS} else DEFAULT_SIZE
     conditioning = conditioning if conditioning in AROME_MODES else (e_main(suite) or "none")
     return (gr.update(choices=vchoices, value=variable),
             gr.update(choices=stations, value=station),
@@ -1581,10 +1618,22 @@ def build() -> gr.Blocks:
                                            label="Forecast issued", scale=3, min_width=210)
                         var = gr.Dropdown(variable_choices(DEFAULT_SUITE), value=d0["variable"],
                                           label="Weather variable", scale=2, min_width=150)
-                        ckpt = gr.Radio([(f"Timestral-{s}", s) for s in CHECKPOINTS], value=d0["size"],
+                        ckpt = gr.Radio(FORECAST_MODELS, value=d0["size"],
                                         label="Model (checkpoint)", scale=3, min_width=230)
                     method = gr.Radio([(label, key) for key, label in PREDICTION_TARGETS.items()],
                                       value=d0["prediction_target"], label="Forecast method")
+                    from weather_lab.rag_store import Store
+
+                    with gr.Row():
+                        retrieval = gr.Radio([("None", "none"), ("RAG · levels", "level"), ("RAG · shape", "shape")],
+                                             value="none", label="Retrieval augmentation")
+                        retrieval_index = gr.Dropdown(Store().list("indexes"), label="Saved hourly retrieval index")
+                        refresh_indexes = gr.Button("Refresh retrieval indexes", size="sm")
+                    gr.Markdown("RAG uses the selected station/time with the index's hourly archive: **30-day context**, "
+                                "**24 or 48 h**, **temperature/pressure**, direct prediction and no additional features "
+                                "or AROME conditioning. Missing archive coverage is unavailable. Create an index or "
+                                "download t0 weights (~1 GB) in **RAG research** (weights under **Model setup**). No automatic downloads.",
+                                elem_classes="note")
                     with gr.Row(equal_height=True):
                         cond = gr.Dropdown(CONDITIONING_CHOICES, value=d0["conditioning"], label="AROME conditioning",
                                            scale=3, min_width=240)
@@ -1719,7 +1768,7 @@ def build() -> gr.Blocks:
 
             from weather_lab_app import rag as rag_panel
 
-            rag_panel.build()
+            rag_outputs = rag_panel.build()
 
             # ---------------- methods
             with gr.Tab("Methods", id="methods"):
@@ -1735,7 +1784,7 @@ def build() -> gr.Blocks:
         # ---------------- wiring
         # Draft controls, in DRAFT_KEYS order. Their edits only reach `draft_feedback` (never `applied`).
         draft_in = [exp, station, date, var, ckpt, cond, feats_cb, calendar, ctx, horizon, resid_vars, atmos_fields,
-                    tend_lags, systems, band, err_mode, method, main_metric]
+                    tend_lags, systems, band, err_mode, method, main_metric, retrieval, retrieval_index]
         feedback_out = [status, horizon, horizon_info, ctx_info, e_btn, feat_note]
         render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles]
         b_draft = [b_exp, b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length, b_resid, b_atmos, b_tend,
@@ -1753,9 +1802,14 @@ def build() -> gr.Blocks:
         feedback(exp.input(on_experiment, [exp, var, station, ckpt, cond], exp_outputs, show_progress="hidden"))
         feedback(station.input(on_station, [exp, station], date, show_progress="hidden"))
         for c in (date, var, ckpt, cond, feats_cb, calendar, ctx, horizon, resid_vars, atmos_fields, tend_lags,
-                  systems, band, err_mode, method, main_metric):
+                  systems, band, err_mode, method, main_metric, retrieval, retrieval_index):
             c.input(draft_feedback, draft_in + [applied, submission], feedback_out, queue=False,
                     show_progress="hidden")
+        def refresh_retrieval(selected):
+            choices = Store().list("indexes")
+            return gr.update(choices=choices, value=selected if selected in {v for _, v in choices} else None)
+
+        feedback(refresh_indexes.click(refresh_retrieval, retrieval_index, retrieval_index))
         show_old.input(lambda s, cur: gr.update(choices=experiment_choices(s), value=cur), [show_old, exp], exp,
                        show_progress="hidden")
 
@@ -1792,6 +1846,8 @@ def build() -> gr.Blocks:
         load = demo.load(render, [applied], render_out)
         feedback(load).then(cache_md, None, cache_box)
         demo.load(bench.render, b_applied, b_outputs)
+        feedback(demo.load(refresh_retrieval, retrieval_index, retrieval_index))
+        demo.load(rag_panel.refresh, outputs=rag_outputs)
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
