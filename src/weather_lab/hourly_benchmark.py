@@ -15,7 +15,7 @@ from weather_lab.rag_archive import issued_forecasts, observations
 from weather_lab.rag_store import Store
 from weather_lab.suite import SEASONS
 
-CONFIG = ROOT / "configs/hourly_2026_v2.yaml"
+CONFIG = ROOT / "configs/hourly_2026_v3.yaml"
 
 
 def configuration():
