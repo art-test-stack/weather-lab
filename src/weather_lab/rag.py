@@ -9,12 +9,12 @@ import yaml
 from weather_lab.common import ROOT
 from weather_lab.rag_store import Store
 
-CONFIG = ROOT / "configs/rag_weather_hourly_v2.yaml"
+CONFIG = ROOT / "configs/rag_weather_hourly_v3.yaml"
 
 
 def config(path: Path = CONFIG) -> dict:
     cfg = yaml.safe_load(Path(path).read_text())
-    if cfg["experiment"] not in ("rag-weather-2026-v1", "rag-arome-error-2026-v1", "rag-weather-2026-hourly-v2", "rag-arome-error-2026-hourly-v2"):
+    if cfg["experiment"] not in ("rag-weather-2026-v1", "rag-arome-error-2026-v1", "rag-weather-2026-hourly-v2", "rag-arome-error-2026-hourly-v2", "rag-weather-2026-hourly-v3", "rag-arome-error-2026-hourly-v3"):
         raise ValueError("unsupported RAG experiment version")
     return cfg
 
