@@ -14,6 +14,14 @@ VERSION = 1
 METHODS = ("level", "shape")
 
 
+def load_index(path):
+    if read_json(Path(path) / "index.json").get("kind") == "arome_error":
+        from weather_lab.rag_arome_error import ErrorIndex
+
+        return ErrorIndex(path)
+    return Index(path)
+
+
 def embedding(values: np.ndarray, scale: np.ndarray, method: str) -> np.ndarray:
     if method not in METHODS:
         raise ValueError(f"unknown retrieval method {method}")
@@ -87,6 +95,8 @@ class Index:
         self.path = path
         self.ident = Store.verify(path)["id"]
         self.meta = read_json(path / "index.json")
+        if self.meta.get("kind") == "arome_error":
+            raise ValueError("AROME-error indexes use the new exploratory protocol; select them in Forecast")
         if self.meta["version"] != VERSION:
             raise ValueError("unsupported retrieval index version")
         self.windows = pd.read_parquet(path / "windows.parquet")
