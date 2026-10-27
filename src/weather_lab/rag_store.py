@@ -124,7 +124,12 @@ class Store:
         found = []
         for p in sorted((self.root / kind).glob("*/artifact.json"), reverse=True):
             try:
-                rec = self.verify(p.parent)
+                # Discovery reads commit markers; get() verifies payload bytes before use.
+                rec = read_json(p)
+                if rec["kind"] != kind or rec["id"] != p.parent.name or not isinstance(rec["files_sha256"], dict):
+                    continue
+                if sha256_text(json.dumps(rec["files_sha256"], sort_keys=True)) != rec["id"]:
+                    continue
                 found.append((rec["id"][:12], rec["id"]))
             except (ValueError, OSError, KeyError):
                 continue
