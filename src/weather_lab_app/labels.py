@@ -309,3 +309,9 @@ EXPERIMENTS["hourly-2026-v2"] = {
 for _new, _old in [("rag-weather-2026-hourly-v2", "rag-weather-2026-v1"),
                    ("rag-arome-error-2026-hourly-v2", "rag-arome-error-2026-v1")]:
     EXPERIMENTS[_new] = {**EXPERIMENTS[_old], "name": EXPERIMENTS[_old]["name"] + " · hourly sliding windows"}
+
+EXPERIMENTS["hourly-2026-v3"] = {**EXPERIMENTS["hourly-2026-v2"],
+                                "caveat": "All available three-hourly AROME issues; incomplete windows remain unavailable."}
+for _new, _old in [("rag-weather-2026-hourly-v3", "rag-weather-2026-hourly-v2"),
+                   ("rag-arome-error-2026-hourly-v3", "rag-arome-error-2026-hourly-v2")]:
+    EXPERIMENTS[_new] = {**EXPERIMENTS[_old], "name": EXPERIMENTS[_old]["name"] + " · expanded issues"}
