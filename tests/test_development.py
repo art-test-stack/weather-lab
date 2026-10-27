@@ -146,7 +146,7 @@ def test_t0_benchmark_execution_configuration_and_saved_replay(source, tmp_path,
     controls = bench.on_saved(str(out), "fixture")
     assert controls[0] == "t0-gamma"
     d = dict(zip(bench.KEYS[1:11], controls)) | {"suite": "fixture"}
-    monkeypatch.setitem(app.RUNS, "fixture", SimpleNamespace(step_hours=3))
+    monkeypatch.setitem(app.RUNS, "fixture", SimpleNamespace(step_hours=3, manifest={"protocol": {"variables": ["t"]}}))
     assert bench.configuration(d).model == "t0-gamma"
 
 
