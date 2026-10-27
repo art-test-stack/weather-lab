@@ -401,6 +401,9 @@ class Timestral(Adapter):
         """(N, t_ctx) historical segment of the AROME covariate row for batch variable `j`."""
         n = len(batch.cases)
         if self.arome_mode == "archived":
+            if batch.arome_inputs is not None:
+                field = batch.arome_inputs.fields.index(batch.variables[j])
+                return batch.arome_inputs.history[:, field, -t_ctx:]
             if batch.arome_history is None:
                 raise ValueError(f"{self.id} needs archived historical AROME in the batch")
             return batch.arome_history[:, j, -t_ctx:]
