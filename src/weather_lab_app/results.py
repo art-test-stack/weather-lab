@@ -16,7 +16,7 @@ from weather_lab_app.labels import EXPERIMENT_ORDER, EXPERIMENTS, model_name
 
 
 def training_status(model: str) -> str:
-    if model.startswith("timestral"):
+    if model.startswith(("timestral", "t0")):
         return "pretrained, no local fine-tuning"
     if model == "climatology":
         return "fitted on fitting period"
