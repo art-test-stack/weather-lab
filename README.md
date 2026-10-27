@@ -54,10 +54,11 @@ uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benc
 
 ## The app
 
-`uv run weather-lab-app` (or the Space) opens on three tabs. Forecast and Benchmark have independent configurations.
+`uv run weather-lab-app` (or the Space) opens on four tabs: Forecast, Benchmark, RAG research and Methods.
+Forecast and Benchmark have independent configurations and both offer Timestral-28M, Timestral-209M and t0-gamma.
 
 - **Forecast** (landing): one **forecast block** above the chart, then the result summary, the chart with an aligned error panel (default **absolute error** |forecast − observation|; signed optional), the primary cards, captions, this forecast's table, the CSV download and the map.
-  - **Forecast block:** *Station* (default **Paris-Orly**, `07149`), *Forecast issued*, *Weather variable*, *Model (checkpoint)* (Timestral-28M / **Timestral-209M**, identity only), *AROME conditioning* (none; issued forecast + archived AROME history; issued forecast + observed history, substituted; issued forecast only, diagnostic), *Additional feature groups* (recent AROME errors, dew point and cloud cover, solar elevation, tendencies; any compatible combination; none selected = **no additional features**, a valid configuration), *Calendar inputs*, *Observed context (days)* (the one editable history unit; hours and steps shown read-only) and *Forecast horizon (hours)*. Inside the same block, **Advanced** holds feature parameters (AROME-error variables, dew point / cloud fields, tendency lags), comparison overlays, the shaded-range source, the error display and superseded experiments. **Run forecast** comes last.
+  - **Forecast block:** *Station* (default **Paris-Orly**, `07149`), *Forecast issued*, *Weather variable*, *Model (checkpoint)* (Timestral-28M / **Timestral-209M** / t0-gamma, identity only), *AROME conditioning* (none; issued forecast + archived AROME history; issued forecast + observed history, substituted; issued forecast only, diagnostic), *Additional feature groups* (recent AROME errors, dew point and cloud cover, solar elevation, tendencies; any compatible combination; none selected = **no additional features**, a valid configuration), *Calendar inputs*, *Observed context (days)* (the one editable history unit; hours and steps shown read-only) and *Forecast horizon (hours)*. Inside the same block, **Advanced** holds feature parameters (AROME-error variables, dew point / cloud fields, tendency lags), comparison overlays, the shaded-range source, the error display and superseded experiments. **Run forecast** comes last.
   - **Composable configuration** (`weather_lab.forecast_config.ForecastConfig`): model identity + forecast method + conditioning + feature groups with parameters + calendar + context + horizon. Combinations are not separate model choices. Saved benchmark systems map into the same representation from their recorded `run.json` parameters (`from_system`); their identifiers and results are unchanged.
   - **Forecast method:** *Direct weather prediction* (default), or *AROME + predicted error*. The latter forecasts ε = observation − the latest qualifying archived AROME prediction, then adds the issued AROME baseline to every error quantile. Forecast lead is a known input; Calendar inputs encode UTC hour of day and day of year. Selected engineered features still use the original observations. A Run retains the previous direct forecast for the same case, whether saved or exploratory, alongside raw AROME; it does not recompute the direct forecast. The installed archive supports correction of temperature and MSLP only. Correction always needs archived error history and an issued baseline, even with additional AROME conditioning disabled. Missing errors stay missing; captions show actual coverage within the requested context. This is inference with pretrained weights, with no local fine-tuning or established calibration.
   - **Strictly explicit execution.** Editing any setting (forecast or presentation, Advanced included) only updates the draft: a **Changes pending — click Run forecast** line, read-only conversions, horizon limits and capability / availability messages. It never resolves, loads weights, builds inputs, infers, applies a cached prediction or redraws. **Run forecast** captures the whole draft at click time, validates it, then: same forecast → presentation only, no model run; else the matching saved benchmark system (a shorter horizon is a labelled slice); else the exploratory cache; else inference. Chart, overlays, intervals, error panel, cards, captions, tables and the CSV are applied together. A per-session guard rejects duplicate submissions and keeps the button disabled through rendering, including when controls are edited; a result that arrives after the draft changed is not applied (it stays cached); a failure keeps the previous result and says why. The page load shows the default saved result once.
@@ -286,19 +287,28 @@ Branch `research/ts-rag-weather` extends PR #1. This independent experiment is c
 The Space has a **RAG research** tab with explicit collection, index, evaluation and saved-result actions.
 The **Forecast** tab also exposes TFC t0-gamma and optional **RAG · levels / shape** retrieval. Select a saved
 hourly index (use **Refresh retrieval indexes** after creating one), a 30-day context, a 24- or 48-hour horizon,
-temperature or pressure, direct prediction and no additional feature groups. Genuine issued AROME may
+temperature or pressure, direct or AROME-error prediction and no additional feature groups. Genuine issued AROME may
 condition the forecast (archived history or explicitly missing history); observation substitution is refused.
 Only **Run forecast** executes or applies changes. RAG reads the index's hourly observation archive for the
 selected station/time, uses the declared three-hour observation delay, and excludes generated bridge steps.
 Missing hourly context, indexes or installed weights remain explicit failures; no data are interpolated or
 models substituted. Exploratory cache identities include model, retrieval method, verified index/archive,
 calendar, inputs and device; results never enter frozen benchmark runs. Download t0 weights explicitly under
-**RAG research → Model setup** (about 1 GB for t0; up to 1.86 GB with Timestral-209M).
+**RAG research → Prepare data → Model setup** (about 1 GB for t0; up to 1.86 GB with Timestral-209M).
+
+The RAG research tab separates available datasets/indexes, optional preparation (collapsed), and batch
+evaluations/saved results. A single forecast belongs in Forecast. The batch evaluator currently supports
+weather-analogue indexes; AROME-error indexes are used in Forecast.
 
 **AROME-error retrieval** is a separate protocol in `configs/rag_arome_error_v1.yaml`, for Orly and Blagnac.
 Its new immutable index uses standard AROME's genuinely issued runs from April 2026 onward; the older
 2022–2025 weather index stays unchanged. Choose an index labelled **AROME errors** and **archived AROME
 conditioning** in Forecast. The research tab also has an explicit **Build AROME-error index** button.
+Both Timestral and t0-gamma also support **AROME + predicted error** with RAG: native model inputs are
+verified historical observation-minus-AROME errors, with forecast leads and retrieved errors. The issued
+AROME baseline is added once to every predicted quantile to return weather values. Exported forecasts
+include the baseline and predicted error, with the three-hour bridge excluded. This is inference with
+fixed pretrained weights, not local fine-tuning or a measured accuracy improvement.
 
 Matching uses the last 72 hours of observed weather and verified AROME errors, plus the first 24 hours of
 the forecast available at issue time. Level matching preserves physical levels; shape matching anchors
