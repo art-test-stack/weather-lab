@@ -128,7 +128,7 @@ DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-2
 
 
 def model_name(mid: str) -> str:
-    if mid.startswith("timestral-dev "):
+    if mid.startswith(("timestral-dev ", "t0-dev ")):
         _, ck, target, conditioning, _ = mid.split()
         method = "AROME error correction" if target == "arome_error" else \
             "direct + AROME" if conditioning != "none" else "direct"
@@ -141,14 +141,16 @@ def model_name(mid: str) -> str:
             method = "RAG · " + mid.split("+RAG ", 1)[1].split()[0]
             if "+error-cases" in mid:
                 method = "AROME-error " + method
-            if " +AROME " in mid:
+            if "+AROME error correction" in mid:
+                method += " · residual prediction"
+            elif " +AROME " in mid:
                 method += " + AROME"
         return f"{checkpoint} · {method}"
     return MODELS.get(mid, (mid, ""))[0]
 
 
 def model_description(mid: str) -> str:
-    if mid.startswith("timestral-dev "):
+    if mid.startswith(("timestral-dev ", "t0-dev ")):
         return "Explicit full-suite development run with recorded configuration; inference only, no local fine-tuning."
     if mid.startswith("exploratory"):
         if "+error-cases" in mid:
@@ -165,8 +167,10 @@ def model_description(mid: str) -> str:
 
 
 def model_style(mid: str) -> tuple[str, str, float]:
-    if mid.startswith("timestral-dev "):
+    if mid.startswith(("timestral-dev ", "t0-dev ")):
         _, _, target, conditioning, _ = mid.split()
+        if mid.startswith("t0-dev "):
+            return ("#805ad5", "solid", 2.8)
         return ("#6250d6" if target == "arome_error" else "#0f7a54" if conditioning != "none" else "#184f95", "solid", 2.8)
     if mid.startswith("exploratory"):
         if mid.startswith("exploratory t0-gamma "):
