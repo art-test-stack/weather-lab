@@ -116,33 +116,57 @@ def build():
     cfg = config()
     store = Store()
     with gr.Tab("RAG research", id="rag"):
-        gr.Markdown(f"### {EXPERIMENTS[cfg['experiment']]['name']}\n"
-                    "Retrieve from **2022–2025**, then replay daily **2026** forecasts with a 30-day rolling context. "
-                    "Compare level and shape retrieval, Timestral-209M and t0-gamma, with and without retrieved "
-                    "trajectory covariates, against issued AROME. Late-2025 history supplies January context. "
-                    "Missing and future dates stay visible. These are development experiments.")
+        gr.Markdown("### RAG data and experiments\n"
+                    "Manage the saved weather data and retrieval indexes used by **Forecast**, or run a separate "
+                    "batch evaluation. For a single station and forecast time, use the **Forecast** tab.")
+        gr.Markdown("### Available data and indexes\n"
+                    "Choose a saved dataset and index. **Refresh** picks up data published from another machine.")
         status = gr.Markdown(_status())
         with gr.Row():
-            archive = gr.Dropdown(store.list("archives"), label="Saved weather archive")
-            index = gr.Dropdown(store.list("indexes"), label="Frozen retrieval index")
-            horizon = gr.Radio([24, 48], value=24, label="Forecast horizon (hours)")
-        with gr.Row():
-            collect = gr.Button("Collect and save weather archive (up to 300 MiB)")
-            create = gr.Button("Build and save retrieval index")
-            error_index = gr.Button("Build AROME-error index")
-            run = gr.Button("Run and save 2026 evaluation", variant="primary")
-        with gr.Accordion("Model setup and archive coverage", open=False):
-            gr.Markdown("Named AROME runs from Open-Meteo start **2 April 2026**; earlier dates remain unavailable. "
+            archive = gr.Dropdown(store.list("archives"), label="Saved weather dataset")
+            index = gr.Dropdown(store.list("indexes"), label="Retrieval index")
+            refresh_button = gr.Button("Refresh", size="sm")
+        gr.Markdown("**Weather-analogue indexes** retrieve similar observed weather from 2022–2025. "
+                    "Use them in Forecast or the weather-analogue evaluation below.\n\n"
+                    "**AROME-error indexes** retrieve earlier issued forecasts and their verified errors. "
+                    "Use them in **Forecast → Archived AROME conditioning**. Only cases completely verified "
+                    "before the forecast time can be retrieved. Batch evaluation of this index type is not available here.")
+        with gr.Accordion("Prepare data", open=False):
+            stations = ", ".join(s["name"] for s in cfg["stations"])
+            gr.Markdown("#### Collect a new dataset\n"
+                        f"The collection configuration requests **{stations}**, from **2022 onward**, with temperature "
+                        "and pressure. Collection can take several minutes. Completed datasets are saved to the bucket; "
+                        "downloads stay on local disk until collection finishes.")
+            collect = gr.Button("Collect weather data (up to 300 MiB)")
+            gr.Markdown("#### Build an index from the selected dataset\n"
+                        "Index construction runs on CPU. Weather analogues use pre-2026 observations; "
+                        "AROME errors use genuine issued runs and verified outcomes for Orly and Blagnac.")
+            with gr.Row():
+                create = gr.Button("Build weather-analogue index")
+                error_index = gr.Button("Build AROME-error index")
+            gr.Markdown("#### Model setup\n"
+                        "Install pinned model weights before running new forecasts or evaluations. This downloads up to "
+                        "**1.86 GB** for Timestral-209M and t0-gamma. Forecasting and evaluation never silently download weights.")
+            prefetch = gr.Button("Download model weights (up to 1.86 GB)")
+            gr.Markdown("#### Coverage and replay assumptions\n"
+                        "Named AROME runs from Open-Meteo start **2 April 2026**; earlier dates remain unavailable. "
                         "Stitched historical series are stored separately and never used as issued forecasts. "
                         "Original publication times are unavailable: this pilot explicitly assumes a 3-hour lag "
-                        "for station observations and the selected AROME runs.\n\n"
-                        "Model setup downloads up to **1.86 GB** (Timestral-209M + t0-gamma). It is a separate "
-                        "action; evaluating never silently downloads model weights.")
-            prefetch = gr.Button("Download pinned model weights (up to 1.86 GB)")
+                        "for station observations and the selected AROME runs.")
+        gr.Markdown("### Run or view evaluations\n"
+                    "#### Run a weather-analogue evaluation\n"
+                    f"**{EXPERIMENTS[cfg['experiment']]['name']}** compares Timestral-209M and t0-gamma, with and "
+                    "without weather retrieval, against AROME across the configured daily 2026 cases. "
+                    "This batch job can take much longer than a single forecast. Missing data stay visible; "
+                    "results are labelled as development experiments.")
         with gr.Row():
-            saved = gr.Dropdown(store.list("runs"), label="Saved RAG evaluation")
-            refresh_button = gr.Button("Refresh saved artifacts")
-            load = gr.Button("Load saved results")
+            horizon = gr.Radio([24, 48], value=24, label="Evaluation horizon (hours)")
+            run = gr.Button("Run weather-analogue evaluation", variant="primary")
+        gr.Markdown("#### View a saved evaluation\n"
+                    "Choose a completed evaluation to open its scores, availability table and downloads.")
+        with gr.Row():
+            saved = gr.Dropdown(store.list("runs"), label="Saved evaluation")
+            load = gr.Button("Open saved evaluation")
         note = gr.Markdown("Select a saved run and click Load saved results.")
         scores = gr.Dataframe(label="Shared-support MAE / RMSE, separated by variable", interactive=False)
         availability = gr.Dataframe(label="Case and system availability", interactive=False)
