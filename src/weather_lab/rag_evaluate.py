@@ -98,7 +98,8 @@ def run(index_id: str, cfg: dict, horizon_h: int, store: Store | None = None,
     for name in cfg["foundation_models"]:
         adapters.extend([foundation(name, index)] + [foundation(name, index, m, k) for m in methods])
     model_ids = ["persistence", "arome-raw"] + [a.id for a in adapters]
-    origins = pd.date_range(start + pd.Timedelta(hours=cfg["origin_hour_utc"]), end, freq="D", inclusive="left")
+    origins = pd.date_range(start if cfg["evaluation"].get("stride_hours") == 1 else start + pd.Timedelta(hours=cfg["origin_hour_utc"]),
+                            end, freq="h" if cfg["evaluation"].get("stride_hours") == 1 else "D", inclusive="left")
     per_station = {s: f.set_index("time") for s, f in obs.groupby("station")}
     cases, availability, predictions, batches, result_frames = [], [], [], [], []
     created, started = now_utc(), time.perf_counter()
