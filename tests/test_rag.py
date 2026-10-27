@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import pickle
 import shutil
 from pathlib import Path
@@ -48,6 +49,56 @@ def query(frame, index):
                      times.tz_localize(None).to_numpy()[None], 1)
 
 
+def test_exploratory_hourly_forecast_causality_and_cache_identity(setup, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from weather_lab import predcache, rag_forecast
+    from weather_lab.forecast import ForecastBatch, QUANTILE_LEVELS
+    from weather_lab.forecast_config import ForecastConfig, build_adapter
+    from weather_lab.rag_adapters import RetrievedTimestral, RetrievedT0
+
+    cfg, frame, store, archive, _ = setup
+    cfg["context_hours"] = 720
+    index = Index(build(archive.name, cfg, store))
+    settings = ForecastConfig.make("t0-gamma", context_days=30, horizon_h=24, targets=("t", "pmer"),
+                                   step_hours=1, retrieval_method="shape", retrieval_index=index.ident)
+    case = pd.Series({"station": "07110", "origin": pd.Timestamp("2026-01-01T06:00Z")}, name="forecast-case")
+    with pytest.raises(ValueError, match="verified index/archive"):
+        build_adapter(settings, "cannot-drop-retrieval")
+    monkeypatch.setattr(predcache, "location", lambda: (tmp_path / "cache", "test"))
+    monkeypatch.setattr(rag_forecast, "prefetch", lambda *a, **kw: None)
+    calls = []
+
+    def predict(self, batch):
+        calls.append(batch)
+        assert batch.origins[0] == np.datetime64("2026-01-01T03:00")
+        assert batch.history.shape == (1, 2, 720) and batch.horizon == 27
+        assert np.max(batch.history_times()) <= batch.origins[0]
+        point = np.ones((1, 2, 27), np.float32)
+        point[:, 1] = 1013
+        quantiles = np.repeat(point[..., None], len(QUANTILE_LEVELS), axis=-1)
+        return ForecastBatch(self.id, self.revision, "quantiles", self.variables, point,
+                             quantiles, QUANTILE_LEVELS)
+
+    for cls in (RetrievedT0, RetrievedTimestral):
+        monkeypatch.setattr(cls, "predict", predict)
+    result, info = rag_forecast.forecast(case, settings, lookup_only=True, store=store)
+    assert result is None and not calls
+    result, info = rag_forecast.forecast(case, settings, store=store)
+    assert len(calls) == 1 and not info["cache_hit"]
+    assert result.lead_h.min() == 1 and result.lead_h.max() == 24
+    assert len(result) == 48 and "observed" not in result
+    assert info["settings"]["index_id"] == index.ident and info["settings"]["retrieval"]
+    cached, hit = rag_forecast.forecast(case, settings, lookup_only=True, store=store)
+    assert hit["cache_hit"] and len(calls) == 1
+    pd.testing.assert_frame_equal(result, cached)
+    for changed in (replace(settings, retrieval_method="level"), replace(settings, model="Timestral-209M"),
+                    replace(settings, calendar=False)):
+        missing, other = rag_forecast.forecast(case, changed, lookup_only=True, store=store)
+        assert missing is None and other["key"] != info["key"]
+    with pytest.raises(ValueError, match="insufficient causal"):
+        rag_forecast.forecast(pd.Series({**case, "station": "07149"}, name="missing"), settings, store=store)
+
+
 def test_cutoff_covers_entire_payload_and_scale_ignores_2026(setup, tmp_path):
     cfg, frame, store, archive, index = setup
     assert (index.windows.available_at < pd.Timestamp("2026-01-01T00:00Z")).all()
@@ -77,6 +128,8 @@ def test_retrieval_enters_both_native_generation_inputs(setup):
     np.testing.assert_allclose(rows[:, :, 23], batch.history[:, :, -1], atol=1e-4)
     for name in ("Timestral-209M", "t0-gamma"):
         plain = foundation(name, index)
+        no_calendar = foundation(name, index, calendar=False)
+        assert "calendar" not in no_calendar.inputs and no_calendar.build_inputs(batch)[1] is None
         rag = foundation(name, index, "shape", 1)
         native, augmented = plain.build_inputs(batch), rag.build_inputs(batch)
         np.testing.assert_array_equal(native[0], augmented[0])
@@ -190,6 +243,30 @@ def test_corruption_and_unsafe_ids_fail_before_use(setup):
     (index.path / "vectors-shape.npy").write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="checksum"):
         store.get("indexes", index.ident)
+
+
+def test_discovery_reads_only_valid_completion_markers(setup, monkeypatch):
+    from weather_lab import rag_store
+
+    _, _, store, archive, index = setup
+    with monkeypatch.context() as patch:
+        def no_payload_reads(*args):
+            raise AssertionError("discovery must not read or checksum artifact payloads")
+        patch.setattr(rag_store, "sha256_file", no_payload_reads)
+        assert store.list("archives") == [(archive.name[:12], archive.name)]
+        assert store.list("indexes") == [(index.ident[:12], index.ident)]
+    (index.path / "vectors-shape.npy").write_bytes(b"corrupt")
+    assert store.list("indexes") == [(index.ident[:12], index.ident)]
+    with pytest.raises(ValueError, match="checksum"):
+        store.get("indexes", index.ident)
+    marker = index.path / "artifact.json"
+    rec = json.loads(marker.read_text())
+    rec["kind"] = "archives"
+    marker.write_text(json.dumps(rec))
+    assert store.list("indexes") == []
+    rec["kind"], rec["files_sha256"] = "indexes", {}
+    marker.write_text(json.dumps(rec))
+    assert store.list("indexes") == []
 
 
 def test_bucket_upload_is_verified_before_remote_commit_marker(tmp_path):
