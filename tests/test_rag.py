@@ -324,6 +324,6 @@ def test_research_panel_builds_without_loading_or_running_models(setup, monkeypa
     with gr.Blocks() as panel:
         with gr.Tabs():
             rag.build()
-    assert len(panel.config["dependencies"]) == 6
+    assert len(panel.config["dependencies"]) == 7
     assert all(event == "click" for d in panel.config["dependencies"] for _, event in d["targets"])
     assert rag.show(None)[0] == "Select a saved RAG run."
