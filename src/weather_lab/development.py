@@ -102,7 +102,11 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
         arome = pd.read_parquet(arome_path)
     coords = {s["id"]: (s["lat"], s["lon"]) for s in manifest["dataset"]["stations"]}
     ck = models.CHECKPOINTS[cfg.model]
-    model_id = f"timestral-dev {cfg.model} {cfg.prediction_target} {cfg.conditioning} " + sha256_text(
+    code_files = [Path(__file__), Path(__file__).with_name("forecast.py"),
+                  Path(__file__).with_name("features.py"), Path(__file__).with_name("evaluate.py")]
+    if ck.family == "t0":
+        code_files.append(Path(__file__).with_name("t0_adapter.py"))
+    model_id = f"{ck.family}-dev {cfg.model} {cfg.prediction_target} {cfg.conditioning} " + sha256_text(
         json.dumps(cfg.as_dict(), sort_keys=True))[:8]
     adapter = build_adapter(cfg, model_id, arome_fields=[v for v in ("t", "pmer") if v in cfg.targets])
     run_id = f"development-{now_utc().replace(':', '').replace('-', '')}-{uuid4().hex[:10]}"
@@ -157,8 +161,12 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
                                        cfg.arome_mode, arome, horizon_steps=cfg.horizon_h // cfg.step_hours,
                                        step_hours=cfg.step_hours, aux_df=aux, station_coords=coords,
                                        arome_history=need_history, arome_baseline=cfg.prediction_target == "arome_error")
-            ctx, known = adapter.build_inputs(batch)
-            past, _, report = adapter.feature_rows(batch)
+            native = adapter.build_inputs(batch)
+            ctx, known = native[:2]
+            if ck.family == "t0":
+                past, report = None, native[2]
+            else:
+                past, _, report = adapter.feature_rows(batch)
             empty = [n for n, share in report.get("observed_fraction", {}).items() if share == 0]
             if empty:
                 raise ValueError("Selected feature rows have no observed history: " + ", ".join(empty))
@@ -234,8 +242,7 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
                    "checkpoint": {"repo": ck.repo, "revision": ck.revision, "sha256": ck.sha256},
                    "adapter_version": adapter.ADAPTER_VERSION, "preprocessing_version": adapter.PREPROCESSING_VERSION,
                    "input_sha256": fingerprints, "case_info": case_info,
-                   "code_sha256": {p.name: sha256_file(p) for p in (Path(__file__), Path(__file__).with_name("forecast.py"),
-                                     Path(__file__).with_name("features.py"), Path(__file__).with_name("evaluate.py"))},
+                   "code_sha256": {p.name: sha256_file(p) for p in code_files},
                    "files_sha256": {p.name: sha256_file(p) for p in out.iterdir() if p.is_file()},
                    "created_at": now_utc(), "code_revision": git_revision(), "systems": systems,
                    "data": data, "n_cases": len(cases), "n_eligible": len(eligible),
