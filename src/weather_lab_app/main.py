@@ -318,7 +318,8 @@ def settings_text(st: dict, step: int = 3) -> str:
     feats_txt = ", ".join(FEATURE_LABELS.get(f, f) for f in st.get("features") or []) or "no additional features"
     method = "AROME + predicted error · forecast lead input · " if st.get("prediction_target") == "arome_error" else ""
     cond = "no additional AROME covariates" if method and setup == "none" else SETUP_NAMES[setup][0]
-    retrieval = f"RAG {st['retrieval_method']} · hourly archive · observations delayed 3 h · " if st.get("retrieval_method") else ""
+    retrieval = (f"RAG {'AROME errors · ' if st.get('retrieval_kind') == 'arome_error' else ''}"
+                 f"{st['retrieval_method']} · hourly archive · observations delayed 3 h · ") if st.get("retrieval_method") else ""
     return (f"{st.get('checkpoint', '?')} · {retrieval}{method}{cond} · {feats_txt} · "
             f"calendar {'on' if st.get('calendar', True) else 'off'} · context {st.get('context_days')} d "
             f"({st.get('context_steps')} steps) · inference horizon {st.get('horizon_steps', 0) * st.get('step_hours', step)} h")
@@ -488,7 +489,8 @@ def draft_config(d: dict) -> tuple[ForecastConfig | None, list]:
                               retrieval_method=d["retrieval_method"], retrieval_index=d["retrieval_index"] if retrieval else "")
     if d["case"] not in set(run.cases()["case_id"]):
         return cfg, [Issue("invalid", "forecast time", "select a forecast time of this experiment and station")]
-    issues = check(cfg, availability(d["suite"], d["case"]), EXPLORE_MAX_HOURS, CONTEXT_DAYS)
+    # RAG resolves availability from its selected hourly archive on Run, never from the frozen suite.
+    issues = check(cfg, None if retrieval else availability(d["suite"], d["case"]), EXPLORE_MAX_HOURS, CONTEXT_DAYS)
     if retrieval and d["variable"] not in cfg.targets:
         issues.append(Issue("unsupported", "retrieval", "select temperature or mean sea-level pressure"))
     if correction and d["variable"] not in cfg.targets:
@@ -736,11 +738,12 @@ def draft_feedback(*vals):
     """Every control edit: lightweight feedback only (no resolution, inference, input building or redraw)."""
     *dvals, applied, submission = vals
     d = make_draft(*dvals)
-    h_upd, h_info = horizon_control(d["suite"], d["case"], d["conditioning"], d["horizon"],
-                                   d["prediction_target"]) if d["case"] in \
-        set(RUNS[d["suite"]].cases()["case_id"]) else (gr.update(), "")
     if d["retrieval_method"] != "none":
         h_upd, h_info = gr.update(maximum=48), "Hourly RAG supports 24 or 48 h, with a 3 h observation delay."
+    else:
+        h_upd, h_info = horizon_control(d["suite"], d["case"], d["conditioning"], d["horizon"],
+                                       d["prediction_target"]) if d["case"] in \
+            set(RUNS[d["suite"]].cases()["case_id"]) else (gr.update(), "")
     if isinstance(h_upd, dict) and "value" in h_upd:
         dvals = list(dvals)
         dvals[DRAFT_KEYS.index("horizon")] = h_upd["value"]
@@ -980,6 +983,10 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
              f"{case['arome_available_at'][11:16]} UTC)." if isinstance(case.get("arome_run"), str) else "")
     assumed = (" AROME availability is inferred retrospectively from archive timestamps."
                if isinstance(case.get("arome_run"), str) else "")
+    if a["config"].retrieval_method != "none" and a["settings"].get("arome_run"):
+        st = a["settings"]
+        arome = f" Conditioning AROME run: {st['arome_run']} · product {st['arome_product']}."
+        assumed = " AROME availability uses the archived run's explicit replay assumption."
     last = plots.last_observation(obs, origin)
     gap = ("" if last is None or last[0] == origin else
            f" The last observation before the forecast time is at {last[0]:%a %d %b %H:%M} UTC, "
@@ -1029,6 +1036,10 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
         lambda m: configs[m].prediction_target if m in configs else "raw_arome" if m == "arome-raw" else "reference")
     out["inference_horizon_h"] = out["model"].map(
         lambda m: run.horizon_hours if m in run.models else configs[m].horizon_h if m in configs else None)
+    for column in ("retrieval_kind", "arome_product", "arome_run"):
+        out[column if column != "arome_run" else "conditioning_arome_run"] = out["model"].map(
+            lambda m: a.get("settings_by", {}).get(m, {}).get(column))
+    out["retrieval_index"] = out["model"].map(lambda m: configs[m].retrieval_index if m in configs else None)
     csv = out.to_csv(index=False)
     export_dir = ROOT / ".tmp" / "codex" / "forecast-exports"
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -1630,8 +1641,10 @@ def build() -> gr.Blocks:
                         retrieval_index = gr.Dropdown(Store().list("indexes"), label="Saved hourly retrieval index")
                         refresh_indexes = gr.Button("Refresh retrieval indexes", size="sm")
                     gr.Markdown("RAG uses the selected station/time with the index's hourly archive: **30-day context**, "
-                                "**24 or 48 h**, **temperature/pressure**, direct prediction and no additional features "
-                                "or AROME conditioning. Missing archive coverage is unavailable. Create an index or "
+                                "**24 or 48 h**, **temperature/pressure**, direct prediction and no additional features. "
+                                "AROME conditioning uses genuine issued runs. **AROME-error indexes require archived "
+                                "conditioning** and retrieve only cases fully verified before this forecast. Missing "
+                                "archive coverage is unavailable. Create an index or "
                                 "download t0 weights (~1 GB) in **RAG research** (weights under **Model setup**). No automatic downloads.",
                                 elem_classes="note")
                     with gr.Row(equal_height=True):
