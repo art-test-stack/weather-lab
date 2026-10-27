@@ -190,3 +190,20 @@ def test_residual_rag_shifts_quantiles_once_and_excludes_bridge(error_cases, tmp
     cached, hit = rag_forecast.forecast(case, selected, lookup_only=True, store=store)
     assert hit["cache_hit"] and len(calls) == 1
     pd.testing.assert_frame_equal(frame, cached)
+
+
+def test_error_index_uses_hourly_query_windows_and_strict_verification(error_cases):
+    cfg, obs, issued, store, archive, _ = error_cases
+    hourly = copy.deepcopy(cfg)
+    hourly['retrieval']['stride_hours'] = 1
+    hourly['horizons_hours'] = [24]
+    # A short fixture interval is enough to cover all hourly decisions between daily issues.
+    hourly['retrieval']['start'] = '2026-04-25T00:00Z'
+    index = ErrorIndex(build(archive.name, hourly, store))
+    assert 7 in set(index.windows.origin.dt.hour)
+    assert not index.windows.duplicated(['station', 'origin']).any()
+    assert (index.windows.payload_end + pd.Timedelta(hours=3)).eq(index.windows.available_at).all()
+    batch = query(cfg, obs, issued, '2026-04-27T06:00Z')
+    _, audit = index.retrieve(batch, 'shape', 2)
+    assert all(pd.Timestamp(n['available_at']) < pd.Timestamp('2026-04-27T06:00Z')
+               for n in audit[0]['neighbors'])
