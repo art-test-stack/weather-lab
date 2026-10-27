@@ -1703,7 +1703,7 @@ def build() -> gr.Blocks:
 
             # ---------------- benchmark
             with gr.Tab("Benchmark", id="benchmark"):
-                benchmark_suite = "hourly-2026-v2" if "hourly-2026-v2" in RUNS else DEFAULT_SUITE
+                benchmark_suite = "hourly-2026-v3" if "hourly-2026-v3" in RUNS else DEFAULT_SUITE
                 b0 = bench.defaults(benchmark_suite)
                 b_applied = gr.State({"draft": b0, "config": bench.configuration(b0),
                                       "path": str(RUNS[benchmark_suite].path), "kind": "reference" if RUNS[benchmark_suite].run.get("hourly_benchmark") else "frozen"})
@@ -1718,7 +1718,9 @@ def build() -> gr.Blocks:
                                 f"{cases.origin.min():%d %B %Y %H:%M}–{cases.origin.max():%d %B %Y %H:%M} UTC.** "
                                 "A new origin every hour, predicting the next 48 hours. Late-2025 measurements supply January context. "
                                 "Missing targets and unverified trailing windows remain unavailable. AROME uses a single issued run "
-                                "available at each origin; the saved archive contains daily 03:00 UTC issues from 2 April. "
+                                "available at each origin; the saved archive includes the available three-hourly issues from 2 April. "
+                                "Real AROME values extend 51 hours from each issue; with the assumed release lag, "
+                                "some hourly origins lack the final 1–2 hours of a full 48-hour baseline, and outages leave longer gaps. "
                                 "Observations and issues use an assumed 3-hour publication delay. "
                                 "Direct models are evaluated across the full observed year; AROME methods compare on their shared available dates. "
                                 "Overlapping windows are dependent; this is a development replay, not an untouched test set.")
@@ -1740,7 +1742,7 @@ def build() -> gr.Blocks:
                 with gr.Row():
                     b_retrieval = gr.Radio([("None", "none"), ("RAG · levels", "level"), ("RAG · shape", "shape")],
                                            value="none", label="Benchmark retrieval")
-                    b_index = gr.Dropdown(Store().list("indexes"), label="Benchmark hourly retrieval index")
+                    b_index = gr.Dropdown(bench.index_choices(benchmark_suite), label="Benchmark hourly retrieval index")
                 with gr.Row():
                     b_ctx = gr.Slider(*CONTEXT_DAYS, value=b0["ctx"], step=1, label="Benchmark context (days)")
                     b_length = gr.Slider(RUNS[benchmark_suite].step_hours, RUNS[benchmark_suite].horizon_hours, value=b0["horizon"], step=RUNS[benchmark_suite].step_hours,
@@ -1879,7 +1881,11 @@ def build() -> gr.Blocks:
         demo.load(bench.render, b_applied, b_outputs)
         feedback(demo.load(refresh_retrieval, retrieval_index, retrieval_index))
         demo.load(rag_panel.refresh, outputs=rag_outputs)
-        demo.load(refresh_retrieval, b_index, b_index)
+        def refresh_benchmark_indexes(selected):
+            choices = bench.index_choices(benchmark_suite)
+            return gr.update(choices=choices, value=selected if selected in {v for _, v in choices} else None)
+
+        demo.load(refresh_benchmark_indexes, b_index, b_index)
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
