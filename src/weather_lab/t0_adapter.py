@@ -76,9 +76,13 @@ class T0(Adapter):
                 if not np.isfinite(future).all():
                     raise ValueError(f"t0 issued AROME {variable} is missing; native NaN-to-zero is not an archive fallback")
                 if self.arome_mode == "archived":
-                    if batch.arome_history is None:
+                    if batch.arome_inputs is not None:
+                        field = batch.arome_inputs.fields.index(variable)
+                        past = batch.arome_inputs.history[:, field:field + 1, -length:]
+                    elif batch.arome_history is None:
                         raise ValueError("t0 archived conditioning needs vintage-checked AROME history")
-                    past = batch.arome_history[:, j:j + 1, -length:]
+                    else:
+                        past = batch.arome_history[:, j:j + 1, -length:]
                 else:
                     past = np.full((len(context), 1, length), np.nan, np.float32)
                 known.append(np.concatenate([past, future], axis=2))
