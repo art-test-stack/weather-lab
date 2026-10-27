@@ -100,8 +100,8 @@ def test_cache_identity_and_capability_rejections():
         adapter(clip_nonnegative=True)
     with pytest.raises(ValueError, match="snapping"):
         adapter(snap_integers=True)
-    with pytest.raises(ValueError, match="residual"):
-        adapter(prediction_target="arome_error")
+    with pytest.raises(ValueError, match="issued and qualifying archived"):
+        adapter(prediction_target="arome_error").build_inputs(b)
     with pytest.raises(ValueError, match="substitution"):
         adapter(arome="substituted_observations")
     with pytest.raises(ValueError, match="entirely missing"):
