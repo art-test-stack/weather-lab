@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from weather_lab import features as features_module
-from weather_lab.forecast import Adapter, CaseBatch, ForecastBatch, QUANTILE_LEVELS, calendar_features
+from weather_lab.forecast import Adapter, CaseBatch, ForecastBatch, QUANTILE_LEVELS, calendar_features, error_inputs
 
 
 class T0(Adapter):
@@ -25,8 +25,11 @@ class T0(Adapter):
                  snap_integers: bool = False, prediction_target: str = "weather", **params):
         if clip_nonnegative or snap_integers:
             raise ValueError("t0 weather targets in Celsius/hPa/signed wind require clipping and integer snapping off")
-        if prediction_target != "weather":
-            raise ValueError("t0 adapter supports raw weather targets; fixed-lead residual targets need their own builder")
+        if prediction_target not in ("weather", "arome_error"):
+            raise ValueError("t0 prediction target must be weather or arome_error")
+        self.prediction_target = prediction_target
+        if prediction_target == "arome_error":
+            params.update(prediction_target=prediction_target, residual_version=1, forecast_lead_input=True)
         if arome not in (None, "archived", "missing"):
             raise ValueError("t0 AROME history must be archived or explicitly missing; observation substitution is unsupported")
         if not targets or not set(targets) <= set(variables) or context_days < 1 or batch_size < 1:
@@ -48,7 +51,7 @@ class T0(Adapter):
                          inference_options=self.options, **params)
         needs = {dep for name in self.features for dep in features_module.GROUPS[name].needs}
         self.inputs = frozenset({"history"} | ({"calendar"} if calendar else set())
-                                | ({"arome"} if arome or "arome_history" in needs else set())
+                                | ({"arome"} if arome or "arome_history" in needs or prediction_target == "arome_error" else set())
                                 | ({"features"} if self.features else set()))
 
     def context_steps(self, step_hours: int) -> int:
@@ -62,11 +65,16 @@ class T0(Adapter):
             raise ValueError("t0 observation context is shorter than requested")
         index = [batch.variables.index(v) for v in self.variables]
         context = batch.history[:, index, -length:].copy()
+        leads = None
+        if self.prediction_target == "arome_error":
+            context, _, leads = self.error_inputs(batch)
         if not np.isfinite(context).any(axis=-1).all():
             raise ValueError("t0 refuses an entirely missing weather target row")
         known = []
         if self.calendar:
             known.append(calendar_features(np.concatenate([batch.history_times(length), batch.future_times], axis=1)))
+        if leads is not None:
+            known.append(leads)
         if self.arome_mode:
             if batch.arome is None or not self.arome_fields:
                 raise ValueError("t0 conditioning needs issued AROME and explicit fields")
@@ -102,6 +110,9 @@ class T0(Adapter):
                   "known_rows": 0 if covariates is None else covariates.shape[1]}
         return context.astype(np.float32), covariates, report
 
+    def error_inputs(self, batch: CaseBatch):
+        return error_inputs(batch, self.variables, self.context_steps(batch.step_hours))
+
     def input_identity(self, batch: CaseBatch) -> str:
         context, known, _ = self.build_inputs(batch)
         digest = hashlib.sha256(json.dumps({"adapter_version": self.ADAPTER_VERSION,
@@ -109,7 +120,10 @@ class T0(Adapter):
                                             "device": self.device, "precision": "float32", "params": self.params,
                                             "variables": self.variables, "quantiles": QUANTILE_LEVELS},
                                            sort_keys=True).encode())
-        for value in (context, known, batch.origins, batch.future_times):
+        arrays = [context, known, batch.origins, batch.future_times]
+        if self.prediction_target == "arome_error":
+            arrays.append(self.error_inputs(batch)[1])
+        for value in arrays:
             if value is None:
                 digest.update(b"none")
             else:
@@ -149,9 +163,16 @@ class T0(Adapter):
                     raise ValueError(f"t0 native output shape {q.shape} differs from {shape}")
                 out.append(q[:, :len(self.variables)])
         quantiles = np.concatenate(out)
+        residual_info = {}
+        if self.prediction_target == "arome_error":
+            _, baseline, _ = self.error_inputs(batch)
+            quantiles += baseline[..., None]
+            residual_info = {"prediction_target": "arome_error", "residual_version": 1,
+                             "forecast_lead_input": True,
+                             "residual_observed_steps": np.isfinite(context[:, :len(self.variables)]).sum(axis=-1).tolist()}
         return ForecastBatch(self.id, f"{self.checkpoint}@{self.revision}", "quantiles", self.variables,
                              quantiles[..., QUANTILE_LEVELS.index(.5)], quantiles, QUANTILE_LEVELS,
-                             info={**item.info, "adapter_version": self.ADAPTER_VERSION,
+                             info={**item.info, **residual_info, "adapter_version": self.ADAPTER_VERSION,
                                    "native_inputs": report, "inference_options": self.options,
                                    "input_identity": self.input_identity(batch),
                                    "predict_s": time.perf_counter() - started, "n_cases": len(context),
