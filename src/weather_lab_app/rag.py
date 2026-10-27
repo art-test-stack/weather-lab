@@ -56,7 +56,7 @@ def action(kind, archive=None, index=None, horizon=24, progress=gr.Progress()):
                 from weather_lab.common import ROOT
                 from weather_lab.rag_arome_error import build
 
-                cfg = config(ROOT / "configs/rag_arome_error_hourly_v2.yaml")
+                cfg = config(ROOT / "configs/rag_arome_error_hourly_v3.yaml")
             else:
                 from weather_lab.rag_index import build
             path = build(archive, cfg, store)
