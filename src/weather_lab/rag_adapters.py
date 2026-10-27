@@ -28,6 +28,9 @@ class Retrieved:
         super().__init__(*args, **kwargs)
         self.params.update(index_id=index.ident, retrieval_method=method, retrieval_k=k,
                            retrieval_role="historical analogue trajectory as known covariates", rag_version=1)
+        if index.meta.get("kind") == "arome_error":
+            self.params.update(retrieval_role=index.meta["payload"], retrieval_kind="arome_error",
+                               product=index.meta["product"])
 
     def build_inputs(self, batch):
         native = super().build_inputs(batch)
@@ -53,7 +56,7 @@ class RetrievedT0(Retrieved, T0):
     pass
 
 
-def foundation(name, index, method=None, k=5, device="cpu", calendar=True):
+def foundation(name, index, method=None, k=5, device="cpu", calendar=True, arome=None):
     from weather_lab.models import CHECKPOINTS
 
     ck = CHECKPOINTS[name]
@@ -64,4 +67,5 @@ def foundation(name, index, method=None, k=5, device="cpu", calendar=True):
     kwargs = {"index": index, "method": method, "k": k} if method else {}
     return kind(ident, variables=index.meta["variables"], targets=index.meta["variables"], checkpoint=ck.repo,
                 revision=ck.revision, context_days=index.meta["context_hours"] // 24,
-                calendar=calendar, device=device, batch_size=8, **kwargs)
+                calendar=calendar, device=device, batch_size=8, arome=arome,
+                arome_fields=index.meta["variables"] if arome else [], **kwargs)
