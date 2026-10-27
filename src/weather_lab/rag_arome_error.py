@@ -79,14 +79,25 @@ def build(archive_id, cfg, store=None):
             or delay < 0 or context % 24 or rule["k"] < 1):
         raise ValueError("invalid error-index context, forecast-query window, delay or neighbor count")
     rows, payloads, gaps, vectors = [], [], [], {m: [] for m in METHODS}
-    for (station, run), group in issued.groupby(["station", "run"], sort=True):
-        origin = group.available_at.max()
+    candidates = [(station, run, group.available_at.max())
+                  for (station, run), group in issued.groupby(["station", "run"], sort=True)]
+    stride = rule.get("stride_hours")
+    if stride is not None:
+        if stride != 1:
+            raise ValueError("the sliding error protocol requires a one-hour stride")
+        candidates = [(station, None, origin) for station, group in issued.groupby("station", sort=True)
+                      for origin in pd.date_range(max(ts(rule["start"]), group.available_at.min()),
+                                                  obs[obs.station.eq(station)].time.max(), freq="h")]
+    for station, run, origin in candidates:
         if origin < ts(rule["start"]):
             continue
         case = pd.Series({"station": station, "origin": origin}, name=f"{station}/{origin.isoformat()}")
         try:
-            batch, provenance = make_batch(obs, issued, case, variables, context, horizon, delay, product)
-            if ts(provenance["run"]) != run:
+            relevant = issued[issued.station.eq(station) & (issued.available_at <= origin)
+                              & (issued.valid_time >= origin - pd.Timedelta(hours=context + delay))]
+            batch, provenance = make_batch(obs[obs.station.eq(station)], relevant, case,
+                                            variables, context, horizon, delay, product)
+            if run is not None and ts(provenance["run"]) != run:
                 raise ValueError("another issued run was selected for this decision")
             encoded = {m: vector(batch, scale, rule["query_hours"], rule["forecast_query_hours"], delay, m)
                        for m in METHODS}
@@ -99,7 +110,7 @@ def build(archive_id, cfg, store=None):
             future_errors = truth - batch.arome[0]
             payloads.append(np.concatenate([past_errors, future_errors], axis=1))
             scored = future_errors[:, delay:]
-            rows.append({"station": station, "origin": origin, "run": run, "available_at": available,
+            rows.append({"station": station, "origin": origin, "run": ts(provenance["run"]), "available_at": available,
                          "payload_end": times[-1], "forecast_available_at": ts(provenance["available_at"]),
                          **{f"mae_{v}": float(np.mean(np.abs(scored[j]))) for j, v in enumerate(variables)},
                          **{f"bias_{v}": float(np.mean(scored[j])) for j, v in enumerate(variables)}})
