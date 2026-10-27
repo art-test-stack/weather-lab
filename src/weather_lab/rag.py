@@ -9,12 +9,12 @@ import yaml
 from weather_lab.common import ROOT
 from weather_lab.rag_store import Store
 
-CONFIG = ROOT / "configs/rag_weather_v1.yaml"
+CONFIG = ROOT / "configs/rag_weather_hourly_v2.yaml"
 
 
 def config(path: Path = CONFIG) -> dict:
     cfg = yaml.safe_load(Path(path).read_text())
-    if cfg["experiment"] not in ("rag-weather-2026-v1", "rag-arome-error-2026-v1"):
+    if cfg["experiment"] not in ("rag-weather-2026-v1", "rag-arome-error-2026-v1", "rag-weather-2026-hourly-v2", "rag-arome-error-2026-hourly-v2"):
         raise ValueError("unsupported RAG experiment version")
     return cfg
 
@@ -22,7 +22,7 @@ def config(path: Path = CONFIG) -> dict:
 def command(args):
     store = Store(Path(args.local_only) if args.local_only else None)
     cfg = config(Path(args.config))
-    if cfg["experiment"] == "rag-arome-error-2026-v1" and args.rag_command not in ("index", "restore", "status"):
+    if cfg["experiment"].startswith("rag-arome-error-") and args.rag_command not in ("index", "restore", "status"):
         raise ValueError("This protocol builds exploratory AROME-error indexes from the existing archive; no scoring or collection")
     if args.rag_command == "collect":
         from weather_lab.rag_archive import collect
@@ -31,8 +31,11 @@ def command(args):
         from weather_lab.rag_archive import ingest
         path = ingest(Path(args.observations), cfg, Path(args.issued) if args.issued else None,
                       Path(args.historical) if args.historical else None, store)
+    elif args.rag_command == "extend-issued":
+        from weather_lab.rag_archive import extend_issued
+        path = extend_issued(args.archive, cfg, store)
     elif args.rag_command == "index":
-        if cfg["experiment"] == "rag-arome-error-2026-v1":
+        if cfg["experiment"].startswith("rag-arome-error-"):
             from weather_lab.rag_arome_error import build
         else:
             from weather_lab.rag_index import build
@@ -64,7 +67,7 @@ def command(args):
 def parser(sub):
     root = sub.add_parser("rag", help="2026 weather RAG: collect, persist, index and evaluate")
     children = root.add_subparsers(dest="rag_command", required=True)
-    for name in ("collect", "ingest", "index", "evaluate", "restore", "status", "prefetch"):
+    for name in ("collect", "ingest", "extend-issued", "index", "evaluate", "restore", "status", "prefetch"):
         p = children.add_parser(name)
         p.add_argument("--config", default=str(CONFIG))
         p.add_argument("--local-only", metavar="DIRECTORY", help="explicit offline/local artifact store; skips bucket writes")
@@ -73,6 +76,8 @@ def parser(sub):
             p.add_argument("--observations", required=True)
             p.add_argument("--issued")
             p.add_argument("--historical")
+        elif name == "extend-issued":
+            p.add_argument("--archive", required=True, help="verified archive to extend without downloading observations again")
         elif name == "index":
             p.add_argument("--archive", help="source archive id; defaults to the protocol's pinned archive when present")
         elif name == "evaluate":
