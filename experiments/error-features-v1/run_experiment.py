@@ -35,11 +35,13 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--family", choices=["timestral", "t0"], required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--arm", nargs="+", choices=["all", "past-wind", "issued-atmosphere", "both"], default=["all"])
+    parser.add_argument("--arm", nargs="+", choices=["all", "existing", "past-wind", "issued-atmosphere", "both"], default=["all"])
+    parser.add_argument("--horizon-hours", type=int, choices=[24, 48], default=48)
     parser.add_argument("--cpu-budget-seconds", type=int, default=240)
     args = parser.parse_args()
-    if not 1 <= args.cpu_budget_seconds <= 240:
-        raise ValueError("Execution allocation must be between 1 and 240 CPU-seconds")
+    maximum = (480 if args.family == "timestral" else 180) if args.horizon_hours == 24 else 240
+    if not 1 <= args.cpu_budget_seconds <= maximum:
+        raise ValueError(f"Execution allocation must be between 1 and {maximum} CPU-seconds")
     out = args.output
     out.mkdir(parents=True, exist_ok=False)
     cpu, wall = time.process_time(), time.perf_counter()
@@ -55,6 +57,9 @@ def main():
     paths["arome"] = source / "arome_station_extract.parquet"
     assert all(sha256_file(path) == frozen["sources"][name] for name, path in paths.items())
     plan = yaml.safe_load((Path(__file__).with_name("protocol.yaml")).read_text())
+    if args.horizon_hours == 24:
+        native_plan = yaml.safe_load(Path(__file__).with_name("protocol-native24.yaml").read_text())
+        plan = {**plan, **native_plan}
     ck = models.CHECKPOINTS["Timestral-209M" if args.family == "timestral" else "t0-gamma"]
     models.prefetch(ck, allow_download=False)
     identity = {"plan_sha256": sha256_file(Path(__file__).with_name("protocol.yaml")),
@@ -62,6 +67,8 @@ def main():
                 "baseline_predictions_sha256": sha256_file(existing / "predictions.parquet"),
                 "checkpoint": ck.ident, "weight_sha256": ck.sha256,
                 "execution_allocation": {"arm": args.arm, "cpu_cap_seconds": args.cpu_budget_seconds},
+                **({"native24_plan_sha256": sha256_file(Path(__file__).with_name("protocol-native24.yaml"))}
+                   if args.horizon_hours == 24 else {}),
                 "environment": {**environment(), "torch": str(torch.__version__)},
                 "sources": frozen["sources"], "plan": plan,
                 "code_sha256": {str(p.relative_to(ROOT)): sha256_file(p) for p in (
@@ -73,9 +80,12 @@ def main():
     (out / "protocol.yaml").write_text(yaml.safe_dump(identity, sort_keys=False))
     predictions = pd.read_parquet(existing / "predictions.parquet")
     targets = pd.read_parquet(existing / "targets.parquet")
+    predictions = predictions[predictions.lead_h.le(args.horizon_hours)]
+    targets = targets[targets.lead_h.le(args.horizon_hours)]
     cases = pd.read_parquet(existing / "cases.parquet")
     assert len(cases) == 55
     cfg = load_config(source / "config.yaml")
+    cfg.raw["forecast"] = {**cfg["forecast"], "horizon_steps": args.horizon_hours // 3}
     manifest = read_json(source / "manifest.json")
     source_cases = cases_from_manifest(manifest).set_index("case_id").loc[cases.case_id].reset_index()
     coords = {s["id"]: (s["lat"], s["lon"]) for s in manifest["dataset"]["stations"]}
@@ -83,11 +93,14 @@ def main():
         pd.read_parquet(paths["arome"]), pd.read_parquet(paths["aux_observations"]), coords)
     baseline_id = ("timestral-209m-error-ctx90-all-features" if args.family == "timestral"
                    else "t0-gamma-error-ctx90-all-features-v1")
-    frames = [predictions[predictions.model.isin(["arome-raw", "arome-biascorr", baseline_id])].copy()]
+    references = ["arome-raw", "arome-biascorr"] + ([baseline_id] if args.horizon_hours == 48 else [])
+    frames = [predictions[predictions.model.isin(references)].copy()]
     issued = pd.read_parquet(evidence / "issued_atmosphere.parquet")
     runtimes = []
-    for arm, wind, weather in (("past-wind", True, False), ("issued-atmosphere", False, True),
-                               ("both", True, True)):
+    arms = [("past-wind", True, False), ("issued-atmosphere", False, True), ("both", True, True)]
+    if args.horizon_hours == 24 or "existing" in args.arm:
+        arms.insert(0, ("existing", False, False))
+    for arm, wind, weather in arms:
         if "all" not in args.arm and arm not in args.arm:
             continue
         adapter_class = ExtraTimestral if args.family == "timestral" else ExtraT0
@@ -95,7 +108,8 @@ def main():
             "trim_leading_missing": False, "symmetric_averaging": False}
         extra_identity = {"past_wind_v1": wind, "issued_atmosphere_v1": weather,
                           "issued_source_sha256": identity["issued_sha256"] if weather else None}
-        adapter = adapter_class(f"{args.family}-error-ctx90-{arm}-v1", cfg["variables"], ["t", "pmer"],
+        suffix = "-h24" if args.horizon_hours == 24 else ""
+        adapter = adapter_class(f"{args.family}-error-ctx90-{arm}{suffix}-v1", cfg["variables"], ["t", "pmer"],
             ck.repo, ck.revision, context_days=90, calendar=False, arome="missing", arome_fields=["t", "pmer"],
             features=["resid", "atmos", "solar", "tend"], batch_size=5,
             extras=ExtraInputs(wind, issued if weather else None), extra_identity=extra_identity, **kwargs)
