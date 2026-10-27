@@ -130,7 +130,10 @@ class Store:
                     continue
                 if sha256_text(json.dumps(rec["files_sha256"], sort_keys=True)) != rec["id"]:
                     continue
-                found.append((rec["id"][:12], rec["id"]))
+                label = rec["id"][:12]
+                if kind == "indexes" and read_json(p.parent / "index.json").get("kind") == "arome_error":
+                    label = f"AROME errors · {label}"
+                found.append((label, rec["id"]))
             except (ValueError, OSError, KeyError):
                 continue
         return found
