@@ -628,7 +628,9 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     from weather_lab.models import offline, prefetch
     from weather_lab.forecast_config import ForecastConfig, _FROM_MODE, build_adapter
 
-    ck = _registry()[size]
+    from weather_lab.models import CHECKPOINTS as REGISTRY
+
+    ck = REGISTRY[size]
     if prediction_target not in ("weather", "arome_error"):
         raise ValueError(f"unknown prediction target {prediction_target!r}")
     correction = prediction_target == "arome_error"
@@ -648,19 +650,25 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     model = build_adapter(cfg, f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
                           f"{AROME_LABELS[arome_mode]}{flabel}{method_label} [{device}]",
                           arome=arome_mode, arome_fields=["t", "pmer"], batch_size=1, device=device)
-    ctx, known = model.build_inputs(batch)
-    past, _, feat_report = model.feature_rows(batch)
+    native = model.build_inputs(batch)
+    ctx, known = native[:2]
+    if ck.family == "t0":
+        past, feat_report = None, native[2]
+    else:
+        past, _, feat_report = model.feature_rows(batch)
     for row, share in (feat_report.get("observed_fraction") or {}).items():
         if share == 0:      # an empty covariate row is masked but not neutral: never run it silently
             raise ValueError(f"feature row '{row}' has no observed value in the {context_days}-day context before "
                              "this forecast time")
-    payload = {"adapter": model.kind, "adapter_version": Timestral.ADAPTER_VERSION,
-               "preprocessing": Timestral.PREPROCESSING_VERSION, "checkpoint": ck.repo, "revision": ck.revision,
+    payload = {"adapter": model.kind, "adapter_version": model.ADAPTER_VERSION,
+               "preprocessing": model.PREPROCESSING_VERSION, "checkpoint": ck.repo, "revision": ck.revision,
                "variables": variables, "station": case["station"], "origin": str(case["origin"]),
                "horizon_steps": horizon_steps, "step_hours": step_hours, "context_steps": ctx.shape[-1],
                "calendar": calendar, "arome_mode": arome_mode, "arome_run": case.get("arome_run") if arome_mode else None,
                "quantile_levels": list(QUANTILE_LEVELS), "device": device, "dtype": "float32",
                "torch": torch.__version__, "stochastic": "none (deterministic forward pass)"}
+    if ck.family == "t0":
+        payload.update(inference_options=model.options, runtime="tfc-t0==0.6.0")
     if spec:     # feature definitions (name, version, role, rows, parameters); actual values/masks hashed below
         payload["features"] = feats.definition(spec)
         payload["arome_history_runs"] = sorted({str(r) for r in np.ravel(batch.arome_history_run)
