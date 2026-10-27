@@ -277,3 +277,87 @@ tests/                      unit tests; test_real_timestral.py is opt-in
 ```
 
 **Adding a model.** See [docs/adding_a_model.md](docs/adding_a_model.md) (contract, capabilities, and the concrete integration points for TFC t0-gamma, the next candidate). In short: subclass `Adapter`, return a `ForecastBatch` on the benchmark quantile grid, register its `kind` in `evaluate.ADAPTERS` and its capabilities and pinned checkpoint in `weather_lab.models`. Scoring, storage, caching and the app pick it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`); `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces this.
+
+
+## Weather RAG research (2026 pilot)
+
+Branch `research/ts-rag-weather` extends PR #1. This independent experiment is configured in
+`configs/rag_weather_v1.yaml`; it never rewrites an existing frozen suite or its scores.
+The Space has a **RAG research** tab with explicit collection, index, evaluation and saved-result actions.
+Browsing saved runs does not call a model. The new `tfc-t0[torch]==0.6.0` dependency enables the existing
+pinned t0-gamma adapter alongside Timestral-209M; torch and all checkpoint revisions stay unchanged.
+
+**Question.** Does retrieval of historical weather analogues improve Timestral-209M or t0-gamma against
+issued AROME forecasts? The pilot compares two transparent, exact vector searches, each with its own
+retrieval-only reference and a foundation-model variant:
+
+- **Levels:** squared L2 over a 72-hour multivariate window, scaled using pre-2026 standard deviations.
+- **Shape:** the same window after subtracting each variable's endpoint. Retrieved trajectories are
+  shifted to the query endpoint. This compares changes while keeping physical units and amplitudes.
+
+Candidates come from the same station and UTC hour, within 45 days of the calendar season. The five
+nearest windows are inverse-distance weighted. Their complete 30-day past and up to 51-hour measured
+continuations are stored as payloads. Both models receive these historical analogue trajectories through
+native **known covariates**, alongside the original observation context and calendar rows. This is
+retrieval-augmented inference with historical measured continuations, without local fine-tuning or a
+claim that the payloads are issued historical AROME forecasts. Exact NumPy vectors, metadata and payloads
+form the first vector database; no embedding training or approximate-neighbour service is needed.
+
+**Dates and causality.** The archive collects station weather from 2022 onward, including 2025. The index
+uses only windows whose complete continuation, plus the declared observation delay, ends before
+1 January 2026. Its scaling is also fitted before this cutoff. Daily 06 UTC origins cover the requested
+2026 year. The 30-day rolling context initially comes from late 2025, then incorporates observations
+available by each 2026 origin; this is a series of short-range forecasts, not one year-long forecast
+issued in December 2025. Model inputs end three hours before the decision; generated bridge steps are
+excluded from scores. Each run has exactly one AROME product and one 24- or 48-hour horizon.
+
+**Coverage limits.** Official hourly station measurements are verified against themselves, never against
+an interpolated SYNOP series or another forecast. Historical stitched AROME series are collected for
+inventory and kept separate from issued forecasts. Open-Meteo's named AROME runs start **2 April 2026**:
+<https://open-meteo.com/en/docs/single-runs-api>. Earlier named-run coverage has not been established.
+Missing years, null fields, incomplete horizons and future 2026 dates remain explicit gaps. An issued
+forecast must come from one named run available at the decision time; the evaluator never combines runs
+or products to fill it. The collection declares a **run + 3 hours** availability assumption and a
+**validity + 3 hours** observation assumption; original publication/revision timestamps are not available.
+These are retrospective development comparisons, without a held-out or operational-latency claim.
+The collection requests a complete named run's returned horizon; it does not invent missing leads.
+
+**Storage.** Source data (including collected raw files), vector indexes, and each completed evaluation
+are immutable SHA-256-addressed artifacts under
+`hf://buckets/ai-testack/weather-lab-storage/rag/weather-v1/{archives,indexes,runs}/<id>/`.
+The mounted Space bucket is used directly. Elsewhere the Hub Bucket API uploads and verifies the bytes
+before publishing the completion marker, while retaining a local cache. A failed upload fails the action;
+it is never reported as durable success. Restoring an artifact verifies its inventory and every file.
+The bucket API requires `HF_TOKEN` with access to this bucket when writes are not through the mount.
+The configured bucket is public, as are these experimental artifacts.
+
+Evaluations save all requested cases, per-system availability/failure reasons, native predictions and
+quantiles, point scores, neighbour identities/distances/weights, pinned model descriptions, archive/index
+ids, configuration and source hashes. MAE/RMSE stay separate by variable. `all_systems_common` uses the
+same observed targets for every configured system. `paired_vs_arome` also exposes each model's exact
+matched AROME support; supports can differ, so those rows must not be used for a cross-model ranking.
+An absent comparator produces zero matched support and unavailable scores.
+
+```bash
+# Space: use the RAG research tab. Local equivalents (no paid resources are launched):
+uv run weather-lab rag collect                         # bounded to 300 MiB; may take many API calls
+uv run weather-lab rag index --archive <archive-sha256>
+uv run weather-lab rag prefetch                        # explicit: up to 1.86 GB of pinned weights
+uv run weather-lab rag evaluate --index <index-sha256> --horizon 24
+uv run weather-lab rag evaluate --index <index-sha256> --horizon 48
+uv run weather-lab rag status
+uv run weather-lab rag restore --kind runs --id <run-sha256>
+
+# Reuse an existing prepared hourly archive instead of collecting it again:
+uv run weather-lab rag ingest --observations <observations.parquet> \
+  --issued <issued-runs.parquet> --historical <historical.parquet>
+# --issued and --historical are optional; missing issued data remain unavailable.
+# Every subcommand accepts --local-only <directory> for explicit offline/local work.
+```
+
+Ingested observations require `station`, hourly UTC `time`, and the configured variables in °C/hPa.
+Issued-run rows require `station`, `run`, `available_at`, `valid_time`, `variable`, `value`, `product`,
+`source_kind=issued_run`, and `availability_basis` (evidence or an explicit assumption).
+Stitched historical series cannot pass the issued-run validator.
+Collection, full inference and deployment are separate explicit actions; merely deploying this code
+neither downloads the new archive nor launches an evaluation. The existing Space preload is unchanged.

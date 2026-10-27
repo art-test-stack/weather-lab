@@ -69,6 +69,15 @@ MODELS = {
         "As Timestral 209M · 30-day history, plus 3 h and 24 h tendencies of observed temperature and pressure. Inference only, no training."),
 }
 
+# RAG pilot systems live in their separate research tab and artifact namespace.
+for _mid, _name, _description, _colour in [
+    ("analogue-level", "Weather analogues · levels", "Weighted historical continuations retrieved by weather levels.", "#718096"),
+    ("analogue-shape", "Weather analogues · shape", "Endpoint-aligned continuations retrieved by recent trajectory shape.", "#4a5568"),
+    ("timestral-209m", "Timestral 209M", "Pinned Timestral with observation history and calendar inputs.", "#184f95"),
+    ("t0-gamma", "t0-gamma", "Pinned t0-gamma with observation history and calendar inputs.", "#805ad5"),
+]:
+    MODELS[_mid] = (_name, _description)
+
 # One colour family per kind of system: observations ink, Timestral blues, Timestral+AROME teal,
 # AROME error correction purple, AROME orange, simple references greys.
 OBS_COLOR = "#0b0b0b"
@@ -104,6 +113,15 @@ STYLE = {
 }
 # Colour family per model family for ids without an explicit STYLE entry (next family: TFC t0, browns).
 FAMILY_STYLE = {"t0-": ("#a0522d", "solid", 2.4)}
+for _mid, _colour in [("analogue-level", "#718096"), ("analogue-shape", "#4a5568"),
+                      ("timestral-209m", "#184f95"), ("t0-gamma", "#805ad5")]:
+    STYLE[_mid] = (_colour, "solid", 2.4)
+for _base in ("timestral-209m", "t0-gamma"):
+    for _method in ("level", "shape"):
+        _mid = f"{_base}-rag-{_method}"
+        MODELS[_mid] = (f"{MODELS[_base][0]} + RAG · {_method}",
+                        "Retrieved pre-2026 analogue trajectories passed as native known covariates; no fine-tuning.")
+        STYLE[_mid] = (STYLE[_base][0], "dash" if _method == "shape" else "dot", 2.4)
 # Systems whose inputs differ in kind (not just in model): hatched in comparisons, explained in the summary.
 DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-209m-mv-cal-arome-substobs",
                              "timestral-28m-mv-cal-arome"})
@@ -169,6 +187,17 @@ def unit(v: str) -> str:
 
 # Experiments shown in the app (benchmark id -> presentation). `headline` drives the overview tiles.
 EXPERIMENTS = {
+    "rag-weather-2026-v1": {
+        "name": "Weather RAG · 2026 replay",
+        "status": "Development research",
+        "short": "2022–2025 retrieval archive · daily 2026 cases · separate 24/48 h runs",
+        "scope": "Hourly station observations; rolling contexts; immutable archive, index and evaluation artifacts.",
+        "caveat": "Missing issued forecasts remain unavailable; publication times use explicit replay assumptions.",
+        "headline": ["arome-raw", "timestral-209m", "t0-gamma"],
+        "reference": "arome-raw",
+        "default_systems": ["arome-raw", "timestral-209m", "t0-gamma"],
+        "band": "",
+    },
     "arome-issued-v2": {
         "name": "AROME vs Timestral · Oct 2026",
         "status": "Integration study",
@@ -242,3 +271,4 @@ SETUP_NAMES = {
 }
 DEFAULT_EXPERIMENT = "arome-issued-v2"
 EXPERIMENT_ORDER = ["arome-issued-v2", "synop-ctxval-2023-v1", "synop-historical-v1", "arome-issued-v1"]
+

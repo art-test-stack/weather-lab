@@ -84,8 +84,8 @@ FAMILIES: dict[str, Family] = {
         "TFC t0", adapter="t0", past_covariates=True, known_covariates=True,
         missing_values="NaN means missing; past rows are jointly forecast native variates",
         native_quantiles=TIMESTRAL_QUANTILES, max_context=None, max_horizon=1024,
-        runtime="tfc-t0==0.6.0 (optional isolated PyTorch environment)", status="integrated",
-        notes="Research adapter; runtime and weights are not included in bootstrap or Space preload",
+        runtime="tfc-t0==0.6.0 (PyTorch)", status="integrated",
+        notes="Research adapter; runtime installed, weights require explicit setup and are not in Space preload",
         checkpoints=("t0-gamma",)),
 }
 
@@ -232,7 +232,7 @@ class ModelCache:
             try:
                 runtime = version("tfc-t0")
             except PackageNotFoundError as e:
-                raise CheckpointError("t0 requires the isolated tfc-t0==0.6.0 environment") from e
+                raise CheckpointError("t0 requires the pinned tfc-t0==0.6.0 runtime; run uv sync") from e
             if runtime != "0.6.0":
                 raise CheckpointError(f"t0 runtime {runtime} differs from pinned tfc-t0==0.6.0")
         meta = prefetch(ck)                                 # local files (or an actionable error)
@@ -300,3 +300,4 @@ def checkpoint_status() -> list[dict]:
         rows.append({"checkpoint": c.name, "repo": c.repo, "revision": c.revision[:12], "on_disk": folder is not None,
                      "mb": round(size / 1e6), "path": str(folder) if folder else ""})
     return rows
+

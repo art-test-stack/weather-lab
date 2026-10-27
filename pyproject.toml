@@ -15,6 +15,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
     "timestral",
+    "tfc-t0[torch]==0.6.0",  # RAG research panel; checkpoints remain explicit downloads
     "spaces>=0.51.3",
     "torch==2.13.0",  # ZeroGPU supports torch 2.8.0-2.13.0 (Space hardware: zero-a10g)
 ]
@@ -43,3 +44,4 @@ dev = [
 testpaths = ["tests"]
 markers = ["real_model: downloads Timestral weights and runs real inference (opt-in: -m real_model)"]
 addopts = "-m 'not real_model'"
+

@@ -1717,6 +1717,10 @@ def build() -> gr.Blocks:
                     hw = gr.Markdown(elem_classes="note")
                     rt_tab = gr.Dataframe(interactive=False, label="CPU cost", wrap=False)
 
+            from weather_lab_app import rag as rag_panel
+
+            rag_panel.build()
+
             # ---------------- methods
             with gr.Tab("Methods", id="methods"):
                 gr.Markdown(methods_md())
@@ -1817,3 +1821,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

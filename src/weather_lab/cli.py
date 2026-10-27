@@ -225,6 +225,9 @@ def cmd_features_select(args) -> None:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="weather-lab", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
+    from weather_lab.rag import parser as rag_parser
+
+    rag_parser(sub)
     data = sub.add_parser("data", help="download / prepare observations and AROME extracts")
     dsub = data.add_subparsers(dest="data_command", required=True)
     for name, fn, help_ in [("fetch", cmd_fetch, "download annual SYNOP files (+ AROME messages) once"),
@@ -339,3 +342,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
