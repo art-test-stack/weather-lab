@@ -41,7 +41,8 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
                      np.array([end.tz_localize(None)], dtype="datetime64[ns]"),
                      future.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None], 1)
     provenance, product = {}, None
-    if cfg.conditioning != "none":
+    correction = cfg.prediction_target == "arome_error"
+    if cfg.conditioning != "none" or correction:
         from weather_lab.rag_arome_error import make_batch
         from weather_lab.rag_archive import issued_forecasts
 
@@ -54,11 +55,13 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
         if cfg.conditioning == "archived" and not np.isfinite(batch.arome_inputs.history).any(axis=-1).all():
             raise ValueError("Archived AROME conditioning has no qualifying history for a target variable")
     model = foundation(cfg.model, index, cfg.retrieval_method, k=int(index.meta["retrieval"]["k"]),
-                       device=device, calendar=cfg.calendar, arome=cfg.arome_mode)
+                       device=device, calendar=cfg.calendar, arome=cfg.arome_mode,
+                       prediction_target=cfg.prediction_target)
     condition = f" +AROME {cfg.conditioning} run{provenance['run']}" if provenance else ""
     error_label = " +error-cases" if kind == "arome_error" else ""
+    target_label = " +AROME error correction" if correction else ""
     model.id = (f"exploratory {cfg.model} ctx30d h{cfg.horizon_h} {'+cal' if cfg.calendar else ''} "
-                f"+RAG {cfg.retrieval_method} {index.ident}{error_label}{condition} [{device}]")
+                f"+RAG {cfg.retrieval_method} {index.ident}{error_label}{condition}{target_label} [{device}]")
     # The artifact id distinguishes different archives even when their query windows match.
     native = model.build_inputs(batch)
     ck = resolve(cfg.model)
@@ -76,13 +79,28 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
         payload.update(arome_product=product, arome_provenance=provenance,
                        arome_history_runs=batch.arome_inputs.history_run.astype(str).tolist(),
                        arome_history_available_at=batch.arome_inputs.history_available_at.astype(str).tolist())
-    key = predcache.make_key(payload, {"context": native[0], "known": native[1]})
+    arrays = {"context": native[0], "known": native[1]}
+    error_history = {}
+    if correction:
+        residuals, baseline, _ = model.error_inputs(batch)
+        arrays["arome_baseline"] = baseline
+        payload.update(prediction_target="arome_error", residual_version=1, forecast_lead_input=True)
+        for j, name in enumerate(cfg.targets):
+            seen = batch.history_times()[0, np.isfinite(residuals[0, j])]
+            error_history[name] = {"observed_steps": len(seen), "total_steps": 720,
+                                   "first": str(seen[0]), "last": str(seen[-1])}
+    key = predcache.make_key(payload, arrays)
 
     def compute():
         prefetch(ck, allow_download=False)
         result = model.predict(batch)
         result.validate(batch)
-        return result.to_frame(batch, "exploratory RAG (outside frozen benchmark)")
+        frame = result.to_frame(batch, "exploratory RAG (outside frozen benchmark)")
+        if correction:
+            positive = batch.lead_hours[0] > 0
+            frame["arome_baseline"] = baseline[0][:, positive].ravel()
+            frame["predicted_error"] = frame.point - frame.arome_baseline
+        return frame
 
     if lookup_only:
         frame = predcache.lookup(key)
@@ -96,4 +114,7 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
                 "archive_id": index.meta["archive_id"], "observation_delay_hours": 3,
                 "retrieval": model.audit, "retrieval_kind": kind,
                 "arome_product": product, "arome_run": provenance.get("run"), "arome_provenance": provenance}
+    if correction:
+        settings.update(prediction_target="arome_error", residual_version=1,
+                        forecast_lead_input=True, error_history=error_history)
     return frame, {"cache_hit": hit, "key": key[:16], "model": model.id, "settings": settings}
