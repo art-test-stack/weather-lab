@@ -49,10 +49,16 @@ def action(kind, archive=None, index=None, horizon=24, progress=gr.Progress()):
         if kind == "collect":
             from weather_lab.rag_archive import collect
             path = collect(cfg, store)
-        elif kind == "index":
+        elif kind in ("index", "error_index"):
             if not archive:
                 raise ValueError("Select a saved archive first")
-            from weather_lab.rag_index import build
+            if kind == "error_index":
+                from weather_lab.common import ROOT
+                from weather_lab.rag_arome_error import build
+
+                cfg = config(ROOT / "configs/rag_arome_error_v1.yaml")
+            else:
+                from weather_lab.rag_index import build
             path = build(archive, cfg, store)
         elif kind == "evaluate":
             if not index:
@@ -79,7 +85,7 @@ def action(kind, archive=None, index=None, horizon=24, progress=gr.Progress()):
         selections = {"archives": archive, "indexes": index, "runs": None}
         if kind == "collect":
             selections["indexes"] = None
-        selections[{"collect": "archives", "index": "indexes", "evaluate": "runs"}[kind]] = path.name
+        selections[{"collect": "archives", "index": "indexes", "error_index": "indexes", "evaluate": "runs"}[kind]] = path.name
         return (f"Saved {kind}: {path.name}. " + _status(),
                 *[gr.update(choices=store.list(k), value=selections[k]) for k in ("archives", "indexes", "runs")])
     except Exception as exc:
@@ -123,6 +129,7 @@ def build():
         with gr.Row():
             collect = gr.Button("Collect and save weather archive (up to 300 MiB)")
             create = gr.Button("Build and save retrieval index")
+            error_index = gr.Button("Build AROME-error index")
             run = gr.Button("Run and save 2026 evaluation", variant="primary")
         with gr.Accordion("Model setup and archive coverage", open=False):
             gr.Markdown("Named AROME runs from Open-Meteo start **2 April 2026**; earlier dates remain unavailable. "
@@ -147,6 +154,8 @@ def build():
         collect.click(lambda: action("collect"), outputs=outputs, concurrency_id="rag-research", concurrency_limit=1)
         create.click(lambda a: action("index", archive=a), inputs=archive, outputs=outputs,
                      concurrency_id="rag-research", concurrency_limit=1)
+        error_index.click(lambda a: action("error_index", archive=a), inputs=archive, outputs=outputs,
+                          concurrency_id="rag-research", concurrency_limit=1)
         run.click(lambda a, i, h: action("evaluate", a, i, h), inputs=[archive, index, horizon], outputs=outputs,
                   concurrency_id="rag-research", concurrency_limit=1)
         prefetch.click(lambda: action("prefetch"), outputs=outputs, concurrency_id="rag-research", concurrency_limit=1)
