@@ -26,6 +26,33 @@ def adapter(**kwargs):
               "e08aee083778f1f32da4974c0a34276776a35c52", context_days=1, **kwargs)
 
 
+def test_exploratory_forecast_uses_native_t0_inputs_and_cache(tmp_path, monkeypatch):
+    from weather_lab import forecast, predcache
+
+    b = batch()
+    b.cases = pd.DataFrame([{"case_id": "case", "station": "07149", "origin": pd.Timestamp("2026-10-16T06:00Z")}])
+    monkeypatch.setattr(forecast, "exploratory_inputs", lambda *a, **k: b)
+    monkeypatch.setattr(models, "prefetch", lambda *a, **k: {})
+    monkeypatch.setattr(predcache, "location", lambda: (tmp_path / "cache", "test"))
+    calls = []
+
+    def predict(x, **kwargs):
+        calls.append(kwargs)
+        q = np.broadcast_to(x[..., -1, None, None], (*x.shape[:2], 2, 21)).copy()
+        return SimpleNamespace(quantiles=torch.from_numpy(q), quantile_levels=QUANTILE_LEVELS)
+
+    native = SimpleNamespace(config=SimpleNamespace(quantile_levels=QUANTILE_LEVELS), predict=predict)
+    monkeypatch.setattr(models.MODELS, "get", lambda *a: SimpleNamespace(forecaster=native, lock=threading.Lock(), info={}))
+    case = pd.Series({"station": "07149", "origin": pd.Timestamp("2026-10-16T06:00Z")}, name="case")
+    frame, info = forecast.exploratory_forecast(pd.DataFrame(), case, ["t", "pmer"], "t0-gamma", 1, True,
+                                               horizon_steps=2)
+    assert len(frame) == 4 and len(calls) == 1 and not info["cache_hit"]
+    assert info["settings"]["feature_inputs"]["native_past_semantics"].startswith("extra jointly")
+    _, hit = forecast.exploratory_forecast(pd.DataFrame(), case, ["t", "pmer"], "t0-gamma", 1, True,
+                                          horizon_steps=2, lookup_only=True)
+    assert hit["cache_hit"] and len(calls) == 1
+
+
 def test_native_roles_masks_options_and_output_shape(monkeypatch):
     b = replace(batch(), aux_history=np.array([[[2] * 8, [0, np.nan, 50, 50, 50, 50, 50, 75]]], np.float32),
                 aux_variables=["td", "cloud"])
