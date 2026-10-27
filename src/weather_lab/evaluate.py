@@ -389,6 +389,10 @@ def _row_scores(df: pd.DataFrame) -> pd.DataFrame:
     qcols = [qcol(l) for l in QUANTILE_LEVELS]
     has_q = out["output_type"].eq("quantiles").to_numpy()
     out["pinball"] = np.nan
+    if not has_q.any():
+        for nominal in INTERVALS:
+            out[f"in{nominal}"] = np.nan
+            out[f"width{nominal}"] = np.nan
     if has_q.any():
         sub = out.loc[has_q]
         out.loc[has_q, "pinball"] = pinball(sub["observed"].to_numpy(), sub[qcols].to_numpy(), np.array(QUANTILE_LEVELS))
