@@ -49,7 +49,7 @@ def render_development(out, monkeypatch):
     d = {"suite": "fixture", "variable": "t", "metric": "rmse", "lead": "all", "split": "validation",
          "station": "ALL", "season": "ALL", "statuses": app.STATUSES, "size": "28M", "conditioning": "none",
          "lead_mode": "at"}
-    cfg = ForecastConfig.make("Timestral-28M", context_days=7, horizon_h=6, targets=("t",))
+    cfg = ForecastConfig.make(run.run["forecast_config"]["model"], context_days=7, horizon_h=6, targets=("t",))
     outputs = bench.render({"draft": d, "config": cfg, "path": str(out), "kind": "development"})
     assert len(outputs) == 19 and "Development benchmark" in outputs[0]
     assert outputs[15] == str(out / "predictions.parquet")
@@ -115,8 +115,45 @@ def test_missing_selected_inputs_are_unavailable_without_loading_a_model(source,
     assert outputs[6].empty and "No matched" in outputs[5]
 
 
+def test_t0_benchmark_execution_configuration_and_saved_replay(source, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from weather_lab.t0_adapter import T0
+    from weather_lab_app import benchmark as bench, main as app
+    from weather_lab_app.labels import model_name, model_style
+    from weather_lab_app.results import training_status
+
+    calls = []
+    def predict(self, batch):
+        calls.append(batch.cases.iloc[0].case_id)
+        assert batch.history.shape == (1, 1, 56)
+        point = np.full((1, 1, 2), 11.)
+        return ForecastBatch(self.id, self.revision, "quantiles", ["t"], point,
+                             point[..., None] + np.array(QUANTILE_LEVELS) - .5, QUANTILE_LEVELS)
+    monkeypatch.setattr(T0, "predict", predict)
+    monkeypatch.setattr(development.models, "prefetch", lambda *a, **k: {"downloaded": False})
+    cfg = ForecastConfig.make("t0-gamma", context_days=7, horizon_h=6, targets=("t",))
+    out = development.run(source, cfg, root=tmp_path / "results")
+    assert calls == ["c0", "c1", "c2"]
+    rec = read_json(out / "run.json")
+    primary = next(s for s in rec["systems"] if s["kind"] == "t0")
+    assert primary["id"].startswith("t0-dev ") and "t0" in model_name(primary["id"])
+    assert model_style(primary["id"])[0] == "#805ad5"
+    assert training_status(primary["id"]) == "pretrained, no local fine-tuning"
+    assert "t0_adapter.py" in rec["code_sha256"]
+    assert rec["forecast_config"]["model"] == "t0-gamma"
+    render_development(out, monkeypatch)
+    monkeypatch.setattr(development, "saved_runs", lambda suite: [("T0 fixture", str(out))])
+    controls = bench.on_saved(str(out), "fixture")
+    assert controls[0] == "t0-gamma"
+    d = dict(zip(bench.KEYS[1:11], controls)) | {"suite": "fixture"}
+    monkeypatch.setitem(app.RUNS, "fixture", SimpleNamespace(step_hours=3))
+    assert bench.configuration(d).model == "t0-gamma"
+
+
+@pytest.mark.parametrize("model", ["Timestral-28M", "t0-gamma"])
 def test_error_correction_saves_physical_predictions_and_missing_archives_without_fallback(source, tmp_path,
-                                                                                        monkeypatch):
+                                                                                        monkeypatch, model):
+    from weather_lab.t0_adapter import T0
     manifest, rows = read_json(source / "manifest.json"), []
     for case in manifest["cases"]:
         origin = pd.Timestamp(case["origin"])
@@ -140,9 +177,9 @@ def test_error_correction_saves_physical_predictions_and_missing_archives_withou
         return ForecastBatch(self.id, "fixture-revision", "quantiles", ["t"], point,
                              point[..., None] + np.array(QUANTILE_LEVELS) - .5, QUANTILE_LEVELS)
 
-    monkeypatch.setattr(NativeTimestral, "predict", predict)
+    monkeypatch.setattr(T0 if model == "t0-gamma" else NativeTimestral, "predict", predict)
     monkeypatch.setattr(development.models, "prefetch", lambda ck, allow_download: None)
-    cfg = ForecastConfig.make("Timestral-28M", prediction_target="arome_error", context_days=7,
+    cfg = ForecastConfig.make(model, prediction_target="arome_error", context_days=7,
                               horizon_h=6, targets=("t",))
     out = development.run(source, cfg, root=tmp_path / "results")
     assert calls == ["c1", "c2"]
@@ -150,7 +187,7 @@ def test_error_correction_saves_physical_predictions_and_missing_archives_withou
     assert availability.loc["c0", "status"] == "unavailable"
     assert "no observed t errors" in availability.loc["c0", "reason"]
     predictions = pd.read_parquet(out / "predictions.parquet")
-    corrected = predictions[predictions.model.str.startswith("timestral-dev") & predictions.point.notna()]
+    corrected = predictions[predictions.model.str.startswith(("timestral-dev", "t0-dev")) & predictions.point.notna()]
     assert len(corrected) == 4
     assert corrected.arome_baseline.eq(12).all() and corrected.predicted_error.eq(-1).all()
     assert corrected.point.eq(11).all()
