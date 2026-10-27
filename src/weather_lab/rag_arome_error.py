@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab.arome_inputs import build_arome_inputs
-from weather_lab.common import read_json, sha256_file, ts, write_json
+from weather_lab.common import ROOT, read_json, sha256_file, ts, write_json
 from weather_lab.forecast import CaseBatch
 from weather_lab.rag_archive import issued_forecasts, observations
 from weather_lab.rag_evaluate import choose_arome
@@ -120,7 +120,9 @@ def build(archive_id, cfg, store=None):
             gaps.append({"station": station, "run": str(run), "reason": str(exc)})
     if not rows:
         raise ValueError("no complete issued AROME/error cases; inspect archive and recent-error coverage")
-    with tempfile.TemporaryDirectory() as tmp:
+    temp_root = ROOT / ".tmp/codex/rag-index"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
         out = Path(tmp)
         np.save(out / "payload.npy", np.stack(payloads).astype(np.float32), allow_pickle=False)
         for m in METHODS:
