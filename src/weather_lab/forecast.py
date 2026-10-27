@@ -337,6 +337,43 @@ def calendar_features(times: np.ndarray) -> np.ndarray:
     return np.stack([np.sin(a), np.cos(a), np.sin(b), np.cos(b)], axis=1).astype(np.float32)
 
 
+def error_inputs(batch: CaseBatch, variables: list[str], t_ctx: int):
+    """Verified residual history, issued baseline and source-run leads for native adapters."""
+    if batch.arome is None or (batch.arome_history is None and batch.arome_inputs is None):
+        raise ValueError("AROME error prediction needs issued and qualifying archived AROME forecasts")
+    idx = [batch.variables.index(v) for v in variables]
+    baseline = batch.arome[:, idx]
+    for j, name in enumerate(variables):
+        if not np.isfinite(baseline[:, j]).all():
+            raise ValueError(f"AROME error prediction needs an issued {name} forecast at every requested lead")
+    if batch.arome_inputs is not None:
+        fields = [batch.arome_inputs.fields.index(v) for v in variables]
+        archived = batch.arome_inputs.history[:, fields, -t_ctx:]
+    else:
+        archived = batch.arome_history[:, idx, -t_ctx:]
+    history = batch.history[:, idx, -t_ctx:] - archived
+    for j, name in enumerate(variables):
+        if not np.isfinite(history[:, j]).any(axis=-1).all():
+            raise ValueError(f"no observed {name} errors from qualifying archived AROME in this context")
+    runs = pd.to_datetime(batch.cases["arome_run"], utc=True).to_numpy(dtype="datetime64[ns]")
+    if np.isnat(runs).any() or (runs > batch.decision_origins).any():
+        raise ValueError("AROME error prediction needs a source run at or before the forecast origin")
+    future_leads = (batch.future_times - runs[:, None]) / np.timedelta64(1, "h")
+    if not np.isfinite(future_leads).all() or (future_leads <= 0).any():
+        raise ValueError("AROME error prediction needs a source run earlier than every future valid time")
+    if batch.arome_inputs is not None:
+        if not np.array_equal(baseline, batch.arome_inputs.future[:, fields], equal_nan=True):
+            raise ValueError("AROME baseline differs from its named provenance")
+        past_leads = (batch.history_times(t_ctx)[:, None] - batch.arome_inputs.history_run[:, fields, -t_ctx:]) / np.timedelta64(1, "h")
+        past_leads = np.where(np.isfinite(history), past_leads, np.nan)
+        future = np.broadcast_to(future_leads[:, None], (*history.shape[:2], batch.horizon))
+        leads = np.concatenate([past_leads, future], axis=-1)
+    else:
+        past_leads = np.where(np.isfinite(history).any(axis=1), batch.arome_history_lead_h[:, -t_ctx:], np.nan)
+        leads = np.concatenate([past_leads, future_leads], axis=1)[:, None]
+    return history.astype(np.float32), baseline, leads.astype(np.float32)
+
+
 class Timestral(Adapter):
     """Timestral zero-shot inference: no local fine-tuning, no calibration.
 
@@ -413,27 +450,7 @@ class Timestral(Adapter):
 
     def error_inputs(self, batch: CaseBatch) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Residual history, issued baseline and lead row; original observation inputs stay intact."""
-        if batch.arome is None or batch.arome_history is None:
-            raise ValueError("AROME error prediction needs issued and qualifying archived AROME forecasts")
-        t_ctx = self.context_steps(batch.step_hours)
-        idx = [batch.variables.index(v) for v in self.variables]
-        baseline = batch.arome[:, idx]
-        for j, name in enumerate(self.variables):
-            if not np.isfinite(baseline[:, j]).all():
-                raise ValueError(f"AROME error prediction needs an issued {name} forecast at every requested lead")
-        history = batch.history[:, idx, -t_ctx:] - batch.arome_history[:, idx, -t_ctx:]
-        for j, name in enumerate(self.variables):
-            if not np.isfinite(history[:, j]).any(axis=-1).all():
-                raise ValueError(f"no observed {name} errors from qualifying archived AROME in this context")
-        runs = pd.to_datetime(batch.cases["arome_run"], utc=True).to_numpy(dtype="datetime64[ns]")
-        if np.isnat(runs).any() or (runs > batch.decision_origins).any():
-            raise ValueError("AROME error prediction needs a source run at or before the forecast origin")
-        future_leads = (batch.future_times - runs[:, None]) / np.timedelta64(1, "h")
-        if not np.isfinite(future_leads).all() or (future_leads <= 0).any():
-            raise ValueError("AROME error prediction needs a source run earlier than every future valid time")
-        past_leads = np.where(np.isfinite(history).any(axis=1), batch.arome_history_lead_h[:, -t_ctx:], np.nan)
-        leads = np.concatenate([past_leads, future_leads], axis=1)[:, None].astype(np.float32)
-        return history.astype(np.float32), baseline, leads
+        return error_inputs(batch, self.variables, self.context_steps(batch.step_hours))
 
     def build_inputs(self, batch: CaseBatch) -> tuple[np.ndarray, np.ndarray | None]:
         """(context (N, V, T), known covariates (N, C, T + H) or None) exactly as passed to Timestral."""
