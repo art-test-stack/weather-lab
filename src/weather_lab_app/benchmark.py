@@ -16,7 +16,7 @@ from weather_lab_app.results import load_run
 
 KEYS = ("suite", "size", "prediction_target", "conditioning", "features", "calendar", "ctx", "horizon",
         "resid_vars", "atmos_fields", "tend_lags", "variable", "metric", "lead", "split", "station", "season",
-        "statuses", "lead_mode", "saved", "retrieval_method", "retrieval_index")
+        "statuses", "lead_mode", "saved", "retrieval_method", "retrieval_index", "precision")
 _LOCK = threading.Lock()
 
 
@@ -33,7 +33,8 @@ def configuration(d):
                                step_hours=app.RUNS[d["suite"]].step_hours,
                                targets=("t", "pmer") if d["prediction_target"] == "arome_error" else tuple(app.RUNS[d["suite"]].manifest["protocol"].get("variables", ("t", "pmer", "u", "v"))),
                                prediction_target=d["prediction_target"], retrieval_method=d.get("retrieval_method", "none"),
-                               retrieval_index=(d.get("retrieval_index") or "") if d.get("retrieval_method", "none") != "none" else "")
+                               retrieval_index=(d.get("retrieval_index") or "") if d.get("retrieval_method", "none") != "none" else "",
+                               precision=d.get("precision", "native"))
 
 
 def defaults(suite):
@@ -41,7 +42,7 @@ def defaults(suite):
 
     d = app.default_draft(suite)
     d.update(variable="t", metric="mae", lead="all", split=app.RUNS[suite].splits[-1], station="ALL", season="ALL",
-             statuses=app.STATUSES, lead_mode="at", saved="")
+             statuses=app.STATUSES, lead_mode="at", saved="", precision="native")
     return {k: copy.deepcopy(d[k]) for k in KEYS}
 
 
@@ -165,7 +166,7 @@ def on_suite(suite, variable):
 
 def on_saved(path, suite):
     if not path:
-        return tuple(gr.skip() for _ in range(12))
+        return tuple(gr.skip() for _ in range(13))
     if path not in {p for _, p in development.saved_runs(suite)}:
         raise gr.Error("Select a saved development run of this suite")
     c = read_json(Path(path) / "run.json")["forecast_config"]
@@ -174,7 +175,8 @@ def on_saved(path, suite):
     return (size, c["prediction_target"], c["conditioning"], list(spec), c["calendar"],
             c["context_days"], c["horizon_h"], spec.get("resid", features.GROUPS["resid"].defaults)["variables"],
             spec.get("atmos", features.GROUPS["atmos"].defaults)["fields"],
-            spec.get("tend", features.GROUPS["tend"].defaults)["lags_h"], c.get("retrieval_method", "none"), c.get("retrieval_index", ""))
+            spec.get("tend", features.GROUPS["tend"].defaults)["lags_h"], c.get("retrieval_method", "none"), c.get("retrieval_index", ""),
+            c.get("precision", {}).get("policy", "native"))
 
 
 def render(applied, changed=True):
