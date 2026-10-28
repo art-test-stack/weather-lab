@@ -22,11 +22,15 @@ class T0(Adapter):
                  arome_fields: list[str] | None = None, batch_size: int = 8, device: str = "cpu",
                  features: list[str] | dict | None = None, trim_leading_missing: bool = False,
                  symmetric_averaging: bool = False, clip_nonnegative: bool = False,
-                 snap_integers: bool = False, prediction_target: str = "weather", **params):
+                 snap_integers: bool = False, prediction_target: str = "weather", precision: str = "native", **params):
         if clip_nonnegative or snap_integers:
             raise ValueError("t0 weather targets in Celsius/hPa/signed wind require clipping and integer snapping off")
         if prediction_target not in ("weather", "arome_error"):
             raise ValueError("t0 prediction target must be weather or arome_error")
+        from weather_lab import precision as precision_module
+        self.precision = precision
+        if precision != "native":
+            params["precision"] = precision_module.describe(precision)
         self.prediction_target = prediction_target
         if prediction_target == "arome_error":
             params.update(prediction_target=prediction_target, residual_version=1, forecast_lead_input=True)
@@ -147,7 +151,8 @@ class T0(Adapter):
             raise ValueError("t0 checkpoint native quantile grid differs from the benchmark; mapping is not implemented")
         out = []
         started = time.perf_counter()
-        with item.lock, torch.inference_mode():
+        from weather_lab import precision as precision_module
+        with item.lock, torch.inference_mode(), precision_module.inference(self.precision, self.device) as precision_guard:
             for start in range(0, len(context), self.batch_size):
                 sl = slice(start, start + self.batch_size)
                 result = item.forecaster.predict(context[sl], horizon=batch.horizon, quantile_levels=QUANTILE_LEVELS,
@@ -155,7 +160,7 @@ class T0(Adapter):
                                                  context_length=context.shape[-1], **self.options)
                 if tuple(round(float(q), 6) for q in result.quantile_levels) != QUANTILE_LEVELS:
                     raise ValueError("t0 returned an unexpected quantile grid")
-                q = result.quantiles.detach().cpu().numpy()
+                q = result.quantiles.detach().float().cpu().numpy()
                 shape = (len(context[sl]), context.shape[1], batch.horizon, len(QUANTILE_LEVELS))
                 if q.shape == (shape[0] * shape[1], *shape[2:]):
                     q = q.reshape(shape)
@@ -163,13 +168,14 @@ class T0(Adapter):
                     raise ValueError(f"t0 native output shape {q.shape} differs from {shape}")
                 out.append(q[:, :len(self.variables)])
         quantiles = np.concatenate(out)
-        residual_info = {}
+        residual_info = ({"precision": precision_module.describe(self.precision),
+                          "narrowed_fp64_ops": precision_guard.narrowed_fp64_ops} if precision_guard else {})
         if self.prediction_target == "arome_error":
             _, baseline, _ = self.error_inputs(batch)
             quantiles += baseline[..., None]
-            residual_info = {"prediction_target": "arome_error", "residual_version": 1,
+            residual_info.update({"prediction_target": "arome_error", "residual_version": 1,
                              "forecast_lead_input": True,
-                             "residual_observed_steps": np.isfinite(context[:, :len(self.variables)]).sum(axis=-1).tolist()}
+                             "residual_observed_steps": np.isfinite(context[:, :len(self.variables)]).sum(axis=-1).tolist()})
         return ForecastBatch(self.id, f"{self.checkpoint}@{self.revision}", "quantiles", self.variables,
                              quantiles[..., QUANTILE_LEVELS.index(.5)], quantiles, QUANTILE_LEVELS,
                              info={**item.info, **residual_info, "adapter_version": self.ADAPTER_VERSION,
