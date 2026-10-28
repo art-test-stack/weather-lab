@@ -122,3 +122,22 @@ def test_benchmark_only_offers_hourly_indexes_of_its_pinned_archive(tmp_path, mo
     monkeypatch.setattr(rag_store, 'Store', lambda: SimpleNamespace(root=tmp_path, list=lambda kind: choices))
     monkeypatch.setitem(app.RUNS, 'fixture', SimpleNamespace(run={'archive_id': 'current-archive'}))
     assert bench.index_choices('fixture') == choices[:1]
+
+
+def test_launch_only_adds_public_benchmark_source_and_result_paths(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from weather_lab_app import main as app
+
+    options = {}
+    class Demo:
+        def queue(self, **kwargs):
+            return self
+        def launch(self, **kwargs):
+            options.update(kwargs)
+    source, saved = tmp_path / 'verified-source', tmp_path / 'saved-results'
+    monkeypatch.setattr(app, 'init', lambda: Demo())
+    monkeypatch.setattr(app, 'RUNS', {'annual': SimpleNamespace(path=source, run={'hourly_benchmark': True}),
+                                    'unrelated': SimpleNamespace(path=tmp_path / 'unrelated', run={})})
+    monkeypatch.setattr(app.bench.development, 'location', lambda: saved)
+    app.main()
+    assert options['allowed_paths'] == [str(source), str(saved)]
