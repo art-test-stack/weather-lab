@@ -13,7 +13,7 @@ from weather_lab.forecast_config import ForecastConfig, check
 from weather_lab.rag_store import Store
 from weather_lab.suite import cases_from_manifest
 
-CONFIG = ROOT / "configs/hourly_matrix_2026_v1.yaml"
+CONFIG = ROOT / "configs/hourly_matrix_2026_bf16_v2.yaml"
 KEYS = ["case_id", "variable", "lead_h"]
 POINT_COLUMNS = [*KEYS, "station", "origin", "valid_time", "model", "point"]
 
@@ -25,7 +25,7 @@ def configurations(config):
             cfg = ForecastConfig.make(model, setup.get("conditioning", "none"), setup.get("features", []),
                 calendar=setup["calendar"], context_days=config["context_days"], horizon_h=config["horizon_h"],
                 step_hours=1, targets=("t", "pmer"), prediction_target=setup.get("prediction_target", "weather"),
-                retrieval_method=setup.get("retrieval", "none"),
+                precision=config.get("precision", "native"), retrieval_method=setup.get("retrieval", "none"),
                 retrieval_index=config[setup["index"]] if setup.get("index") else "")
             issues = check(cfg, max_horizon_h=48)
             if issues:
@@ -61,7 +61,7 @@ def completed(out, config, configs):
 def plan(config, device):
     files = ("local_benchmark.py", "development.py", "forecast.py", "forecast_config.py", "hourly_benchmark.py",
              "features.py", "t0_adapter.py", "rag_adapters.py", "rag_index.py", "rag_arome_error.py", "rag_evaluate.py",
-             "arome_inputs.py", "models.py", "suite.py", "common.py", "evaluate.py")
+             "arome_inputs.py", "precision.py", "models.py", "suite.py", "common.py", "evaluate.py")
     runtime = environment()
     return {"matrix": config["matrix"], "suite": config["suite"], "source_artifact": config["source_artifact"],
             "device": device, "configurations": {n: c.as_dict() for n, c in configurations(config)},
@@ -105,7 +105,11 @@ def run(config, out, device="cpu", predict=None, log=print):
 
     def worker(adapter, batches):
         adapter.device = device
-        return (predict or development.predict_cases)(adapter, batches)
+        results = (predict or development.predict_cases)(adapter, batches)
+        if results and all(result is None or not np.isfinite(result.point).any() for result, _ in results):
+            raise RuntimeError("Every forecast in an inference batch failed; stopping this setup. "
+                               "Completed setups are preserved. First failure: " + (results[0][1] or "no finite predictions"))
+        return results
 
     for number, (name, cfg) in enumerate(configs, 1):
         if name in done:
