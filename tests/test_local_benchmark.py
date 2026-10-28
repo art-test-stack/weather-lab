@@ -98,3 +98,23 @@ def test_local_resume_common_support_and_publication_order(tmp_path, monkeypatch
     p.write_bytes(b'corrupt fixture')
     with pytest.raises(ValueError, match='verification'):
         local.completed(out, config, local.configurations(config))
+
+
+@pytest.mark.parametrize('nan_output', [False, True])
+def test_local_worker_stops_when_every_prediction_in_a_batch_fails(tmp_path, monkeypatch, nan_output):
+    from types import SimpleNamespace
+    config = yaml.safe_load(local.CONFIG.read_text())
+    source = tmp_path / 'source';source.mkdir()
+    write_json(source / 'run.json', {'suite':config['suite'], 'archive_id':'fixture'})
+    write_json(source / 'index.json', {'archive_id':'fixture','variables':['t','pmer'],'context_hours':720,
+                                      'horizon_hours':51,'observation_delay_hours':3,'retrieval':{'stride_hours':1}})
+    monkeypatch.setattr(local,'Store',lambda:SimpleNamespace(get=lambda *args:source))
+    monkeypatch.setattr(local.models,'prefetch',lambda *a,**k:None)
+    def run(source,cfg,predict,progress,root):
+        return predict(SimpleNamespace(device='cpu'),[object()])
+    monkeypatch.setattr(local.development,'run',run)
+    result = SimpleNamespace(point=np.full((1,2,48),np.nan)) if nan_output else None
+    with pytest.raises(RuntimeError,match='Every forecast'):
+        local.run(config,tmp_path/'out',predict=lambda *args:[(result,'TypeError: synthetic backend failure')],
+                  log=lambda *a,**k:None)
+    assert not list((tmp_path/'out/runs').glob('*/run.json'))
