@@ -36,10 +36,12 @@ def location() -> Path:
 def saved_runs(suite: str) -> list[tuple[str, str]]:
     runs = []
     for p in sorted(location().glob("*/run.json"), reverse=True):
-        rec = read_json(p)
+        summary = p.parent / "matrix_setup.json"
+        rec = read_json(summary if summary.exists() else p)
         if rec.get("source_suite") == suite:
             c = rec["forecast_config"]
-            label = f"{rec['created_at']} · {c['model']} · {c['prediction_target']} · {c['context_days']} d"
+            label = (f"{rec['created_at']} · {rec['configuration_id']}" if rec.get("configuration_id") else
+                     f"{rec['created_at']} · {c['model']} · {c['prediction_target']} · {c['context_days']} d")
             runs.append((label, str(p.parent)))
     return runs
 
