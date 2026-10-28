@@ -411,7 +411,7 @@ neither downloads the new archive nor launches an evaluation. The existing Space
 
 ## Full available 2026 matrix, computed locally
 
-`configs/hourly_matrix_2026_v1.yaml` declares 39 configurations: Timestral-28M, Timestral-209M and t0-gamma,
+`configs/hourly_matrix_2026_bf16_v2.yaml` declares 39 configurations: Timestral-28M, Timestral-209M and t0-gamma,
 with 13 raw/feature/AROME/RAG setups each. They use Orly and Blagnac, every hourly origin from 1 January
 through the last observed 2026 record, 30 days of context and a 48-hour horizon. The frozen source currently
 ends on 26 October 2026 at 19:00 UTC. Genuine late-2025 observations provide January context. Missing
@@ -425,10 +425,10 @@ uv run weather-lab local-benchmark plan
 uv run weather-lab models prefetch Timestral-28M Timestral-209M t0-gamma
 
 # Compute and save locally. On NVIDIA hardware, use --device cuda instead.
-uv run weather-lab local-benchmark run --out runs/local-hourly-2026 --device cpu
+uv run weather-lab local-benchmark run --out runs/local-hourly-2026-mps-bf16 --device mps
 ```
 
-Results stay under `runs/local-hourly-2026/`. Rerun the identical command to skip checksum-verified completed
+Results stay under `runs/local-hourly-2026-mps-bf16/`. Rerun the identical command to skip checksum-verified completed
 setups; an interrupted setup restarts, while finished setups remain saved. The frozen matrix plan refuses
 changed code, device or settings in the same output directory. Each run retains predictions, targets,
 configuration, provenance, scores and case availability. Full-coverage scores remain in each run;
@@ -439,11 +439,47 @@ not independent-window confidence intervals or held-out performance. No automati
 Tomorrow, after the local command completes:
 
 ```bash
-uv run weather-lab local-benchmark publish --out runs/local-hourly-2026
+uv run weather-lab local-benchmark publish --out runs/local-hourly-2026-mps-bf16
 ```
 
 Publication verifies the completed local runs, uploads their data before their `run.json` completion records,
 and copies the shared comparison to a distinct bucket prefix. Reload the Space's Benchmark page to discover
 and replay the saved runs. `publish` performs no inference. Publication uses the existing public bucket;
-model weights are not uploaded. CPU execution of the full matrix may take longer than overnight.
-`--device mps` is available for explicit Apple GPU runs; real MPS inference has not been verified here.
+model weights are not uploaded. CPU execution of the full matrix may take longer than overnight. Use `--device cpu` or `--device cuda` on the corresponding hardware.
+
+The v2 profile uses BF16 mixed neural compute, FP32 normalization/refinement and FP32 saved forecast columns.
+Checkpoint parameters remain FP32. The bounded precision policy is scoped to each model call: upstream explicit
+FP64 tensor requests are capped at FP32 without modifying the installed Timestral package, the cached model
+or global torch defaults. The policy/version enters configuration, model provenance and cache identity.
+Saved forecast values are FP32; pandas' CPU score reductions are independent of model-compute precision.
+
+A real MPS smoke test passed one saved context for every one of the 39 setups, including residual prediction
+and RAG. This establishes runtime compatibility on those inputs, not full-year forecast accuracy. BF16 can
+change forecasts; use `--config configs/hourly_matrix_2026_fp32_v2.yaml` and a separate output directory for
+FP32 compute. FP32 MPS closely matched the upstream CPU reference in the checked contexts.
+
+Do not resume the old failed `runs/local-hourly-2026-mps` job under the new policy. Its files are preserved;
+use a fresh output directory. A local run now stops when an entire inference batch fails instead of marking
+an all-failed setup completed. The recent-error feature also supports the hourly source's named AROME history;
+its v1 shared-lead row is refused if selected fields have different forecast leads.
+
+
+### Prompt for the later combined RAG + features experiment
+
+```text
+After the precision-corrected 39-run benchmark finishes, verify saved predictions and case availability
+before analyzing accuracy. Preserve its matrix plan, artifacts, precision policy and existing scores.
+Prepare a separate, versioned experiment combining RAG with solar elevation, temperature/pressure
+tendencies and recent AROME-error history, including AROME + predicted-error forecasting.
+Keep Timestral-28M, Timestral-209M and t0-gamma; Timestral-123M remains deferred.
+Reuse the pinned hourly Orly/Blagnac archive and causal indexes. Retain the 30-day context, 48-hour horizon,
+three-hour observation delay, explicit unavailable cases and no-future-label rules. Never interpolate
+missing issued forecasts. Forward every selected feature and its parameters through both model adapters;
+record definitions, actual inputs, precision and retrieval audits in provenance/cache identities.
+First propose matched ablations (no RAG, RAG alone, individual features, combined features, direct versus
+residual prediction) and wait for my choice under AGENTS.md. Compare on identical case/lead supports,
+separately by variable. Treat additive improvement as a hypothesis, not a guarantee.
+If a run is still active, do not modify its checkout; wait or obtain approval for an isolated worktree.
+Use focused tests plus a small real-device preflight. Do not start the full experiment or publish its
+results until I request it. Commit each changed file separately.
+```
