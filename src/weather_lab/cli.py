@@ -228,6 +228,8 @@ def main(argv: list[str] | None = None) -> None:
     from weather_lab.rag import parser as rag_parser
 
     rag_parser(sub)
+    from weather_lab.local_benchmark import parser as local_parser
+    local_parser(sub)
     from weather_lab.hourly_benchmark import CONFIG, command as prepare_hourly
 
     hourly = sub.add_parser("prepare-hourly-benchmark", help="freeze the hourly 2026 benchmark from its pinned archive")
