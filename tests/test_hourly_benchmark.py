@@ -35,7 +35,7 @@ def test_hourly_suite_preserves_january_context_and_unverified_tail(tmp_path, mo
     assert cases.origin.diff().dropna().eq(pd.Timedelta(hours=1)).all()
     assert cases.origin.iloc[0] == pd.Timestamp('2026-01-01T00:00Z')
     assert cases.origin.iloc[-1] == times[-1]
-    selected = ForecastConfig.make('Timestral-28M', context_days=30, horizon_h=48, step_hours=1, targets=('t', 'pmer'))
+    selected = ForecastConfig.make('Timestral-28M', context_days=30, horizon_h=48, step_hours=1, targets=('t', 'pmer'), precision='fp32')
     case = cases.iloc[0]
     batch = inputs(obs, issued, case, selected)
     assert batch.history.shape == (1, 2, 720)
@@ -76,6 +76,7 @@ def test_hourly_suite_preserves_january_context_and_unverified_tail(tmp_path, mo
     native = prediction[prediction.model.str.startswith("timestral-dev")]
     assert len(seen) == 49 and len(native) == 49 * 2 * 48
     assert native.point.notna().all()
+    assert native.point.dtype == native['q0.50'].dtype == np.float32
     assert native.lead_h.min() == 1 and native.lead_h.max() == 48
     assert read_json(saved / "run.json")["hourly_benchmark"]
 
