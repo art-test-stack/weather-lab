@@ -42,6 +42,8 @@ def saved_runs(suite: str) -> list[tuple[str, str]]:
             c = rec["forecast_config"]
             label = (f"{rec['created_at']} · {rec['configuration_id']}" if rec.get("configuration_id") else
                      f"{rec['created_at']} · {c['model']} · {c['prediction_target']} · {c['context_days']} d")
+            if c.get("precision"):
+                label += f" · {c['precision']['policy']}"
             runs.append((label, str(p.parent)))
     return runs
 
@@ -106,6 +108,8 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
     ck = models.CHECKPOINTS[cfg.model]
     code_files = [Path(__file__), Path(__file__).with_name("forecast.py"),
                   Path(__file__).with_name("features.py"), Path(__file__).with_name("evaluate.py")]
+    if cfg.precision != "native":
+        code_files.append(Path(__file__).with_name("precision.py"))
     if ck.family == "t0":
         code_files.append(Path(__file__).with_name("t0_adapter.py"))
     model_id = f"{ck.family}-dev {cfg.model} {cfg.prediction_target} {cfg.conditioning} " + sha256_text(
@@ -126,7 +130,7 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
         if index.meta.get("kind") == "arome_error" and cfg.conditioning != "archived":
             raise ValueError("The error index requires archived AROME conditioning")
         adapter = foundation(cfg.model, index, cfg.retrieval_method, k=index.meta["retrieval"]["k"],
-                             calendar=cfg.calendar, arome=cfg.arome_mode, prediction_target=cfg.prediction_target)
+                             calendar=cfg.calendar, arome=cfg.arome_mode, prediction_target=cfg.prediction_target, precision=cfg.precision)
         adapter.id = model_id
         code_files.extend(Path(__file__).with_name(n) for n in ("rag_adapters.py", "rag_index.py", "rag_arome_error.py"))
     else:
@@ -237,6 +241,11 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
         for col in ("origin", "valid_time"):
             if col in frame:
                 frame[col] = pd.to_datetime(frame[col], utc=True).astype("datetime64[us, UTC]")
+    if cfg.precision != "native":
+        float_columns = ["point", "arome_baseline", "predicted_error", *[qcol(q) for q in QUANTILE_LEVELS]]
+        for name in float_columns:
+            if name in predictions:
+                predictions[name] = predictions[name].astype(np.float32)
     tables = score(predictions, targets, cases, {}, [6, 24, 48])
     tables["paired_differences"] = tables["paired_differences"].reindex(columns=[
         "split", "variable", "model", "reference", "loss", "lead_h", "n_pairs", "n_blocks", "mean_diff",
