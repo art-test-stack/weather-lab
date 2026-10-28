@@ -436,6 +436,18 @@ configuration, provenance, scores and case availability. Full-coverage scores re
 observed pairs per variable. Its exact support is saved separately. It reports descriptive point scores,
 not independent-window confidence intervals or held-out performance. No automatic upload occurs.
 
+Local execution groups up to eight forecast windows into each model call; the final group may be smaller.
+The matrix plan records this batch size. Predictions and retrieval neighbours remain separate per case.
+If a grouped call fails, the same model retries the cases individually and records `batch_retry_reason`
+for successful retries. The app keeps its single-window execution path. Batching can change floating-point
+rounding; check device comparisons before interpreting small score differences. Use a fresh output directory
+when moving from the earlier single-window worker: its frozen plan cannot resume under changed code.
+An eight-window MPS check across both stations, all three models, raw and weather-RAG shape setups
+found maximum FP32 batch-versus-single quantile differences below 0.001 °C and 0.001 hPa. BF16 median
+differences reached 0.183 °C and 0.491 hPa (a tail quantile differed by 1.082 hPa). These are numerical
+differences, not errors against observations. Batching was not faster in every small timing check;
+the active benchmark shared the device, so those timings do not establish full-run speedups.
+
 Tomorrow, after the local command completes:
 
 ```bash
