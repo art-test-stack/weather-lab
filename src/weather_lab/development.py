@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 import time
+from dataclasses import fields, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -48,8 +49,68 @@ def saved_runs(suite: str) -> list[tuple[str, str]]:
     return runs
 
 
-def predict_cases(adapter, batches):
+def _combine_cases(batches):
+    """Join compatible inputs without losing issued-forecast provenance."""
+    first = batches[0]
+    values = {}
+    for field in fields(first):
+        name = field.name
+        items = [getattr(batch, name) for batch in batches]
+        if name == "cases":
+            values[name] = pd.concat(items, ignore_index=True)
+        elif name == "arome_inputs" and items[0] is not None:
+            if any(item is None or item.fields != items[0].fields for item in items):
+                raise ValueError("incompatible named AROME inputs")
+            values[name] = type(items[0])(**{
+                f.name: items[0].fields if f.name == "fields" else
+                np.concatenate([getattr(item, f.name) for item in items]) for f in fields(items[0])})
+        elif isinstance(items[0], np.ndarray):
+            if any(item is None for item in items):
+                raise ValueError(f"incompatible {name} presence")
+            values[name] = np.concatenate(items)
+        else:
+            if any(item != items[0] for item in items):
+                raise ValueError(f"incompatible {name}")
+            values[name] = items[0]
+    return type(first)(**values)
+
+
+def predict_cases(adapter, batches, batch_size=1):
     """Isolate prediction failures while sharing one model load within a device allocation."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if batch_size > 1:
+        results = []
+        for start in range(0, len(batches), batch_size):
+            group = batches[start:start + batch_size]
+            try:
+                combined = _combine_cases(group)
+                result = adapter.predict(combined)
+                result.validate(combined)
+                offset = 0
+                split = []
+                for batch in group:
+                    sl = slice(offset, offset + len(batch.cases))
+                    info = {**result.info, "inference_batch_case_ids": combined.cases.case_id.tolist()}
+                    if "retrieval" in info:
+                        info["retrieval"] = info["retrieval"][sl]
+                    if "residual_observed_steps" in info:
+                        info["residual_observed_steps"] = info["residual_observed_steps"][sl]
+                    single = replace(result, point=result.point[sl],
+                        quantiles=None if result.quantiles is None else result.quantiles[sl],
+                        members=None if result.members is None else result.members[sl], info=info)
+                    single.validate(batch)
+                    split.append((single, ""))
+                    offset = sl.stop
+                results.extend(split)
+            except Exception as exc:
+                # Retry the same model individually so one invalid case cannot discard its neighbours.
+                for result, reason in predict_cases(adapter, group):
+                    if result is not None:
+                        result = replace(result, info={**result.info,
+                            "batch_retry_reason": f"{type(exc).__name__}: {exc}"})
+                    results.append((result, reason))
+        return results
     results = []
     for batch in batches:
         try:
