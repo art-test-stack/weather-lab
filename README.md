@@ -408,3 +408,42 @@ Issued-run rows require `station`, `run`, `available_at`, `valid_time`, `variabl
 Stitched historical series cannot pass the issued-run validator.
 Collection, full inference and deployment are separate explicit actions; merely deploying this code
 neither downloads the new archive nor launches an evaluation. The existing Space preload is unchanged.
+
+## Full available 2026 matrix, computed locally
+
+`configs/hourly_matrix_2026_v1.yaml` declares 39 configurations: Timestral-28M, Timestral-209M and t0-gamma,
+with 13 raw/feature/AROME/RAG setups each. They use Orly and Blagnac, every hourly origin from 1 January
+through the last observed 2026 record, 30 days of context and a 48-hour horizon. The frozen source currently
+ends on 26 October 2026 at 19:00 UTC. Genuine late-2025 observations provide January context. Missing
+AROME windows and unverified targets remain unavailable.
+
+```bash
+# Review the fixed matrix; this performs no inference or uploads.
+uv run weather-lab local-benchmark plan
+
+# Explicit model setup (cached weights are reused).
+uv run weather-lab models prefetch Timestral-28M Timestral-209M t0-gamma
+
+# Compute and save locally. On NVIDIA hardware, use --device cuda instead.
+uv run weather-lab local-benchmark run --out runs/local-hourly-2026 --device cpu
+```
+
+Results stay under `runs/local-hourly-2026/`. Rerun the identical command to skip checksum-verified completed
+setups; an interrupted setup restarts, while finished setups remain saved. The frozen matrix plan refuses
+changed code, device or settings in the same output directory. Each run retains predictions, targets,
+configuration, provenance, scores and case availability. Full-coverage scores remain in each run;
+`comparisons/shared_arome_metrics.csv` compares all 39 configurations, AROME and persistence on the same
+observed pairs per variable. Its exact support is saved separately. It reports descriptive point scores,
+not independent-window confidence intervals or held-out performance. No automatic upload occurs.
+
+Tomorrow, after the local command completes:
+
+```bash
+uv run weather-lab local-benchmark publish --out runs/local-hourly-2026
+```
+
+Publication verifies the completed local runs, uploads their data before their `run.json` completion records,
+and copies the shared comparison to a distinct bucket prefix. Reload the Space's Benchmark page to discover
+and replay the saved runs. `publish` performs no inference. Publication uses the existing public bucket;
+model weights are not uploaded. CPU execution of the full matrix may take longer than overnight.
+`--device mps` is available for explicit Apple GPU runs; real MPS inference has not been verified here.
