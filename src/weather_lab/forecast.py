@@ -402,11 +402,15 @@ class Timestral(Adapter):
     def __init__(self, id: str, variables: list[str], targets: list[str], checkpoint: str, revision: str,
                  context_days: int = 30, calendar: bool = False, arome: str | None = None,
                  arome_fields: list[str] | None = None, batch_size: int = 32, device: str = "cpu",
-                 features: list[str] | dict | None = None, prediction_target: str = "weather", **p):
+                 features: list[str] | dict | None = None, prediction_target: str = "weather", precision: str = "native", **p):
         from weather_lab import features as feats
 
         if prediction_target not in ("weather", "arome_error"):
             raise ValueError(f"unknown prediction target {prediction_target!r}")
+        from weather_lab import precision as precision_module
+        self.precision = precision
+        if precision != "native":
+            p["precision"] = precision_module.describe(precision)
         self.prediction_target = prediction_target
         self.feature_spec = feats.normalize(features or [])     # {group: complete parameters}
         self.features = list(self.feature_spec)
@@ -502,14 +506,16 @@ class Timestral(Adapter):
         h = batch.horizon
         out = np.full((len(ctx), len(idx), h, len(fc.quantile_levels)), np.nan, dtype=np.float32)
         t0 = time.perf_counter()
-        with item.lock, torch.inference_mode():   # inputs are per call; the lock guards the shared module
+        from weather_lab import precision as precision_module
+        with item.lock, torch.inference_mode(), precision_module.inference(self.precision, self.device) as precision_guard:
+            # Inputs are per call; precision contexts never mutate the cached model.
             for s in range(0, len(ctx), self.batch_size):
                 sl = slice(s, s + self.batch_size)
                 res = fc.forecast(ctx[sl], prediction_length=h,
                                   known_covariates=None if known is None else known[sl],
                                   past_covariates=None if past is None else past[sl],
                                   clip_nonnegative=False)  # temperatures and wind components can be negative
-                out[sl] = res.quantiles.cpu().numpy()
+                out[sl] = res.quantiles.float().cpu().numpy()
         residual_info = {}
         if self.prediction_target == "arome_error":
             _, baseline, _ = self.error_inputs(batch)
@@ -527,6 +533,8 @@ class Timestral(Adapter):
                                    "known_covariate_rows": 0 if known is None else known.shape[1],
                                    "past_covariate_rows": 0 if past is None else past.shape[1],
                                    **residual_info,
+                                   **({"precision": precision_module.describe(self.precision),
+                                       "narrowed_fp64_ops": precision_guard.narrowed_fp64_ops} if precision_guard else {}),
                                    **({"feature_inputs": feat_report} if feat_report else {})})
 
     def latency_probe(self, batch: CaseBatch, repeats: int = 5) -> dict:
