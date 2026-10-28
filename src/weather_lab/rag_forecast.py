@@ -56,7 +56,7 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
             raise ValueError("Archived AROME conditioning has no qualifying history for a target variable")
     model = foundation(cfg.model, index, cfg.retrieval_method, k=int(index.meta["retrieval"]["k"]),
                        device=device, calendar=cfg.calendar, arome=cfg.arome_mode,
-                       prediction_target=cfg.prediction_target)
+                       prediction_target=cfg.prediction_target, precision=cfg.precision)
     condition = f" +AROME {cfg.conditioning} run{provenance['run']}" if provenance else ""
     error_label = " +error-cases" if kind == "arome_error" else ""
     target_label = " +AROME error correction" if correction else ""
