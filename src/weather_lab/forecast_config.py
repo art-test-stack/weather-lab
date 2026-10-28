@@ -40,6 +40,7 @@ class ForecastConfig:
     prediction_target: str = "weather"
     retrieval_method: str = "none"
     retrieval_index: str = ""
+    precision: str = "native"
 
     @classmethod
     def make(cls, model: str, conditioning: str = "none", features=(), **kw) -> "ForecastConfig":
@@ -49,6 +50,8 @@ class ForecastConfig:
             raise ValueError(f"forecast method must be one of {list(PREDICTION_TARGETS)}")
         if kw.get("retrieval_method", "none") not in ("none", "level", "shape"):
             raise ValueError("retrieval method must be none, level or shape")
+        from weather_lab.precision import describe as precision_description
+        precision_description(kw.get("precision", "native"))
         spec = feats.normalize(features)
         return cls(model, conditioning, tuple((n, tuple(sorted(p.items()))) for n, p in spec.items()), **kw)
 
@@ -67,7 +70,7 @@ class ForecastConfig:
     def forecast_part(self) -> tuple:
         """Everything that determines the predictions except the horizon (a saved forecast can be sliced)."""
         return (self.model, self.conditioning, self.features, self.calendar, self.context_days, self.targets,
-                self.step_hours, self.prediction_target, self.retrieval_method, self.retrieval_index)
+                self.step_hours, self.prediction_target, self.retrieval_method, self.retrieval_index, self.precision)
 
     def as_dict(self) -> dict:
         result = {"model": self.model, "conditioning": self.conditioning, "arome_mode": self.arome_mode,
@@ -77,6 +80,9 @@ class ForecastConfig:
         if self.retrieval_method != "none":
             result.update(retrieval_method=self.retrieval_method, retrieval_index=self.retrieval_index,
                           observation_delay_hours=3)
+        if self.precision != "native":
+            from weather_lab.precision import describe
+            result["precision"] = describe(self.precision)
         return result
 
 
@@ -100,6 +106,8 @@ def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | Non
     # Preserve the recorded v1 spelling when reproducing old benchmark identities.
     if mode != cfg.arome_mode and not (mode == "observations" and cfg.conditioning == "substobs"):
         raise ValueError("AROME mode differs from the forecast configuration")
+    if cfg.precision != "native":
+        runtime["precision"] = cfg.precision
     return constructor(model_id, list(cfg.targets) if variables is None else variables,
                        targets=list(cfg.targets), checkpoint=checkpoint.repo, revision=checkpoint.revision,
                        context_days=cfg.context_days, calendar=cfg.calendar, arome=mode,
@@ -127,11 +135,15 @@ def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastCo
     versions = p.get("feature_versions", {})
     if any(versions.get(f, 1) != feats.GROUPS[f].version for f in p.get("features", [])):
         return None                               # a different feature version: not this configuration
+    precision = p.get("precision", {})
+    from weather_lab.precision import VERSION as precision_version
+    if precision and precision.get("version") != precision_version:
+        return None
     spec = {f: (p.get("feature_params") or {}).get(f, {}) for f in p.get("features", [])}
     return ForecastConfig.make(name, _FROM_MODE[p.get("arome")], spec, calendar=bool(p.get("calendar", False)),
                                context_days=int(p["context_days"]), horizon_h=horizon_h,
                                targets=tuple(record.get("variables") or TARGETS), step_hours=step_hours,
-                               prediction_target=p.get("prediction_target", "weather"))
+                               prediction_target=p.get("prediction_target", "weather"), precision=precision.get("policy", "native"))
 
 
 # --------------------------------------------------------------------------- capability / availability
@@ -255,7 +267,8 @@ def describe(cfg: ForecastConfig, conditioning_names: dict | None = None) -> str
     if cfg.retrieval_method != "none":
         method += f"RAG {cfg.retrieval_method} · index {cfg.retrieval_index[:12]} · hourly archive · observations delayed 3 h · "
     return (f"{cfg.model} · {method}{cond} · {fl} · calendar {'on' if cfg.calendar else 'off'} · context "
-            f"{cfg.context_days} d ({cfg.context_days * 24 // cfg.step_hours} steps) · horizon {cfg.horizon_h} h")
+            f"{cfg.context_days} d ({cfg.context_days * 24 // cfg.step_hours} steps) · horizon {cfg.horizon_h} h"
+            + (f" · {cfg.precision} compute / FP32 math" if cfg.precision != "native" else ""))
 
 
 def _feature_text(name: str, p: dict) -> str:
