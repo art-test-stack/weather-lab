@@ -1743,6 +1743,9 @@ def build() -> gr.Blocks:
                     b_retrieval = gr.Radio([("None", "none"), ("RAG · levels", "level"), ("RAG · shape", "shape")],
                                            value="none", label="Benchmark retrieval")
                     b_index = gr.Dropdown(bench.index_choices(benchmark_suite), label="Benchmark hourly retrieval index")
+                    b_precision = gr.Radio([("Legacy upstream", "native"), ("FP32", "fp32"),
+                                            ("BF16 compute / FP32 math", "bf16")], value="native",
+                                           label="Benchmark compute precision")
                 with gr.Row():
                     b_ctx = gr.Slider(*CONTEXT_DAYS, value=b0["ctx"], step=1, label="Benchmark context (days)")
                     b_length = gr.Slider(RUNS[benchmark_suite].step_hours, RUNS[benchmark_suite].horizon_hours, value=b0["horizon"], step=RUNS[benchmark_suite].step_hours,
@@ -1821,7 +1824,7 @@ def build() -> gr.Blocks:
         feedback_out = [status, horizon, horizon_info, ctx_info, e_btn, feat_note]
         render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles]
         b_draft = [b_exp, b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length, b_resid, b_atmos, b_tend,
-                   b_var, metric, lead, split, b_station, b_season, statuses, lead_mode, b_saved, b_retrieval, b_index]
+                   b_var, metric, lead, split, b_station, b_season, statuses, lead_mode, b_saved, b_retrieval, b_index, b_precision]
         b_outputs = [b_label, b_finding, b_summary, bars, lines, b_horizon, point_tab, prob_tab, matrix,
                      avail_tab, paired_tab, rt_tab, hw, dl_point, dl_prob, dl_predictions, dl_manifest,
                      dl_provenance, dl_cases]
@@ -1860,7 +1863,7 @@ def build() -> gr.Blocks:
             elif control is b_saved:
                 event = control.input(bench.on_saved, [b_saved, b_exp],
                                       [b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length,
-                                       b_resid, b_atmos, b_tend, b_retrieval, b_index], show_progress="hidden")
+                                       b_resid, b_atmos, b_tend, b_retrieval, b_index, b_precision], show_progress="hidden")
             else:
                 event = control.input(bench.feedback, b_draft + [b_applied, b_guard], [b_feedback, b_btn],
                                       queue=False, show_progress="hidden")
