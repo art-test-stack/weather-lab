@@ -14,6 +14,7 @@ from weather_lab.rag_store import Store
 from weather_lab.suite import cases_from_manifest
 
 CONFIG = ROOT / "configs/hourly_matrix_2026_bf16_v2.yaml"
+BATCH_SIZE = 8
 KEYS = ["case_id", "variable", "lead_h"]
 POINT_COLUMNS = [*KEYS, "station", "origin", "valid_time", "model", "point"]
 
@@ -64,7 +65,8 @@ def plan(config, device):
              "arome_inputs.py", "precision.py", "models.py", "suite.py", "common.py", "evaluate.py")
     runtime = environment()
     return {"matrix": config["matrix"], "suite": config["suite"], "source_artifact": config["source_artifact"],
-            "device": device, "configurations": {n: c.as_dict() for n, c in configurations(config)},
+            "device": device, "inference_batch_size": BATCH_SIZE,
+            "configurations": {n: c.as_dict() for n, c in configurations(config)},
             "checkpoints": {m: {"repo": models.CHECKPOINTS[m].repo, "revision": models.CHECKPOINTS[m].revision,
                                  "sha256": models.CHECKPOINTS[m].sha256} for m in config["checkpoints"]},
             "runtime": {k: runtime[k] for k in ("python", "torch", "numpy", "pandas", "torch_threads")},
@@ -105,7 +107,7 @@ def run(config, out, device="cpu", predict=None, log=print):
 
     def worker(adapter, batches):
         adapter.device = device
-        results = (predict or development.predict_cases)(adapter, batches)
+        results = predict(adapter, batches) if predict else development.predict_cases(adapter, batches, batch_size=BATCH_SIZE)
         if results and all(result is None or not np.isfinite(result.point).any() for result, _ in results):
             raise RuntimeError("Every forecast in an inference batch failed; stopping this setup. "
                                "Completed setups are preserved. First failure: " + (results[0][1] or "no finite predictions"))
