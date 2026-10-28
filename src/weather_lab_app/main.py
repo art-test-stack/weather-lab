@@ -1879,6 +1879,7 @@ def build() -> gr.Blocks:
         load = demo.load(render, [applied], render_out)
         feedback(load).then(cache_md, None, cache_box)
         demo.load(bench.render, b_applied, b_outputs)
+        demo.load(lambda suite: gr.update(choices=bench.choices(suite), value=""), b_exp, b_saved)
         feedback(demo.load(refresh_retrieval, retrieval_index, retrieval_index))
         demo.load(rag_panel.refresh, outputs=rag_outputs)
         def refresh_benchmark_indexes(selected):
@@ -1917,7 +1918,9 @@ def main() -> None:
     demo.queue(default_concurrency_limit=4).launch(
         theme=gr.themes.Soft(primary_hue="blue", neutral_hue="stone",
                              font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"]),
-        css=CSS)
+        css=CSS,
+        allowed_paths=[str(r.path) for r in RUNS.values() if r.run.get("hourly_benchmark")]
+                      + [str(bench.development.location())])
 
 
 if __name__ == "__main__":
