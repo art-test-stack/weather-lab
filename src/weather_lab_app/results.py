@@ -51,6 +51,22 @@ class Run:
     def predictions(self) -> pd.DataFrame:
         return _parquet(self.path / "predictions.parquet")
 
+    def point_predictions(self, model: str, variable: str) -> pd.DataFrame:
+        """Projected saved points: cache only the selected system/variable, without quantiles."""
+        from weather_lab.saved_results import POINT_COLUMNS
+
+        return _parquet(self.path / "predictions.parquet", POINT_COLUMNS,
+                        (("model", "==", model), ("variable", "==", variable)))
+
+    def issued_reference(self, case_id: str, variable: str) -> pd.DataFrame:
+        from weather_lab.saved_results import POINT_COLUMNS
+
+        return _parquet(self.path / "predictions.parquet", (*POINT_COLUMNS, "arome_run", "arome_available_at"),
+                        (("model", "==", "arome-raw"), ("variable", "==", variable), ("case_id", "==", case_id)))
+
+    def case_availability(self) -> pd.DataFrame:
+        return _case_availability(self.path)
+
     def targets(self) -> pd.DataFrame:
         return _parquet(self.path / "targets.parquet")
 
@@ -119,8 +135,14 @@ class Run:
 
 
 @lru_cache(maxsize=16)
-def _parquet(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path)
+def _parquet(path: Path, columns: tuple | None = None, filters: tuple = ()) -> pd.DataFrame:
+    return pd.read_parquet(path, columns=columns, filters=list(filters) or None)
+
+
+@lru_cache(maxsize=8)
+def _case_availability(path: Path) -> pd.DataFrame:
+    p = path / "case_availability.csv"
+    return pd.read_csv(p, dtype={"station": str}) if p.exists() else pd.DataFrame(columns=["case_id", "status", "reason"])
 
 
 @lru_cache(maxsize=16)
@@ -155,6 +177,45 @@ def load_run(path: Path) -> Run:
                 df["lead_h"] = df["lead_h"].astype("Int64")
             tables[name] = df
     return Run(run["suite"], path, source, run, read_json(path / "manifest.json"), tables)
+
+
+def saved_configurations(suite: str) -> dict[str, dict]:
+    """Small discovery records only; no prediction reads, network calls or inference."""
+    from weather_lab.development import location, saved_runs
+
+    found, seen = {}, set()
+    def priority(item):
+        p = Path(item[1])
+        complete_matrix = (p.parents[1] / "comparisons/provenance.json").is_file()
+        return not complete_matrix, not p.is_relative_to(location())
+
+    for label, path in sorted(saved_runs(suite), key=priority):
+        p = Path(path)
+        summary = p / "matrix_setup.json"
+        rec = read_json(summary if summary.exists() else p / "run.json")
+        c = rec["forecast_config"]
+        digest = rec.get("run_json_sha256")
+        if digest and digest in seen:
+            continue  # the same immutable record may exist locally and on the bucket mount
+        if c["step_hours"] == 1 and c["horizon_h"] == 48:
+            if digest:
+                seen.add(digest)
+            found[path] = {"label": rec.get("configuration_id", label).replace("/", " · ").replace("-prediction", " prediction"),
+                           "config": c, "summary": rec}
+    labels = [r["label"] for r in found.values()]
+    for path, record in found.items():
+        if labels.count(record["label"]) > 1:
+            record["label"] += f" · {Path(path).name}"
+    return found
+
+
+@lru_cache(maxsize=8)
+def verified_run(path: Path) -> Run:
+    """Verify immutable saved payloads once per cached run, reusing the regular UI loader."""
+    from weather_lab.local_benchmark import verify_run
+
+    verify_run(path)
+    return load_run(path)
 
 
 def available_runs(prefer_local: bool = True) -> dict[str, Run]:
