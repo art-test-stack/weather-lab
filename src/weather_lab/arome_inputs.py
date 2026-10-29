@@ -1,4 +1,4 @@
-"""Named AROME inputs, independent of the variables an adapter predicts."""
+"""AROME input construction: frozen common-run history and named per-field hourly vintages."""
 
 from __future__ import annotations
 
@@ -110,3 +110,30 @@ def build_arome_inputs(frame: pd.DataFrame, cases: pd.DataFrame, origins: np.nda
     decisions = cases["origin"].to_numpy(dtype="datetime64[ns]") if "origin" in cases else origins
     inputs.validate(origins, history_times, future_times, decisions)
     return inputs
+
+
+def build_frozen_arome_inputs(arome_df: pd.DataFrame, cases: pd.DataFrame, origins: np.ndarray, variables: list[str],
+                 fields: list[str], h: int, step_hours: int, history_steps: int) -> tuple[np.ndarray, dict]:
+    """Issued AROME over the horizon (run named per case, available at its origin) and the archived
+    AROME history with provenance, as `CaseBatch` fields. Shared by the benchmark and exploratory runs."""
+    from weather_lab import arome as arome_mod
+
+    n, step = len(cases), pd.Timedelta(hours=step_hours)
+    arome_arr = np.full((n, len(variables), h), np.nan, dtype=np.float32)
+    a = arome_df.set_index(["run", "station", "variable", "valid_time"])["value"]
+    avail = arome_df.groupby("run")["available_at"].max()
+    for i, c in enumerate(cases.itertuples()):
+        run = pd.Timestamp(c.arome_run)
+        if avail[run] > c.origin:
+            raise ValueError(f"{c.case_id}: AROME run {run} not available at origin")
+        for j, var in enumerate(variables):
+            if var not in fields:
+                continue
+            for k in range(h):
+                valid = pd.Timestamp(origins[i], tz="UTC") + (k + 1) * step
+                arome_arr[i, j, k] = a.get((run, c.station, var, valid), np.nan)
+    hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(step_hours, "h"))[None]
+    decisions = cases["origin"].to_numpy(dtype="datetime64[ns]")
+    vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), decisions, hist_times,
+                                                   variables)
+    return arome_arr, {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}
