@@ -240,6 +240,50 @@ def saved_configurations(suite: str) -> dict[str, dict]:
     return found
 
 
+@lru_cache(maxsize=4)
+def _matrix_files(directory: Path):
+    """Verify and cache the small frozen comparison files, never read model predictions."""
+    from weather_lab.common import sha256_file
+
+    record = read_json(directory / "provenance.json")
+    for filename, key in (("shared_arome_metrics.csv", "scores_sha256"), ("common_support.parquet", "support_sha256")):
+        if sha256_file(directory / filename) != record[key]:
+            raise ValueError(f"Frozen matrix checksum differs: {filename}")
+    scores = pd.read_csv(directory / "shared_arome_metrics.csv", dtype={"station": str},
+                         usecols=["split", "model", "variable", "station", "season", "lead_h", "mae", "n", "support_sha256"])
+    if not scores.support_sha256.eq(record["support_sha256"]).all():
+        raise ValueError("Frozen matrix scores refer to different common support")
+    return record, scores, _parquet(directory / "common_support.parquet")
+
+
+def saved_matrix(suite: str, catalog: dict):
+    """Discover local comparisons and their explicitly published bucket counterpart."""
+    from weather_lab.development import location
+
+    directories = {Path(p).parents[1] / "comparisons" for p in catalog}
+    directories.update(p.parent for p in (location().parent / "benchmark-matrices").glob("*/provenance.json"))
+    candidates = []
+    for directory in sorted(directories):
+        if not (directory / "provenance.json").is_file():
+            continue
+        record = read_json(directory / "provenance.json")
+        if record.get("suite") != suite:
+            continue
+        paths = {name: next((path for path, r in catalog.items()
+                            if r["summary"].get("run_json_sha256") == c["run_json_sha256"]
+                            and r["summary"].get("configuration_id") == name), None)
+                 for name, c in record["configurations"].items()}
+        candidates.append((sum(p is not None for p in paths.values()), directory, paths))
+    if not candidates:
+        return None
+    _, directory, paths = max(candidates, key=lambda c: c[0])
+    record, scores, support = _matrix_files(directory)
+    for name, path in paths.items():
+        if path and _sha256(Path(path) / "run.json") != record["configurations"][name]["run_json_sha256"]:
+            raise ValueError("Frozen matrix configuration differs from installed run provenance")
+    return {"provenance": record, "scores": scores, "support": support, "paths": paths}
+
+
 @lru_cache(maxsize=8)
 def verified_run(path: Path) -> Run:
     """Verify immutable saved payloads once per cached run, reusing the regular UI loader."""
