@@ -25,6 +25,34 @@ def annual_temperature(predictions, targets, cases, station="ALL", split=None, y
     return table.sort_values("mae", kind="stable", na_position="last").reset_index(), support
 
 
+def matrix_overview(scores, support, cases, models, split):
+    """Read frozen all-station, all-lead MAEs; keep each variable's common support separate."""
+    if support.duplicated(KEYS).any() or not support.lead_h.between(1, 48).all():
+        raise ValueError("Invalid frozen matrix support")
+    pairs = support.merge(cases[["case_id", "station", "origin", "split"]], on="case_id", how="left", validate="many_to_one")
+    if pairs.origin.isna().any():
+        raise ValueError("Frozen matrix support differs from installed source cases")
+    pairs = pairs[pairs.split.eq(split)].copy()
+    pairs["origin"] = pd.to_datetime(pairs.origin, utc=True)
+    pairs["valid_time"] = pairs.origin + pd.to_timedelta(pairs.lead_h, unit="h")
+    if not pairs.origin.dt.year.eq(2026).all():
+        raise ValueError("The 2026 matrix overview contains origins outside 2026")
+    selected = scores[scores.split.eq(split) & scores.station.eq("ALL") & scores.season.eq("ALL") & scores.lead_h.isna()]
+    table = pd.DataFrame(index=pd.Index(models, name="model"))
+    audit = {}
+    for variable in ("t", "pmer"):
+        rows = selected[selected.variable.eq(variable)].set_index("model").reindex(models)
+        common = pairs[pairs.variable.eq(variable)]
+        if (rows.n.notna() & rows.n.ne(len(common))).any():
+            raise ValueError("Frozen matrix score pair counts differ from common support")
+        table[f"{variable}_mae"], table[f"{variable}_pairs"] = rows.mae, rows.n.fillna(0).astype(int)
+        audit[variable] = {"pairs": len(common), "windows": common.case_id.nunique(),
+                           "origin_start": common.origin.min(), "origin_end": common.origin.max(),
+                           "valid_start": common.valid_time.min(), "valid_end": common.valid_time.max(),
+                           "stations": sorted(common.station.unique())}
+    return table.reset_index(), audit
+
+
 def matched(predictions: dict[str, pd.DataFrame], targets: pd.DataFrame, cases: pd.DataFrame,
             variable: str, station: str = "ALL", split: str | None = None):
     """Return matched row losses and explicit support/exclusions for one variable.
