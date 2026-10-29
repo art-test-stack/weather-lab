@@ -142,3 +142,43 @@ def test_launch_only_adds_public_benchmark_source_and_result_paths(monkeypatch, 
     monkeypatch.setattr(app.bench.development, 'location', lambda: saved)
     app.main()
     assert options['allowed_paths'] == [str(source), str(saved)]
+
+
+@pytest.mark.parametrize('delay', [0, 3])
+def test_hourly_input_arrays_preserve_delay_missing_rows_and_case_metadata(delay):
+    from weather_lab.forecast import hourly_inputs
+
+    origin = pd.Timestamp('2026-01-01T00:00Z')
+    times = pd.date_range(end=origin + pd.Timedelta(hours=48), periods=800, freq='h')
+    obs = pd.DataFrame({'time': times, 't': np.arange(800, dtype=np.float32), 'pmer': np.float32(1010)})
+    end = origin - pd.Timedelta(hours=delay)
+    obs.loc[obs.time.eq(end - pd.Timedelta(hours=2)), 't'] = np.nan
+    cases = pd.DataFrame([{'case_id': 'january', 'station': '07149', 'origin': origin, 'split': 'validation'}])
+    batch = hourly_inputs(obs, cases, ['t', 'pmer'], 720, 48, delay)
+    expected_times = pd.date_range(end=end, periods=720, freq='h')
+    expected = obs.set_index('time').reindex(expected_times)[['t', 'pmer']].to_numpy(np.float32).T[None]
+    np.testing.assert_array_equal(batch.history, expected)
+    assert batch.history.dtype == np.float32
+    assert batch.history.shape == (1, 2, 720) and batch.horizon == 48 + delay
+    np.testing.assert_array_equal(batch.history_times()[0], expected_times.tz_localize(None).to_numpy())
+    np.testing.assert_array_equal(batch.lead_hours[0], np.arange(1 - delay, 49))
+    pd.testing.assert_frame_equal(batch.cases, cases)
+    changed = obs.copy()
+    changed.loc[changed.time.gt(end), ['t', 'pmer']] = 99999
+    np.testing.assert_array_equal(hourly_inputs(changed, cases, ['t', 'pmer'], 720, 48, delay).history, expected)
+
+
+@pytest.mark.parametrize('missing', [2, 3, 'latest'])
+def test_hourly_context_threshold_and_latest_observation_contract(missing):
+    from weather_lab.forecast import hourly_inputs
+
+    origin = pd.Timestamp('2026-01-01T00:00Z')
+    times = pd.date_range(end=origin - pd.Timedelta(hours=3), periods=10, freq='h')
+    obs = pd.DataFrame({'time': times, 't': np.float32(10)})
+    obs.loc[9 if missing == 'latest' else slice(0, missing - 1), 't'] = np.nan
+    cases = pd.DataFrame([{'case_id': 'threshold', 'station': '07149', 'origin': origin}])
+    if missing == 2:
+        assert np.isfinite(hourly_inputs(obs, cases, ['t'], 10, 24, 3).history).sum() == 8
+    else:
+        with pytest.raises(ValueError, match='caller context message'):
+            hourly_inputs(obs, cases, ['t'], 10, 24, 3, missing_error='caller context message')
