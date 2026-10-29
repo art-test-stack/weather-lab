@@ -1,6 +1,6 @@
 """Error through the forecast window, recomputed from saved predictions (no model calls).
 
-Uses the scorer's own row losses (`evaluate._row_scores`) and common valid set (`evaluate.common`), so
+Uses the scorer's own row losses (`scoring._row_scores`) and common valid set (`scoring.common`), so
 "at lead H" values equal the saved per-lead score tables. Two views:
 
 - **at lead H**: mean over the matched (case) pairs at that lead only;
@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from weather_lab.evaluate import MIN_BLOCKS_FOR_CI, _row_scores, common
+from weather_lab.scoring import MIN_BLOCKS_FOR_CI, _row_scores, common
 
 METRIC_COLS = {"mae": "abs_err", "rmse": "sq_err", "bias": "err", "pinball": "pinball", "coverage80": "in80",
                "coverage90": "in90", "width80": "width80", "width90": "width90"}
