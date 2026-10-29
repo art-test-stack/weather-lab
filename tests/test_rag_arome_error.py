@@ -53,6 +53,7 @@ def query(cfg, obs, issued, origin="2026-04-24T06:00Z"):
 def test_error_payload_and_native_arome_conditioning_for_both_families(error_cases):
     cfg, obs, issued, store, archive, index = error_cases
     batch = query(cfg, obs, issued)
+    assert batch.arome is batch.arome_inputs.future
     rows, audit = index.retrieve(batch, "shape", 2)
     np.testing.assert_allclose(rows[0, :, -27:], np.repeat([[.5], [-2.]], 27, axis=1), atol=1e-4)
     origin = pd.Timestamp(batch.decision_origins[0], tz="UTC")
