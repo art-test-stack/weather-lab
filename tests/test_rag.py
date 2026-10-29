@@ -5,16 +5,18 @@ import copy
 import json
 import pickle
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.common import ROOT, read_json
+from weather_lab.common import ROOT, read_json, sha256_file
 from weather_lab.forecast import CaseBatch
 from weather_lab.rag import config
-from weather_lab.rag_adapters import Analog, foundation
+from weather_lab.forecast_config import ForecastConfig, build_adapter
+from weather_lab.rag_adapters import Analog
 from weather_lab.rag_archive import ingest, issued_forecasts
 from weather_lab.rag_evaluate import metrics, run
 from weather_lab.rag_index import Index, build
@@ -127,10 +129,12 @@ def test_retrieval_enters_both_native_generation_inputs(setup):
     rows, audit = index.retrieve(batch, "shape", 1)
     np.testing.assert_allclose(rows[:, :, 23], batch.history[:, :, -1], atol=1e-4)
     for name in ("Timestral-209M", "t0-gamma"):
-        plain = foundation(name, index)
-        no_calendar = foundation(name, index, calendar=False)
+        request = ForecastConfig.make(name, context_days=1, targets=('t', 'pmer'), step_hours=1)
+        plain = build_adapter(request, name.lower(), batch_size=8)
+        no_calendar = build_adapter(replace(request, calendar=False), name.lower(), batch_size=8)
         assert "calendar" not in no_calendar.inputs and no_calendar.build_inputs(batch)[1] is None
-        rag = foundation(name, index, "shape", 1)
+        request = replace(request, retrieval_method='shape', retrieval_index=index.ident)
+        rag = build_adapter(request, f'{name.lower()}-rag-shape', index=index, batch_size=8)
         native, augmented = plain.build_inputs(batch), rag.build_inputs(batch)
         np.testing.assert_array_equal(native[0], augmented[0])
         np.testing.assert_allclose(augmented[1][:, -2:], rows)
@@ -204,6 +208,9 @@ def test_replay_scores_real_matched_rows_and_records_run_availability(setup, tmp
     archive = ingest(o, cfg, issued=p, store=store)
     index_path = build(archive.name, cfg, store)
     result = run(index_path.name, cfg, 24, store, log=lambda _: None)
+    record = read_json(result / "run.json")
+    for name in ("forecast_config.py", "forecast.py", "arome_inputs.py", "development.py"):
+        assert record["code_sha256"][name] == sha256_file(ROOT / "src/weather_lab" / name)
     scores = pd.read_csv(result / "metrics_point.csv")
     ar = scores[(scores.model == "arome-raw") & scores.lead_h.eq(0)]
     assert ar.n.eq(24).all() and ar.mae.eq(0).all()
