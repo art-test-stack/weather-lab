@@ -14,6 +14,17 @@ KEYS = ["case_id", "variable", "lead_h"]
 POINT_COLUMNS = (*KEYS, "station", "origin", "valid_time", "model", "point")
 
 
+def annual_temperature(predictions, targets, cases, station="ALL", split=None, year=2026):
+    """Pair-weighted temperature MAE for UTC forecast origins in one year, on common support."""
+    origins = pd.to_datetime(cases.origin, utc=True)
+    rows, support = matched(predictions, targets, cases[origins.dt.year.eq(year)], "t", station, split)
+    table = rows.groupby("model").agg(mae=("abs_err", "mean"), n=("abs_err", "size"),
+                                       n_cases=("case_id", "nunique"))
+    table = table.reindex(list(predictions))
+    table[["n", "n_cases"]] = table[["n", "n_cases"]].fillna(0).astype(int)
+    return table.sort_values("mae", kind="stable", na_position="last").reset_index(), support
+
+
 def matched(predictions: dict[str, pd.DataFrame], targets: pd.DataFrame, cases: pd.DataFrame,
             variable: str, station: str = "ALL", split: str | None = None):
     """Return matched row losses and explicit support/exclusions for one variable.
