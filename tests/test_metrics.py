@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.evaluate import pinball, score
+from weather_lab.scoring import pinball, score
 from weather_lab.forecast import QUANTILE_LEVELS, qcol
 
 
