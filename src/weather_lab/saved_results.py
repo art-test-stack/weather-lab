@@ -137,12 +137,12 @@ def horizon(rows: pd.DataFrame, cumulative: bool = False) -> pd.DataFrame:
     return table
 
 
-def arome_window_mae(predictions, targets, cases, variable, station="ALL", split=None):
-    """One full 48-lead MAE per saved station/origin, using AROME's own observed support.
+def window_mae(predictions, targets, cases, variable, station="ALL", split=None):
+    """One full 48-lead MAE per saved station/origin, using this system's observed support.
 
     Partial windows retain their pair count but never receive a full-window score.
     """
-    rows, support = matched({"arome-raw": predictions}, targets, cases, variable, station, split)
+    rows, support = matched({"saved": predictions}, targets, cases, variable, station, split)
     windows = cases[cases.eligible].copy()
     if station != "ALL":
         windows = windows[windows.station.eq(station)]

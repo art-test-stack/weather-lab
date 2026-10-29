@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.saved_results import annual_temperature, arome_window_mae, calendar, horizon, matched, one_forecast
+from weather_lab.saved_results import annual_temperature, calendar, horizon, matched, one_forecast, window_mae
 from weather_lab_app.results import Run, _parquet
 
 
@@ -100,15 +100,15 @@ def test_arome_scores_each_complete_48_hour_station_origin_from_saved_files(tmp_
     points.to_parquet(tmp_path / "predictions.parquet")
     truth.to_parquet(tmp_path / "targets.parquet")
     run = Run("fixture", tmp_path, "fixture", {}, {})
-    table, support = arome_window_mae(run.point_predictions("arome-raw", "t"), run.targets(), cases, "t", split="test")
+    table, support = window_mae(run.point_predictions("arome-raw", "t"), run.targets(), cases, "t", split="test")
     assert table.case_id.tolist() == list("abcde")
     assert table.n.tolist() == [48, 48, 47, 47, 0]
     assert table.complete.tolist() == [True, True, False, False, False]
     assert table.mae.iloc[:2].tolist() == [24.5, 2.] and table.mae.iloc[2:].isna().all()
     assert support["complete_windows"] == 2 and support["incomplete_windows"] == 3
-    filtered, _ = arome_window_mae(points, truth, cases, "t", station="07149")
+    filtered, _ = window_mae(points, truth, cases, "t", station="07149")
     assert filtered.case_id.tolist() == list("acde") and filtered.complete.sum() == 1
-    empty, _ = arome_window_mae(points, truth, cases, "pmer")
+    empty, _ = window_mae(points, truth, cases, "pmer")
     assert empty.mae.isna().all() and not empty.complete.any()
 
 

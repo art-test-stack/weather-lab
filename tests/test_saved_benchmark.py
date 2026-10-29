@@ -11,7 +11,8 @@ from weather_lab import development
 from weather_lab.common import sha256_file
 from weather_lab.forecast_config import ForecastConfig
 from weather_lab.saved_results import matrix_overview
-from weather_lab_app import results, saved_benchmark as panel
+from weather_lab_app import plots, results, saved_benchmark as panel
+from weather_lab_app.labels import model_style
 
 
 @pytest.fixture
@@ -100,7 +101,7 @@ def test_discovery_filters_and_saved_only_routing(catalog, monkeypatch):
                "calendar_spread": True}
     reused, message = panel.read_saved({"draft": changed, "previous": applied}, catalog)
     assert reused["rows"] is applied["rows"] and "presentation" in message
-    assert reused["arome_windows"] is applied["arome_windows"]
+    assert reused["window_errors"] is applied["window_errors"]
     assert len(panel.render(reused)[1].data) == 3  # no cumulative spread band
     note, daily, monthly, hourly, detail = panel.render_calendar(reused)
     assert "forecast origin in UTC" in note and "lead 1 h only" in note
@@ -128,15 +129,18 @@ def test_mounted_discovery_needs_no_download_and_checksum_failure_is_explicit(ca
     assert applied is None and "verification" in message
 
 
-def test_arome_window_plot_keeps_own_support_when_selected_models_are_missing(catalog, monkeypatch):
+@pytest.mark.parametrize("selected_complete", [False, True])
+def test_window_plot_includes_selected_models_on_their_own_support(catalog, monkeypatch, selected_complete):
     truth = pd.DataFrame({"case_id": "a", "variable": "t", "lead_h": range(1, 49), "observed": 0.})
     origin = pd.Timestamp("2026-01-01T23:00Z")
     truth["valid_time"] = origin + pd.to_timedelta(truth.lead_h, unit="h")
-    for path, record in catalog.items():
+    expected_mae = {path: float(number + 3) for number, path in enumerate(catalog)}
+    expected_mae["arome-raw"] = 2.
+    for number, (path, record) in enumerate(catalog.items()):
         path = Path(path)
         run = json.loads((path / "run.json").read_text())
         primary = truth.drop(columns="observed").assign(station="07149", origin=origin,
-                    model=run["systems"][-1]["id"], point=np.nan)
+                    model=run["systems"][-1]["id"], point=float(number + 3) if selected_complete else np.nan)
         points = [primary]
         if not panel.weather_only(record["config"]):
             points.append(primary.assign(model="arome-raw", point=2.))
@@ -152,16 +156,46 @@ def test_arome_window_plot_keeps_own_support_when_selected_models_are_missing(ca
     for selection in (d, {**d, "cohort": "weather", "selected": list(weather)}):
         applied, message = panel.read_saved({"draft": selection, "previous": None}, catalog)
         assert applied is not None, message
-        assert applied["support"]["observed_pairs"] == 0
-        note, fig, table = panel.render_arome_windows(applied)
-        assert "1 points" in note and "48 observed pairs" in note
-        assert table["48-hour MAE"].tolist() == [2.] and table["Complete"].tolist() == [True]
-        assert sum(len(trace.x) for trace in fig.data) == 1
-        assert list(fig.data[0].y) == [2.] and fig.data[0].mode == "markers"
-        assert "07149" in fig.data[0].name and fig.data[0].error_y.array is None
+        assert applied["support"]["observed_pairs"] == (48 if selected_complete else 0)
+        note, fig, table = panel.render_windows(applied)
+        assert "1 complete windows" in note and "48 observed pairs" in note
+        assert "own observed support" in note and "not a ranking" in note
+        expected_models = {*selection["selected"], "arome-raw"} if selected_complete else {"arome-raw"}
+        assert {trace.legendgroup for trace in fig.data} == expected_models
+        assert sum(len(trace.x) for trace in fig.data) == len(expected_models)
+        assert len(table) == len(selection["selected"]) + 1
+        for trace in fig.data:
+            name = {**applied["names"], "arome-raw": "AROME · fixed issued run"}[trace.legendgroup]
+            expected = table[table.Configuration.eq(name)]
+            assert expected["Complete"].all() and trace.name == name
+            assert list(trace.customdata[0]) == [1, 48]
+            assert list(trace.y) == expected["48-hour MAE"].tolist() == [expected_mae[trace.legendgroup]]
+            assert trace.line.color == applied["styles"].get(trace.legendgroup, model_style("arome-raw"))[0]
+            assert trace.mode == "lines" and not trace.connectgaps and trace.error_y.array is None
+        ar = table[table.Configuration.str.startswith("AROME")]
+        assert ar["48-hour MAE"].tolist() == [2.] and ar["Complete"].tolist() == [True]
+        if not selected_complete:
+            missing = table[~table.Configuration.str.startswith("AROME")]
+            assert missing["48-hour MAE"].isna().all() and not missing["Complete"].any()
+            assert missing["Available pairs / 48"].eq(0).all()
     applied, _ = panel.read_saved({"draft": selection, "previous": None}, weather)
-    note, _, table = panel.render_arome_windows(applied)
-    assert "No saved AROME reference" in note and table.empty
+    note, fig, table = panel.render_windows(applied)
+    assert "No saved AROME reference" in note and len(table) == 1
+    assert len(fig.data) == (1 if selected_complete else 0)
+
+
+def test_window_lines_average_available_locations_at_each_origin():
+    table = pd.DataFrame({"model": "arome-raw", "station": ["07149"] * 3 + ["07630"],
+        "case_id": ["c", "a", "b", "d"], "origin": pd.to_datetime([
+            "2026-01-01T02:00Z", "2026-01-01T00:00Z", "2026-01-01T01:00Z", "2026-01-01T00:00Z"]),
+        "mae": [3., 1., np.nan, 8.], "n": [48, 48, 47, 48], "complete": [True, True, False, True]})
+    fig = plots.forecast_windows(table, "t", styles={"arome-raw": ("#123456", "dash", 2)})
+    assert len(fig.data) == 1
+    first = fig.data[0]
+    assert pd.to_datetime(first.x, utc=True).tolist() == sorted(table.origin.iloc[[0, 1]])
+    assert list(first.y) == [4.5, 3.]
+    assert list(map(list, first.customdata)) == [[2, 96], [1, 48]]
+    assert all(t.mode == "lines" and not t.connectgaps and t.line.dash == "dash" for t in fig.data)
 
 
 def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
@@ -177,7 +211,7 @@ def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     assert [v for v in headings if v and v.startswith("### ")] == [
         "### All saved matrix configurations · temperature and pressure",
         "### 2026 temperature leaderboard", "### Error versus forecast horizon", "### Hour-of-day MAE",
-        "### Error over the calendar", "### AROME error per 48-hour forecast window", "### Inspect one saved forecast"]
+        "### Error over the calendar", "### Error per 48-hour forecast window", "### Inspect one saved forecast"]
     columns = {c["props"].get("elem_id"): c["id"] for c in demo.config["components"] if c["type"] == "column"}
     def subtree(node):
         return {node["id"]} | set().union(*(subtree(c) for c in node.get("children", [])))
@@ -313,7 +347,7 @@ def test_missing_targets_stay_empty_across_all_views(catalog):
     assert "0 matched observed pairs" in output[8]
     assert output[10].empty
     assert output[15]["Observed pairs"].tolist() == [1, 1, 1]  # leaderboard stays temperature
-    assert "0 points" in output[16] and output[18]["Available pairs / 48"].tolist() == [0]
+    assert "0 complete windows" in output[16] and output[18]["Available pairs / 48"].tolist() == [0, 0, 0]
 
 
 def test_saved_comparison_rejects_different_source_cases_and_stale_discovery(catalog, monkeypatch):

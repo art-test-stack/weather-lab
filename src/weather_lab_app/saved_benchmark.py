@@ -10,7 +10,7 @@ import gradio as gr
 import pandas as pd
 
 from weather_lab.common import sha256_file
-from weather_lab.saved_results import annual_temperature, arome_window_mae, calendar, horizon, matched, matrix_overview, one_forecast
+from weather_lab.saved_results import annual_temperature, calendar, horizon, matched, matrix_overview, one_forecast, window_mae
 from weather_lab_app import plots, results
 from weather_lab_app.labels import model_style
 from weather_lab_app.results import station_label
@@ -143,10 +143,10 @@ def _read_horizon(request, catalog):
         if d["variable"] != "t" and reference is not None:
             temperature["arome-raw"] = reference.point_predictions("arome-raw", "t")
         leaderboard, annual_support = annual_temperature(temperature, targets, cases, d["station"], d["split"])
-        window_result = read_arome_windows(reference, source, catalog, d, frames, targets, cases)
+        window_result = read_windows(reference, source, catalog, d, frames, targets, cases)
         return {"draft": d, "rows": rows, "support": support, "names": names, "styles": styles,
                 "leaderboard": leaderboard, "annual_support": annual_support,
-                "arome_windows": window_result,
+                "window_errors": window_result,
                 "frames": frames, "targets": targets, "cases": cases,
                 "reference_path": reference.path if reference else None,
                 "provenance": pd.DataFrame(provenance)}, "Read saved predictions and targets; no inference, downloads or frozen-score writes."
@@ -154,8 +154,9 @@ def _read_horizon(request, catalog):
         return None, f"Saved comparison unavailable: {type(exc).__name__}: {exc}. Displayed results are unchanged."
 
 
-def read_arome_windows(reference, source, catalog, d, frames, targets, cases):
-    """Read the AROME-only diagnostic without restricting it to selected-model coverage."""
+def read_windows(reference, source, catalog, d, frames, targets, cases):
+    """Read each selected system's complete windows without intersecting their coverage."""
+    predictions = dict(frames)
     try:
         if reference is None:
             path = next((p for p, r in catalog.items() if not weather_only(r["config"])), None)
@@ -164,13 +165,19 @@ def read_arome_windows(reference, source, catalog, d, frames, targets, cases):
             reference = results.verified_run(Path(path))
         if _source(reference) != _source(source):
             raise ValueError("Saved AROME reference belongs to different source cases/targets")
-        predictions = frames.get("arome-raw")
-        if predictions is None:
-            predictions = reference.point_predictions("arome-raw", d["variable"])
-        table, support = arome_window_mae(predictions, targets, cases, d["variable"], d["station"], d["split"])
-        return {"table": table, "support": support, "run_id": reference.run["run_id"]}
+        if "arome-raw" not in predictions:
+            predictions["arome-raw"] = reference.point_predictions("arome-raw", d["variable"])
+        reference_note = f"AROME reference: `{reference.run['run_id']}`; fixed saved issued runs, no later forecast updates."
     except Exception as exc:
-        return {"error": f"AROME window diagnostic unavailable: {type(exc).__name__}: {exc}"}
+        reference_note = f"AROME reference unavailable: {type(exc).__name__}: {exc}."
+    try:
+        tables, support = [], {}
+        for model, points in predictions.items():
+            table, support[model] = window_mae(points, targets, cases, d["variable"], d["station"], d["split"])
+            tables.append(table.assign(model=model))
+        return {"table": pd.concat(tables, ignore_index=True), "support": support, "reference_note": reference_note}
+    except Exception as exc:
+        return {"error": f"Forecast window diagnostic unavailable: {type(exc).__name__}: {exc}"}
 
 
 def read_saved(request, catalog):
@@ -251,30 +258,39 @@ def render(applied, changed=True):
     table["model"] = table.model.map(applied["names"])
     return (support_text(applied), fig, table.drop(columns=["ci95_low", "ci95_high", "n_blocks"]), exclusions,
             applied["provenance"], *render_inspection(applied), *render_calendar(applied), *render_leaderboard(applied),
-            *render_arome_windows(applied))
+            *render_windows(applied))
 
 
-def render_arome_windows(applied):
-    saved = applied["arome_windows"]
+def render_windows(applied):
+    saved = applied["window_errors"]
     if "error" in saved:
         return saved["error"], plots._empty(saved["error"]), pd.DataFrame()
-    table, s = saved["table"], saved["support"]
+    table = saved["table"].copy()
+    names = {**applied["names"], "arome-raw": "AROME · fixed issued run"}
     complete = table[table.complete]
-    note = (f"**AROME only · {s['complete_windows']:,} points = complete station/origin windows · "
-            f"{s['complete_windows'] * 48:,} observed pairs.** "
-            "Each point is the mean of 48 absolute errors at leads 1–48 h from one saved forecast origin. "
-            "Stations remain separate; consecutive hourly origins remain separate even when they share an issued AROME run. "
-            f"{s['incomplete_windows']:,} incomplete eligible windows have no MAE; "
-            f"{s['scheduled_windows'] - s['eligible_windows']:,} ineligible windows are excluded. "
+    counts = "\n".join(
+        f"- **{names[model]}**: {s['complete_windows']:,} complete windows · {s['complete_windows'] * 48:,} observed pairs; "
+        f"{s['incomplete_windows']:,} incomplete eligible windows; "
+        f"{s['scheduled_windows'] - s['eligible_windows']:,} ineligible windows excluded."
+        for model, s in saved["support"].items())
+    note = ("Each model has one line: the equal-weight mean of available selected locations' complete 48-hour MAEs at each forecast origin. "
+            "Each location's MAE uses all 48 absolute errors at leads 1–48 h. "
+            "Missing or incomplete locations are excluded from that origin's mean; hover shows the contributing location count, which can vary. "
+            "Consecutive hourly origins remain separate even when they share an issued AROME run. "
             f"Plotted origins: {complete.origin.min()} – {complete.origin.max()} UTC. "
             f"Stations: {', '.join(station_label(st) for st in complete.station.unique()) or 'none'}. "
-            "This diagnostic uses AROME's own observed support and the applied station, split and variable; "
-            "selected Timestral coverage and calendar lead/grouping controls do not restrict it. "
-            "Incomplete windows remain in the table with available-pair counts. Overlapping windows are dependent; "
-            f"no confidence intervals. Fixed saved issued runs, no later forecast updates. Reference: `{saved['run_id']}`.")
-    detail = table.rename(columns={"case_id": "Saved window", "station": "Station", "origin": "Origin (UTC)",
+            "Each system uses its own observed support and the applied station, split and variable; "
+            "calendar lead/grouping controls do not restrict it. Coverage can differ between systems; this plot is not a ranking. "
+            "Lines connect consecutive complete saved windows, including across missing origins; "
+            "connecting segments do not represent scores at missing origins. "
+            "Incomplete windows remain in the table with available-pair counts. "
+            "Overlapping windows are dependent; no confidence intervals. "
+            f"{saved['reference_note']}\n\n{counts}")
+    fig = plots.forecast_windows(table, applied["draft"]["variable"], names=names, styles=applied["styles"])
+    table["model"] = table.model.map(names)
+    detail = table.rename(columns={"model": "Configuration", "case_id": "Saved window", "station": "Station", "origin": "Origin (UTC)",
                                    "mae": "48-hour MAE", "n": "Available pairs / 48", "complete": "Complete"})
-    return note, plots.arome_windows(table, applied["draft"]["variable"]), detail
+    return note, fig, detail
 
 
 def render_leaderboard(applied):
@@ -475,9 +491,9 @@ def build(suite, run, demo):
             monthly_table = gr.Dataframe(interactive=False, label="Monthly MAE and population SD (same units as the selected variable)")
             with gr.Accordion("Calendar pairs, window counts and spread", open=False):
                 calendar_table = gr.Dataframe(interactive=False)
-            gr.Markdown("### AROME error per 48-hour forecast window")
+            gr.Markdown("### Error per 48-hour forecast window")
             window_note, window_plot = gr.Markdown(), gr.Plot(show_label=False)
-            with gr.Accordion("AROME windows and incomplete coverage", open=False):
+            with gr.Accordion("Model windows and incomplete coverage", open=False):
                 window_table = gr.Dataframe(interactive=False)
             gr.Markdown("### Inspect one saved forecast")
             inspection_note, inspection_plot = gr.Markdown(), gr.Plot(show_label=False)

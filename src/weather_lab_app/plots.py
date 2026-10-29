@@ -282,23 +282,27 @@ def calendar_errors(table: pd.DataFrame, variable: str, period: str, clock: str,
     return fig
 
 
-def arome_windows(table: pd.DataFrame, variable: str) -> go.Figure:
-    """A dot per complete station/origin window; never average stations or downsample."""
+def forecast_windows(table: pd.DataFrame, variable: str, names: dict | None = None,
+                     styles: dict | None = None) -> go.Figure:
+    """One line per system: equal-location means of complete windows at each origin."""
     complete = table[table.complete]
     if complete.empty:
-        return _empty("No complete saved AROME 48-hour windows with all 48 observed pairs")
+        return _empty("No complete saved 48-hour windows with all 48 observed pairs")
     fig = go.Figure()
-    for number, (station, group) in enumerate(complete.groupby("station", sort=True)):
-        fig.add_trace(go.Scatter(x=group.origin, y=group.mae, mode="markers", name=station_label(station),
-            marker={"color": model_style("arome-raw")[0], "size": 5, "opacity": 0.65,
-                    "symbol": ["circle", "square", "diamond", "cross", "x"][number % 5]},
-            customdata=list(zip(group.case_id, group.n)),
-            hovertemplate="Origin %{x}<br>48-hour MAE %{y:.3f} " + unit(variable)
-                + "<br>%{customdata[1]} hourly pairs · leads 1–48"
-                + "<br>%{customdata[0]}<extra>" + station_label(station) + "</extra>"))
+    for model, model_rows in complete.groupby("model", sort=False):
+        color, dash, width = (styles or {}).get(model, model_style(model))
+        name = (names or {}).get(model, model_name(model))
+        group = model_rows.groupby("origin", sort=True).agg(
+            mae=("mae", "mean"), locations=("station", "nunique"), pairs=("n", "sum")).reset_index()
+        fig.add_trace(go.Scatter(x=group.origin, y=group.mae, mode="lines", name=name, legendgroup=model,
+            line={"color": color, "dash": dash, "width": width}, connectgaps=False,
+            customdata=list(zip(group.locations, group.pairs)),
+            hovertemplate="Origin %{x}<br>Mean location 48-hour MAE %{y:.3f} " + unit(variable)
+                + "<br>%{customdata[0]} available locations · %{customdata[1]} hourly pairs · leads 1–48"
+                + "<extra>" + name + "</extra>"))
     fig.update_xaxes(title="Forecast origin (UTC)")
     fig.update_yaxes(title=f"48-hour MAE ({unit(variable)})", rangemode="tozero")
-    fig = _layout(fig, title="AROME · MAE for each complete 48-hour forecast window", height=470, legend_top=False)
+    fig = _layout(fig, title="Mean location MAE per 48-hour forecast window", height=470, legend_top=False)
     fig.update_layout(legend={"orientation": "h", "yanchor": "top", "y": -0.2, "x": 0}, margin={"b": 100})
     return fig
 
