@@ -1,9 +1,8 @@
 """Weather-lab: Gradio app presenting saved benchmark results.
 
 Forecast (landing): what is compared, a large forecast chart and headline numbers for the selected
-experiment. Benchmark: a compact comparison, details below. Methods: scope, definitions, exact
-identifiers, previous versions and integrity details. Explicit development benchmarks are saved
-separately; frozen results are replayed unchanged.
+experiment. Benchmark compares saved configurations on matched observed pairs.
+Frozen results are replayed unchanged.
 """
 
 from __future__ import annotations
@@ -131,7 +130,7 @@ def scope_html(suite: str) -> str:
     e, run = EXPERIMENTS[suite], RUNS[suite]
     cls = "status validation" if e["status"] == "Validation" else "status"
     return (f"<div class='scope'><span class='{cls}'>{e['status']}</span>{e.get('short', e['scope'])} · "
-            "scope, caveats and availability rules in <b>Methods</b></div>")
+            "saved experiment scope and availability rules apply</div>")
 
 
 def has_checkpoints(suite: str) -> bool:
@@ -659,7 +658,7 @@ def run_forecast(*vals):
             try:
                 ensure_checkpoint(cfg.model, False)
             except PermissionError as e:
-                raise PermissionError(f"{e}. Install pinned weights under RAG research → Model setup") from e
+                raise PermissionError(f"{e}. Install pinned weights with weather-lab models prefetch") from e
             frame, info = _exploratory_on_device(obs, case, cfg, kw)
     except (PermissionError, ValueError) as e:
         return None, f"⚠️ {e}.{keep}"
@@ -1679,7 +1678,7 @@ def build() -> gr.Blocks:
                                 "AROME conditioning uses genuine issued runs. **AROME-error indexes require archived "
                                 "conditioning** and retrieve only cases fully verified before this forecast. Missing "
                                 "archive coverage is unavailable. Create an index or "
-                                "download t0 weights (~1 GB) in **RAG research** (weights under **Model setup**). No automatic downloads.",
+                                "install t0 weights (~1 GB) explicitly with the CLI. No automatic downloads.",
                                 elem_classes="note")
                     with gr.Row(equal_height=True):
                         cond = gr.Dropdown(CONDITIONING_CHOICES, value=d0["conditioning"], label="AROME conditioning",
@@ -1742,119 +1741,6 @@ def build() -> gr.Blocks:
                 from weather_lab_app import saved_benchmark
 
                 saved_panel = saved_benchmark.build(benchmark_suite, RUNS[benchmark_suite], demo)
-                gr.Markdown("## Execute or replay one development benchmark")
-                b0 = bench.defaults(benchmark_suite)
-                b_applied = gr.State({"draft": b0, "config": bench.configuration(b0),
-                                      "path": str(RUNS[benchmark_suite].path), "kind": "reference" if RUNS[benchmark_suite].run.get("hourly_benchmark") else "frozen"})
-                b_guard = gr.State({"busy": False})
-                b_request, b_pending, b_changed = gr.State(None), gr.State(None), gr.State(True)
-                b_exp = gr.Dropdown([(EXPERIMENTS[benchmark_suite]["name"], benchmark_suite)], value=benchmark_suite,
-                                    label="Suite — run every eligible station and origin")
-                if RUNS[benchmark_suite].run.get("hourly_benchmark"):
-                    cases = RUNS[benchmark_suite].cases()
-                    gr.Markdown(f"### 2026 · hourly sliding windows\n"
-                                f"**Paris-Orly and Toulouse-Blagnac · {len(cases):,} scheduled windows · "
-                                f"{cases.origin.min():%d %B %Y %H:%M}–{cases.origin.max():%d %B %Y %H:%M} UTC.** "
-                                "A new origin every hour, predicting the next 48 hours. Late-2025 measurements supply January context. "
-                                "Missing targets and unverified trailing windows remain unavailable. AROME uses a single issued run "
-                                "available at each origin; the saved archive includes the available three-hourly issues from 2 April. "
-                                "Real AROME values extend 51 hours from each issue; with the assumed release lag, "
-                                "some hourly origins lack the final 1–2 hours of a full 48-hour baseline, and outages leave longer gaps. "
-                                "Observations and issues use an assumed 3-hour publication delay. "
-                                "Direct models are evaluated across the full observed year; AROME methods compare on their shared available dates. "
-                                "Overlapping windows are dependent; this is a development replay, not an untouched test set.")
-                b_saved = gr.Dropdown(bench.choices(benchmark_suite), value="", label="New run or replay a saved development run")
-                gr.Markdown("Development runs use the writable bucket when mounted; otherwise storage is local and "
-                            "Space restarts remove it. Download results you need to keep. The configured bucket is public.",
-                            elem_classes="note")
-                with gr.Row():
-                    b_ckpt = gr.Radio(FORECAST_MODELS, value=b0["size"],
-                                      label="Benchmark model (checkpoint)")
-                    b_method = gr.Radio([(label, key) for key, label in PREDICTION_TARGETS.items()],
-                                        value=b0["prediction_target"], label="Benchmark forecast method")
-                gr.Markdown("Model weights must already be installed. Setup: **RAG research → Prepare data → Model setup**.",
-                            elem_classes="note")
-                with gr.Row():
-                    b_cond = gr.Dropdown(CONDITIONING_CHOICES, value=b0["conditioning"], label="AROME conditioning")
-                    b_features = gr.CheckboxGroup(FEATURE_CHOICES, value=b0["features"], label="Additional feature groups")
-                    b_calendar = gr.Checkbox(b0["calendar"], label="Calendar inputs")
-                with gr.Row():
-                    b_retrieval = gr.Radio([("None", "none"), ("RAG · levels", "level"), ("RAG · shape", "shape")],
-                                           value="none", label="Benchmark retrieval")
-                    b_index = gr.Dropdown(bench.index_choices(benchmark_suite), label="Benchmark hourly retrieval index")
-                    b_precision = gr.Radio([("Legacy upstream", "native"), ("FP32", "fp32"),
-                                            ("BF16 compute / FP32 math", "bf16")], value="native",
-                                           label="Benchmark compute precision")
-                with gr.Row():
-                    b_ctx = gr.Slider(*CONTEXT_DAYS, value=b0["ctx"], step=1, label="Benchmark context (days)")
-                    b_length = gr.Slider(RUNS[benchmark_suite].step_hours, RUNS[benchmark_suite].horizon_hours, value=b0["horizon"], step=RUNS[benchmark_suite].step_hours,
-                                        label="Benchmark horizon (hours)")
-                with gr.Accordion("Benchmark feature parameters", open=False):
-                    b_resid = gr.CheckboxGroup(list(g["resid"].choices["variables"]), value=b0["resid_vars"],
-                                              label="Recent AROME errors: variables")
-                    b_atmos = gr.CheckboxGroup([("dew point", "td"), ("cloud cover", "cloud")], value=b0["atmos_fields"],
-                                              label="Dew point / cloud: fields")
-                    b_tend = gr.CheckboxGroup([(f"{x} h", x) for x in g["tend"].choices["lags_h"]], value=b0["tend_lags"],
-                                             label="Tendencies: lags")
-                with gr.Row(equal_height=True):
-                    b_var = gr.Dropdown(variable_choices(benchmark_suite), value="t", label="Weather variable",
-                                        min_width=160)
-                    metric = gr.Dropdown(METRIC_CHOICES, value="mae", label="Main metric", min_width=180)
-                    lead = gr.Dropdown(LEADS, value="all", label="Lead time (bars)", min_width=160)
-                    b_station = gr.Dropdown(label="Display station (execution always uses all stations)",
-                                            choices=[("All stations", "ALL")] + station_choices(benchmark_suite),
-                                            value="ALL", min_width=180)
-                    lead_mode = gr.Radio(LEAD_VIEWS, value="at", label="Lead-time chart", min_width=260)
-                    split = gr.Radio([(SPLIT_NAMES.get(s, s), s) for s in RUNS[benchmark_suite].splits],
-                                      value=b0["split"], label="Display period", visible=len(RUNS[benchmark_suite].splits) > 1)
-                b_feedback = gr.Markdown("Settings match the displayed result. Run benchmark executes the full suite.")
-                b_btn = gr.Button("Run benchmark", variant="primary", elem_id="run-benchmark")
-                b_message = gr.Markdown(elem_classes="note")
-                b_label = gr.Markdown(elem_classes="note")
-                b_finding = gr.HTML()
-                b_summary = gr.Markdown(elem_classes="note")
-                bars = gr.Plot(show_label=False)
-                lines = gr.Plot(show_label=False)
-                b_horizon = gr.Markdown(elem_classes="note")
-                with gr.Accordion("Experiment matrix: input setup × model", open=False):
-                    matrix = gr.HTML()
-                with gr.Accordion("Detailed tables and downloads", open=False):
-                    point_tab = gr.Dataframe(interactive=False, label="Single-value accuracy", wrap=False)
-                    prob_tab = gr.Dataframe(interactive=False, label="Probabilistic accuracy", wrap=False)
-                    with gr.Row():
-                        dl_point = gr.DownloadButton("Point scores (CSV)", size="sm")
-                        dl_prob = gr.DownloadButton("Probabilistic scores (CSV)", size="sm")
-                        dl_predictions = gr.DownloadButton("Predictions (Parquet)", size="sm")
-                        dl_manifest = gr.DownloadButton("Case manifest (JSON)", size="sm")
-                        dl_provenance = gr.DownloadButton("Run provenance (JSON)", size="sm")
-                        dl_cases = gr.DownloadButton("Case availability (CSV)", size="sm")
-                with gr.Accordion("Advanced: filters, availability, uncertainty, timings", open=False):
-                    with gr.Row():
-                        seasons = sorted(set(RUNS[benchmark_suite].tables["metrics_point"]["season"]),
-                                         key=lambda s: list(SEASON_NAMES).index(s))
-                        b_season = gr.Dropdown(label="Season (bars)",
-                                               choices=[(SEASON_NAMES[s], s) for s in seasons], value="ALL", min_width=180)
-                    statuses = gr.CheckboxGroup(STATUSES, value=STATUSES, label="Fitting / adaptation status")
-                    avail_tab = gr.Dataframe(interactive=False, label="Availability", wrap=False)
-                    paired_tab = gr.Dataframe(interactive=False, label="Paired differences (block bootstrap)",
-                                              wrap=False)
-                    hw = gr.Markdown(elem_classes="note")
-                    rt_tab = gr.Dataframe(interactive=False, label="CPU cost", wrap=False)
-
-            from weather_lab_app import rag as rag_panel
-
-            rag_outputs = rag_panel.build()
-
-            # ---------------- methods
-            with gr.Tab("Methods", id="methods"):
-                gr.Markdown(methods_md())
-                with gr.Accordion("Runs, versions and integrity", open=False):
-                    gr.Markdown(integrity_md())
-                with gr.Accordion("Caches and model files", open=False):
-                    cache_box = gr.Markdown()
-                    cache_btn = gr.Button("Refresh status", size="sm")
-                with gr.Accordion("Full experiment protocol", open=False):
-                    gr.Markdown(protocol_md())
 
         # ---------------- wiring
         # Draft controls, in DRAFT_KEYS order. Their edits only reach `draft_feedback` (never `applied`).
@@ -1862,11 +1748,6 @@ def build() -> gr.Blocks:
                     tend_lags, systems, band, err_mode, method, main_metric, retrieval, retrieval_index]
         feedback_out = [status, horizon, horizon_info, ctx_info, e_btn, feat_note]
         render_out = [systems, band, fplot, caption, this_tab, sys_desc, dl_case, smap, tiles]
-        b_draft = [b_exp, b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length, b_resid, b_atmos, b_tend,
-                   b_var, metric, lead, split, b_station, b_season, statuses, lead_mode, b_saved, b_retrieval, b_index, b_precision]
-        b_outputs = [b_label, b_finding, b_summary, bars, lines, b_horizon, point_tab, prob_tab, matrix,
-                     avail_tab, paired_tab, rt_tab, hw, dl_point, dl_prob, dl_predictions, dl_manifest,
-                     dl_provenance, dl_cases]
         exp_outputs = [var, station, date, scope, ctx, horizon]
 
         def feedback(event):
@@ -1896,47 +1777,13 @@ def build() -> gr.Blocks:
          .then(apply_if_current, [pending_run] + draft_in + [applied, e_msg], [applied, e_msg, changed])
          .then(render, [applied, changed], render_out)
          .then(finish_forecast, draft_in + [applied, submission], feedback_out, queue=False))
-        for control in b_draft:
-            if control is b_exp:
-                event = control.input(bench.on_suite, [b_exp, b_var],
-                                      [b_var, split, b_station, b_season, b_saved, b_length], show_progress="hidden")
-            elif control is b_saved:
-                event = control.input(bench.on_saved, [b_saved, b_exp],
-                                      [b_ckpt, b_method, b_cond, b_features, b_calendar, b_ctx, b_length,
-                                       b_resid, b_atmos, b_tend, b_retrieval, b_index, b_precision], show_progress="hidden")
-            else:
-                event = control.input(bench.feedback, b_draft + [b_applied, b_guard], [b_feedback, b_btn],
-                                      queue=False, show_progress="hidden")
-                continue
-            event.then(bench.feedback, b_draft + [b_applied, b_guard], [b_feedback, b_btn],
-                       queue=False, show_progress="hidden")
-        (b_btn.click(bench.begin, b_draft + [b_applied, b_guard], [b_request, b_btn, b_message],
-                     trigger_mode="once", queue=False)
-         .success(bench.execute, b_request, [b_pending, b_message], concurrency_limit=1)
-         .then(bench.apply, [b_pending] + b_draft + [b_applied, b_message], [b_applied, b_message, b_changed])
-         .then(bench.render, [b_applied, b_changed], b_outputs)
-         .then(bench.finish, b_draft + [b_applied, b_guard], [b_feedback, b_btn, b_saved], queue=False))
-        cache_btn.click(cache_md, None, cache_box)
-
-        # Page load replays each tab's default saved result once, without inference.
-        load = demo.load(render, [applied], render_out)
-        feedback(load).then(cache_md, None, cache_box)
-        demo.load(bench.render, b_applied, b_outputs)
-        demo.load(lambda suite: gr.update(choices=bench.choices(suite), value=""), b_exp, b_saved)
+        # Page load displays the Forecast state; saved Benchmark owns its load chain.
+        feedback(demo.load(render, [applied], render_out))
         feedback(demo.load(refresh_retrieval, retrieval_index, retrieval_index))
-        demo.load(rag_panel.refresh, outputs=rag_outputs)
-        def refresh_benchmark_indexes(selected):
-            choices = bench.index_choices(benchmark_suite)
-            return gr.update(choices=choices, value=selected if selected in {v for _, v in choices} else None)
-
-        demo.load(refresh_benchmark_indexes, b_index, b_index)
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
-                   "benchmark_metric": metric,
                    "saved_benchmark": saved_panel,
-                   "benchmark": {"draft": b_draft, "applied": b_applied, "run": b_btn, "render": b_outputs,
-                                  "submission": b_guard, "captured_request": b_request},
                    "advanced": [resid_vars, atmos_fields, tend_lags, systems, band, err_mode, show_old]}
     return demo
 
