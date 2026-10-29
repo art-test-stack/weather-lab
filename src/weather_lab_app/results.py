@@ -35,6 +35,7 @@ class Run:
     run: dict
     manifest: dict
     tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    issued_times: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def label(self) -> str:
@@ -42,6 +43,8 @@ class Run:
 
     @property
     def splits(self) -> list[str]:
+        if self.run.get("exploration"):
+            return ["exploratory"]
         return sorted(self.tables["metrics_point"]["split"].unique(), key=lambda s: ["validation", "test"].index(s))
 
     @property
@@ -49,6 +52,9 @@ class Run:
         return [s["id"] for s in self.run["systems"]]
 
     def predictions(self) -> pd.DataFrame:
+        if self.run.get("exploration"):
+            return pd.DataFrame(columns=["case_id", "station", "origin", "valid_time", "lead_h", "variable",
+                                         "model", "point", "output_type", "model_revision"])
         return _parquet(self.path / "predictions.parquet")
 
     def point_predictions(self, model: str, variable: str) -> pd.DataFrame:
@@ -71,12 +77,30 @@ class Run:
         return _parquet(self.path / "targets.parquet")
 
     def observations(self) -> pd.DataFrame:
+        if self.run.get("exploration"):
+            from weather_lab.forecast_data import OBSERVATIONS
+
+            return _parquet(self.path / OBSERVATIONS)
         return _parquet(self.path / "observation_windows.parquet")
 
     def cases(self) -> pd.DataFrame:
         df = pd.DataFrame(self.manifest["cases"])
         df["origin"] = pd.to_datetime(df["origin"], utc=True)
         return df
+
+    def case(self, case_id: str) -> pd.Series:
+        if self.run.get("exploration"):
+            from weather_lab.forecast_data import make_case
+
+            parts = str(case_id).split("/")
+            if len(parts) != 3 or parts[0] != self.suite:
+                raise ValueError("Select an exact UTC hour in the forecast calendar")
+            try:
+                origin = pd.to_datetime(parts[2], format="%Y%m%dT%H", utc=True)
+            except ValueError:
+                raise ValueError("Select an exact UTC hour in the forecast calendar") from None
+            return make_case(self.run["hourly_data"], parts[1], origin, self.issued_times)
+        return self.cases().set_index("case_id").loc[case_id]
 
     def stations(self) -> list[dict]:
         return self.manifest["dataset"]["stations"]
@@ -96,6 +120,8 @@ class Run:
     def full_observations(self) -> pd.DataFrame:
         """The run's whole observation file when installed and unchanged (same SHA-256 as recorded in
         run.json), else the saved per-case windows. Used for longer exploratory contexts/horizons."""
+        if self.run.get("exploration"):
+            return self.observations()
         meta = (self.run.get("data") or {}).get("observations") or {}
         p = ROOT / "data" / "processed" / str(meta.get("file", ""))
         if meta.get("file") and p.exists() and _sha256(p) == meta.get("sha256"):
@@ -105,6 +131,8 @@ class Run:
     def aux_path(self) -> Path | None:
         """The auxiliary SYNOP file (dew point, cloud cover) for this run's stations and years, if installed:
         the file recorded in run.json (when unchanged), else the one `data.aux_path` names for its config."""
+        if self.run.get("exploration"):
+            return None  # hourly archive has no prepared dew-point/cloud fields; never substitute SYNOP
         meta = (self.run.get("data") or {}).get("aux_observations") or {}
         p = ROOT / "data" / "processed" / str(meta.get("file", ""))
         if meta.get("file") and p.exists():
@@ -127,6 +155,9 @@ class Run:
 
     def arome_extract(self) -> pd.DataFrame | None:
         """The AROME station extract the run's AROME inputs came from (for exploratory reruns), if present."""
+        if self.run.get("exploration"):
+            meta = self.run["hourly_data"].get("arome")
+            return _parquet(self.path / meta["file"]) if meta else None
         for p in (self.path / "arome_station_extract.parquet",
                   ROOT / "data" / "processed" / f"arome_{self.suite}.parquet"):
             if p.exists():
@@ -227,6 +258,67 @@ def available_runs(prefer_local: bool = True) -> dict[str, Run]:
     return out
 
 
+def hourly_exploration() -> Run | None:
+    """Verified local hourly data, with no saved predictions or benchmark case manifest."""
+    from weather_lab.forecast_data import OBSERVATIONS, SUITE, make_case
+    from weather_lab.rag_archive import issued_forecasts
+
+    path = ROOT / "data/processed"
+    meta_path = (path / OBSERVATIONS).with_suffix(".meta.json")
+    if not meta_path.exists():
+        return None
+    meta = read_json(meta_path)
+    if not meta.get("exploration_only") or _sha256(path / OBSERVATIONS) != meta["sha256"]:
+        raise ValueError("Hourly exploration observations failed their checksum")
+    cases = [make_case(meta, s["id"], s["last"]).to_dict() for s in meta["stations"]]
+    manifest = {"cases": cases, "dataset": {"stations": meta["stations"]},
+                "protocol": {"stations": [s["id"] for s in meta["stations"]], "variables": ["t", "pmer", "u", "v"],
+                             "forecast": {"step_hours": 1, "horizon_steps": 48, "context_days": 30}}}
+    run = Run(SUITE, path, "hourly observations (no saved forecasts)",
+              {"run_id": meta["sha256"], "label": "Hourly exploration", "exploration": True,
+               "hourly_data": meta, "systems": []}, manifest,
+              {"metrics_point": pd.DataFrame({"split": ["exploratory"]})})
+    run.observations()  # preload once; calendar edits use metadata, not file reads
+    if meta.get("arome"):
+        if _sha256(path / meta["arome"]["file"]) != meta["arome"]["sha256"]:
+            raise ValueError("Hourly issued AROME extract failed its checksum")
+        issued = issued_forecasts(run.arome_extract())
+        run.issued_times = issued.groupby(["station", "run"], as_index=False).available_at.max()
+    return run
+
+
+def calendar_case(run: Run, station: str, value) -> str:
+    """Normalize a UTC calendar value to a case key; invalid values reach draft validation."""
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str) and "/" in value:
+        return value
+    try:
+        origin = pd.Timestamp(value)
+        origin = origin.tz_localize("UTC") if origin.tzinfo is None else origin.tz_convert("UTC")
+        if pd.isna(origin) or origin != origin.floor("h"):
+            return str(value)
+    except (ValueError, TypeError):
+        return str(value)
+    if run.run.get("exploration"):
+        return f"{run.suite}/{station}/{origin:%Y%m%dT%H}"
+    cases = run.cases()
+    match = cases[cases.station.eq(station) & cases.origin.eq(origin)]
+    return match.case_id.iloc[0] if len(match) else str(value)
+
+
+def calendar_value(run: Run, case_id: str) -> str:
+    return run.case(case_id).origin.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def calendar_info(run: Run, station: str) -> str:
+    if run.run.get("exploration"):
+        meta = run.run["hourly_data"]
+        record = next(s for s in meta["stations"] if s["id"] == station)
+        return f"UTC · hourly · {pd.Timestamp(meta['start']):%Y-%m-%d} through {pd.Timestamp(record['last']):%Y-%m-%d %H:%M}. Missing/QC-rejected observations remain missing."
+    return f"UTC · saved {run.step_hours}-hourly replay origins only. For any hourly date from 2022, select Hourly exploration."
+
+
 def headline(run: Run, variable: str, split: str | None = None, models: list[str] | None = None) -> pd.DataFrame:
     """All-lead, all-station scores of the headline systems (default: the experiment's), from saved tables."""
     exp = EXPERIMENTS.get(run.suite, {})
@@ -292,7 +384,7 @@ def case_forecast(run: Run, case_id: str, variable: str) -> tuple[pd.DataFrame, 
     """(forecast rows for every system, observations window, case record)."""
     p = run.predictions()
     rows = p[(p["case_id"] == case_id) & (p["variable"] == variable)].sort_values(["model", "lead_h"])
-    case = run.cases().set_index("case_id").loc[case_id]
+    case = run.case(case_id)
     obs = run.observations()
     obs = obs[obs["station"] == case["station"]][["time", variable]].rename(columns={variable: "observed"})
     return rows, obs, case
