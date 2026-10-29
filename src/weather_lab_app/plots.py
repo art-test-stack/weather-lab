@@ -11,7 +11,7 @@ from weather_lab_app.labels import OBS_COLOR, model_name, model_style, unit, var
 from weather_lab_app.results import station_label
 
 INK, INK2, GRID, SURFACE, FORECAST_BG = "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb", "#eef4fb"
-FONT = "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+FONT = "Latin Modern Roman, Georgia, serif"
 
 
 def _layout(fig: go.Figure, title: str = "", height: int = 380, legend_top: bool = True, **kw) -> go.Figure:
