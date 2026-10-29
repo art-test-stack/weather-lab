@@ -62,7 +62,7 @@ def completed(out, config, configs):
 def plan(config, device):
     files = ("local_benchmark.py", "development.py", "forecast.py", "forecast_config.py", "hourly_benchmark.py",
              "features.py", "t0_adapter.py", "rag_adapters.py", "rag_index.py", "rag_arome_error.py", "rag_evaluate.py",
-             "arome_inputs.py", "precision.py", "models.py", "suite.py", "common.py", "evaluate.py")
+             "arome_inputs.py", "precision.py", "models.py", "suite.py", "common.py", "evaluate.py", "scoring.py")
     runtime = environment()
     return {"matrix": config["matrix"], "suite": config["suite"], "source_artifact": config["source_artifact"],
             "device": device, "inference_batch_size": BATCH_SIZE,
@@ -142,7 +142,7 @@ def _primary(path):
 
 def compare(config, out, log=print):
     """Stream the common support first, then score each configuration on exactly those same pairs."""
-    from weather_lab.evaluate import _add_skill, _cube, _row_scores
+    from weather_lab.scoring import _add_skill, _cube, _row_scores
 
     configs = configurations(config)
     found = completed(Path(out), config, configs)
