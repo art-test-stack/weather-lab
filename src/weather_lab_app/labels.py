@@ -298,6 +298,14 @@ SETUP_NAMES = {
 DEFAULT_EXPERIMENT = "arome-issued-v2"
 EXPERIMENT_ORDER = ["arome-issued-v2", "synop-ctxval-2023-v1", "synop-historical-v1", "arome-issued-v1"]
 
+EXPERIMENTS["hourly-explorer-v1"] = {
+    "name": "Hourly exploration · 2022–latest", "status": "Exploratory",
+    "scope": "Five stations, hourly UTC observations from January 2022 through each station's last recorded hour.",
+    "short": "Hourly observations · 2022–latest · forecasts run only when requested",
+    "caveat": "QC gaps remain missing. Historical observations assume availability at validity; no held-out claim.",
+    "headline": [], "default_systems": [], "band": None, "reference": None, "compare": {},
+}
+
 
 EXPERIMENTS["hourly-2026-v2"] = {
     "name": "2026 · hourly 48-hour windows · Orly and Blagnac", "status": "Development replay",
