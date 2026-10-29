@@ -69,6 +69,8 @@ Forecast and Benchmark have independent configurations and both offer Timestral-
   - **Chart:** it plots the whole observation context the model read and opens on the last 48 h. Dotted lines join the last real observation to each forecast's first value. They are a drawing aid only: not in predictions, errors, coverage, exports or caches.
   - **CSV:** the plotted systems of the applied result over the applied horizon, each row labelled saved or exploratory, with the applied configuration and each curve's own method and configuration. Corrected rows include the AROME baseline and predicted error. Export filenames hash the CSV contents under `.tmp/codex/forecast-exports/`, so applying different overlays cannot overwrite an earlier download.
 - **Benchmark**: its own suite, checkpoint, forecast method, conditioning, features, calendar, context and horizon controls. **Run benchmark** captures that draft and attempts every eligible station/origin in the selected suite, across its recorded splits; station, season and period controls only filter the display. It saves a **separate development run**, including predictions, scores, configuration, pinned checkpoint and input hashes, provenance and explicit unavailable/failed cases. Frozen results are never overwritten, and exploratory cached predictions are never scored. Checkpoints must already be installed (`models prefetch` locally; Space preload).
+  - **Compare saved configurations**, above the execution form, reads hourly 48-hour saved predictions and targets. Defaults compare four configurations (209M weather-only, 209M direct with archived AROME, 209M residual, t0 residual) plus AROME on AROME-supported coverage. Filters narrow actual saved configurations by model, prediction target, conditioning, feature/calendar inputs and RAG. Broader weather-only coverage is a separate cohort. The selected systems must have identical source-suite, case and target provenance; support is intersected separately for temperature and pressure, never pooled. An identical immutable run found in multiple locations appears once; distinct replays retain their run IDs, precision and recorded windows per model call.
+  - Saved-view edits only update pending feedback and selector choices. Page load and **Run saved comparison** use a separate capture → saved read → stale-result check → render chain; they never invoke inference, exploratory caches, downloads or frozen rescoring. Presentation-only applies reuse row losses; cached Parquet reads project point columns for the selected system/variable, omitting quantiles. The horizon view shows at-lead or pair-weighted cumulative MAE; optional ±1 population SD of absolute errors is available only at lead. The forecast inspector keeps available curves and missing values, uses matched signed errors, and exposes the fixed saved AROME initialization, assumed publication time and initialization-relative leads. Calendar views show daily MAE, monthly summaries and UTC hour-of-day profiles, explicitly grouped by origin or target valid time (default). Every matched (window, lead) pair has equal weight within a bucket; monthly MAE uses pairs, not daily means. Calendar SD uses those same absolute errors with `ddof=0`. All spread is descriptive, not a confidence interval; overlapping windows are dependent. Dates, stations, pair/window counts, exclusions, availability and original configuration/provenance remain visible. These inspected development replays establish neither held-out performance nor calibrated uncertainty.
   - All configuration and display edits remain pending until **Run benchmark / Rerun**. Forecast edits and runs never update Benchmark. Applying display-only changes reuses the current development predictions; **Rerun** with unchanged settings executes a new full-suite run. Failures retain the previous display; results arriving after edits are saved without being applied. Select a saved development run to fill its configuration, then click **Run benchmark** to replay it without inference.
   - The initial display replays frozen scores, including their experiment matrix. Development results compare the selected configuration with saved reference systems on matched observed pairs, separately by split and variable. Views include input-history provenance, sorted comparison bars, MAE/RMSE tables and a lead-time chart (at each lead or cumulative), with block-bootstrap intervals only for at least ten two-day blocks. Downloads include score CSVs, predictions, the case manifest, provenance and per-case availability. Development runs make no held-out performance claim.
   - Runs are saved under `development-runs/` on the configured writable bucket mount, otherwise `data/evidence/development-runs/`. Without the mounted bucket, Space-local results disappear on restart; download them before restarting. Results on the configured public bucket are publicly readable.
@@ -448,15 +450,23 @@ differences reached 0.183 °C and 0.491 hPa (a tail quantile differed by 1.082 h
 differences, not errors against observations. Batching was not faster in every small timing check;
 the active benchmark shared the device, so those timings do not establish full-run speedups.
 
-Tomorrow, after the local command completes:
+Publication remains a separate, explicit command after local completion:
 
 ```bash
-uv run weather-lab local-benchmark publish --out runs/local-hourly-2026-mps-bf16
+uv run weather-lab local-benchmark publish --out runs/local-hourly-2026-mps-bf16-batch8
 ```
 
 Publication verifies the completed local runs, uploads their data before their `run.json` completion records,
-and copies the shared comparison to a distinct bucket prefix. Reload the Space's Benchmark page to discover
-and replay the saved runs. `publish` performs no inference. Publication uses the existing public bucket;
+and copies the shared comparison to a distinct bucket prefix. The saved comparison catalog scans
+`runs/*/runs/*/run.json` locally and the existing development-run location: `development-runs/` on the
+configured writable HF bucket mount (normally `/data/development-runs`), otherwise
+`data/evidence/development-runs/`. It reads the small `matrix_setup.json` discovery records when present;
+selected payloads are checksum-verified before use. Restart the app after publication to rebuild this
+catalog. Without the bucket mount, results must already be installed at the local discovery location;
+the saved viewer does not fetch them from HF. `benchmark-matrices/<matrix>-<provenance-hash>/` retains the
+published common-support comparison, while the UI reads the original predictions and targets under
+`development-runs/<run-id>/`. Nothing uploads merely by opening the app or changing saved-view controls.
+`publish` performs no inference. Publication uses the existing public bucket;
 model weights are not uploaded. CPU execution of the full matrix may take longer than overnight. Use `--device cpu` or `--device cuda` on the corresponding hardware.
 
 The v2 profile uses BF16 mixed neural compute, FP32 normalization/refinement and FP32 saved forecast columns.
