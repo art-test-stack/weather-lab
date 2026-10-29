@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab.common import ts, unit_of
-from weather_lab.arome_inputs import AromeInputs
+from weather_lab.arome_inputs import AromeInputs, build_frozen_arome_inputs
 
 OutputType = Literal["point", "quantiles", "ensemble"]
 # Timestral's 21 levels; empirical-quantile climatology uses the same grid so pinball losses compare.
@@ -591,7 +591,7 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
                        station_coords: dict | None = None, arome_history: bool = False,
                        arome_baseline: bool = False) -> CaseBatch:
     """A one-case batch from saved files: observations <= origin, and (optionally) issued + archived AROME
-    from the station extract with the same rules as the benchmark (`evaluate.arome_inputs`).
+    from the station extract with the same rules as the benchmark (`arome_inputs.build_frozen_arome_inputs`).
 
     `arome_history=True` adds the archived AROME history without the issued forecast (for features that
     need past AROME errors when AROME is not a conditioning input); it never falls back to observations.
@@ -613,9 +613,7 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
     if arome_mode or arome_baseline:
         if arome_df is None or not isinstance(case.get("arome_run"), str):
             raise ValueError("this forecast has no saved AROME run, so AROME conditioning is unavailable")
-        from weather_lab.evaluate import arome_inputs
-
-        arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, list(arome_fields), horizon_steps,
+        arome_arr, hist_args = build_frozen_arome_inputs(arome_df, cases, origins, variables, list(arome_fields), horizon_steps,
                                             step_hours, t_ctx)
         rows = arome_arr[0, [variables.index(f) for f in arome_fields if f in variables]]
         covered = arome_coverage_steps(rows)
