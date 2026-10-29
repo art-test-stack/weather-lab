@@ -158,16 +158,6 @@ def finish(*values):
     return *feedback(*values), gr.update(choices=choices(d["suite"]), value=d["saved"])
 
 
-def on_suite(suite, variable):
-
-
-    controls = bench_controls(suite)
-    variables = forecast.variable_choices(suite)
-    return (gr.update(choices=variables, value=variable if variable in dict((v, k) for k, v in variables) else "t"),
-            *controls, gr.update(choices=choices(suite), value=""),
-            gr.update(maximum=results.RUNS[suite].horizon_hours, value=results.RUNS[suite].horizon_hours))
-
-
 def on_saved(path, suite):
     if not path:
         return tuple(gr.skip() for _ in range(13))
@@ -229,17 +219,6 @@ METRIC_CHOICES = [("Mean absolute error", "mae"), ("RMSE", "rmse"), ("Pinball lo
 
 
 LEAD_VIEWS = [("At each lead", "at"), ("Cumulative: all leads up to H", "cumulative")]
-
-
-def bench_controls(suite: str):
-    run = results.RUNS[suite]
-    splits = run.splits
-    stations = [("All stations", "ALL")] + forecast.station_choices(suite)
-    seasons = sorted(set(run.tables["metrics_point"]["season"]), key=lambda s: list(SEASON_NAMES).index(s))
-    return (gr.update(choices=[(SPLIT_NAMES.get(s, s), s) for s in splits], value=splits[-1],
-                      visible=len(splits) > 1),
-            gr.update(choices=stations, value="ALL"),
-            gr.update(choices=[(SEASON_NAMES.get(s, s), s) for s in seasons], value="ALL"))
 
 
 def _select(df, split, variable, station, season, lead):
