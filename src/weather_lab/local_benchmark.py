@@ -37,14 +37,6 @@ def configurations(config):
     return result
 
 
-def verify_run(path):
-    rec = read_json(path / "run.json")
-    for name, digest in rec["files_sha256"].items():
-        if Path(name).name != name or sha256_file(path / name) != digest:
-            raise ValueError(f"saved run failed verification: {path / name}")
-    return rec
-
-
 def completed(out, config, configs):
     found = {}
     for path in sorted((out / "runs").glob("*/run.json")):
@@ -53,7 +45,7 @@ def completed(out, config, configs):
             raise ValueError("output contains results from another source suite; choose a new output directory")
         for name, cfg in configs:
             if rec["forecast_config"] == cfg.as_dict():
-                verify_run(path.parent)
+                development.verify_run(path.parent)
                 found[name] = path.parent
                 break
     return found
