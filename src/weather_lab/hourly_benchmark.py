@@ -10,7 +10,7 @@ import pandas as pd
 import yaml
 
 from weather_lab.common import ROOT, environment, git_revision, now_utc, read_json, sha256_file, sha256_text, ts, write_json
-from weather_lab.forecast import CaseBatch
+from weather_lab.forecast import hourly_inputs
 from weather_lab.rag_archive import issued_forecasts, observations
 from weather_lab.rag_store import Store
 from weather_lab.suite import SEASONS
@@ -24,21 +24,12 @@ def configuration():
 
 def inputs(obs, issued, case, cfg):
     """Causal inputs only; the verifying observation window is never read here."""
-    end = ts(case.origin) - pd.Timedelta(hours=3)
-    past = pd.date_range(end=end, periods=cfg.context_days * 24, freq="h")
-    future = pd.date_range(end + pd.Timedelta(hours=1), periods=cfg.horizon_h + 3, freq="h")
-    history = obs.set_index("time").reindex(past)[list(cfg.targets)].to_numpy(np.float32).T
-    if (np.isfinite(history).mean(axis=-1) < .8).any() or not np.isfinite(history[:, -1]).all():
-        raise ValueError("insufficient causal hourly observation context")
+    batch = hourly_inputs(obs, pd.DataFrame([case]), list(cfg.targets), cfg.context_days * 24, cfg.horizon_h, 3)
     if cfg.conditioning != "none" or cfg.prediction_target == "arome_error" or "resid" in cfg.feature_names:
         from weather_lab.rag_arome_error import make_batch
 
         batch, _ = make_batch(obs, issued, case, list(cfg.targets), cfg.context_days * 24,
                               cfg.horizon_h, 3, "meteofrance_arome_france")
-    else:
-        batch = CaseBatch(pd.DataFrame([case]), list(cfg.targets), history[None],
-                          np.array([end.tz_localize(None)], dtype="datetime64[ns]"),
-                          future.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None], 1)
     return batch
 
 
