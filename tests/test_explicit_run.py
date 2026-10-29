@@ -1,6 +1,7 @@
-"""Composable forecast configuration and strictly explicit execution (Run forecast is the only way a forecast
-is resolved and applied). Fast tests use the installed October example and a fake exploratory forecaster;
-the real pipeline is exercised in the `real_model` test at the end."""
+"""Captured Forecast execution, explicit events, busy guards and stale-result rejection.
+
+Saved-file integration uses installed examples; core configuration contracts live in test_forecast_config.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +11,6 @@ from weather_lab_app import labels
 from weather_lab_app import main as application
 from weather_lab_app import results
 
-import itertools
 
 import numpy as np
 import pandas as pd
@@ -24,65 +24,10 @@ from weather_lab.forecast_config import Availability, ForecastConfig, check, fro
 EXAMPLE = ROOT / "data" / "examples" / "arome-issued-v2"
 needs_example = pytest.mark.skipif(not (EXAMPLE / "run.json").exists(),
                                    reason="saved example not installed (weather-lab bootstrap)")
-ALL_DATA = Availability(arome_issued_h=48, arome_run="2026-10-21T03:00:00Z", arome_history=True, aux=True,
-                        station_coords=True)
 
 
-# --------------------------------------------------------------------------- configuration and capabilities
 
-def test_both_timestral_sizes_accept_the_same_feature_selections():
-    groups = list(feats.GROUPS)
-    for cond in ("none", "archived", "substobs", "futureonly"):
-        for k in range(len(groups) + 1):
-            for combo in itertools.combinations(groups, k):            # includes "no additional features"
-                small = ForecastConfig.make("Timestral-28M", cond, list(combo), horizon_h=48)
-                large = ForecastConfig.make("Timestral-209M", cond, list(combo), horizon_h=48)
-                assert check(small, ALL_DATA) == check(large, ALL_DATA) == []
-                assert small.features == large.features and small.model != large.model
-
-
-def test_unsupported_capabilities_are_distinguished_from_missing_data(monkeypatch):
-    from weather_lab import models
-
-    cfg = ForecastConfig.make("Timestral-28M", "none", ["resid", "atmos", "solar"], horizon_h=48)
-    issues = check(cfg, Availability(arome_issued_h=48, arome_history=False, aux=False, station_coords=True))
-    assert {(i.subject, i.kind) for i in issues} == {("resid", "unavailable"), ("atmos", "unavailable")}
-    assert "even without AROME conditioning" in next(i.message for i in issues if i.subject == "resid")
-    # a family that takes known-future but no past-only covariates (e.g. a future model): explicit, per group
-    fam = models.FAMILIES["timestral"]
-    monkeypatch.setitem(models.FAMILIES, "timestral",
-                        models.Family(**{**fam.__dict__, "past_covariates": False, "name": "NoPast"}))
-    issues = check(cfg, ALL_DATA)
-    assert {(i.subject, i.kind) for i in issues} == {("resid", "unsupported"), ("atmos", "unsupported")}
-    assert all("NoPast takes no past-only covariates" in i.message for i in issues)
-    planned = ForecastConfig.make("Timestral-28M", "none", [], horizon_h=48)
-    monkeypatch.setitem(models.FAMILIES, "timestral", models.Family(**{**fam.__dict__, "status": "planned"}))
-    assert [i.kind for i in check(planned, ALL_DATA)] == ["unsupported"]
-
-
-def test_no_silent_changes_for_invalid_parameters_and_horizons():
-    with pytest.raises(ValueError):
-        ForecastConfig.make("Timestral-28M", "none", {"tend": {"lags_h": []}})
-    long = ForecastConfig.make("Timestral-28M", "archived", [], horizon_h=72)
-    assert [(i.subject, i.kind) for i in check(long, ALL_DATA)] == [("horizon", "unavailable")]
-    assert check(ForecastConfig.make("Timestral-28M", "none", [], horizon_h=72), ALL_DATA) == []
-    no_run = Availability(arome_issued_h=0, notes={"arome": "no AROME run"})
-    assert [(i.subject, i.kind) for i in check(long, no_run)][0] == ("conditioning", "unavailable")
-
-
-def test_feature_parameters_change_rows_versions_and_keys_but_defaults_match_version_1():
-    default = feats.definition(["tend"])[0]
-    custom = feats.definition({"tend": {"lags_h": [6, 12]}})[0]
-    assert default["rows"] == ["dt_3h", "dt_24h", "dpmer_3h", "dpmer_24h"]           # version 1, unchanged
-    assert custom["rows"] == ["dt_6h", "dt_12h", "dpmer_6h", "dpmer_12h"] and custom["version"] == 1
-    from weather_lab.forecast import Timestral
-
-    t = Timestral("x", ["t", "pmer"], ["t", "pmer"], "mistralai/Timestral-28M", "r" * 40, features=["tend"])
-    assert "feature_params" not in t.params                     # benchmark provenance of defaults unchanged
-    t2 = Timestral("x", ["t", "pmer"], ["t", "pmer"], "mistralai/Timestral-28M", "r" * 40,
-                   features={"tend": {"lags_h": [6]}})
-    assert t2.params["feature_params"] == {"tend": {"lags_h": [6]}}
-
+# --------------------------------------------------------------------------- saved-artifact integration
 
 @needs_example
 def test_every_saved_timestral_system_maps_into_the_configuration():
@@ -591,7 +536,7 @@ def test_error_method_reports_baseline_history_and_horizon_limits(app_env):
     assert issues == [] and cfg.prediction_target == "arome_error"
     assert any(i.subject == "horizon" for i in app.draft_config({**d, "horizon": 72})[1])
     assert any("wind baseline" in i.message for i in app.draft_config({**d, "variable": "u"})[1])
-    no_history = Availability(arome_issued_h=48, arome_run=ALL_DATA.arome_run)
+    no_history = Availability(arome_issued_h=48, arome_run="2026-10-21T03:00:00Z")
     assert any("archived error history" in i.message for i in check(cfg, no_history))
     direct = ForecastConfig.make(cfg.model, targets=cfg.targets, horizon_h=cfg.horizon_h)
     assert cfg.forecast_part() != direct.forecast_part()
