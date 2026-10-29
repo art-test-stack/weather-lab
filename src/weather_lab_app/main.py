@@ -51,8 +51,8 @@ def startup_bootstrap() -> dict | None:
 BOOT: dict | None = None
 RUNS: dict = {}
 DEFAULT_SUITE: str | None = None
-INTRO = ("Météo-France's **AROME**, the pretrained **Timestral** model (inference only) and Timestral given "
-         "AROME's forecast, at French stations. Hourly exploration covers 2022 through the latest recorded observations.")
+INTRO = ("A minimal sandbox for comparing Météo-France's **AROME** with **time-series foundation models** "
+         "using in-context learning, and exploring how these models can improve AROME forecasts.")
 QUESTION = ("How do Timestral forecasts compare with AROME's at French stations, 3–48 h ahead, and does giving "
             "Timestral AROME's forecast change its error?")
 STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "external NWP (issued run)",
