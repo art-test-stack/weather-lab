@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab.common import git_revision, now_utc, sha256_file, sha256_text, ts, write_json
+from weather_lab.development import predict_cases
 from weather_lab.forecast import CaseBatch, ForecastBatch
 from weather_lab.rag_adapters import Analog, foundation
 from weather_lab.rag_archive import issued_forecasts, observations
@@ -65,20 +66,8 @@ def choose_arome(frame, station, origin, times, variables, product):
     raise ValueError("no single available issued run covers every requested variable and lead")
 
 
-def predict_cpu(adapter, batches):
-    results = []
-    for batch in batches:
-        try:
-            result = adapter.predict(batch)
-            result.validate(batch)
-            results.append((result, ""))
-        except Exception as exc:
-            results.append((None, f"{type(exc).__name__}: {exc}"))
-    return results
-
-
 def run(index_id: str, cfg: dict, horizon_h: int, store: Store | None = None,
-        predict=predict_cpu, progress=None, log=print) -> Path:
+        predict=predict_cases, progress=None, log=print) -> Path:
     store = store or Store()
     if horizon_h not in cfg["horizons_hours"]:
         raise ValueError("horizon must be predeclared in the RAG protocol")
