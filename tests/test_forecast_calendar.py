@@ -1,4 +1,8 @@
 """UTC calendar routing and explicit hourly exploration; no model inference."""
+
+from weather_lab_app import forecast_view as view
+from weather_lab_app import main as application
+from weather_lab_app import results
 import json
 import gradio as gr
 import numpy as np
@@ -8,7 +12,7 @@ import pytest
 from weather_lab.common import ROOT, sha256_file
 from weather_lab.forecast import QUANTILE_LEVELS, STATS, exploratory_inputs, qcol
 from weather_lab.forecast_data import OBSERVATIONS, SUITE, make_case
-from weather_lab_app import main as app, results
+from weather_lab_app import forecast_state as app, results
 
 
 @pytest.fixture
@@ -37,10 +41,10 @@ def hourly(tmp_path, monkeypatch):
     meta["arome"] = {"file": "issued.parquet", "sha256": sha256_file(path / "issued.parquet")}
     (path / OBSERVATIONS).with_suffix(".meta.json").write_text(json.dumps(meta))
     monkeypatch.setattr(results, "ROOT", tmp_path)
-    monkeypatch.setattr(app, "ROOT", tmp_path)
+    monkeypatch.setattr(view, "ROOT", tmp_path)
     run = results.hourly_exploration()
-    monkeypatch.setattr(app, "RUNS", {SUITE: run})
-    monkeypatch.setattr(app, "DEFAULT_SUITE", SUITE)
+    monkeypatch.setattr(results, "RUNS", {SUITE: run})
+    monkeypatch.setattr(application, "DEFAULT_SUITE", SUITE)
     yield run
     results._parquet.cache_clear()
     results._sha256.cache_clear()
@@ -98,7 +102,7 @@ def test_hourly_calendar_edits_wait_for_run_and_inputs_use_hourly_history(hourly
     monkeypatch.setattr("weather_lab.forecast.exploratory_forecast", predict)
     d = {**app.default_draft(SUITE), "case": "2025-01-01 13:00:00"}
     assert app.initial_applied(SUITE) is None
-    assert len(app.render(None)) == 9
+    assert len(view.render(None)) == 9
     before = dict(STATS)
     with monkeypatch.context() as edits:
         edits.setattr(pd, "read_parquet", lambda *a, **k: pytest.fail("Calendar edits must use preloaded metadata"))
@@ -110,7 +114,7 @@ def test_hourly_calendar_edits_wait_for_run_and_inputs_use_hourly_history(hourly
     applied, _, changed = app.apply_if_current(result, *values(d), None, message)
     assert changed and calls == [f"{SUITE}/07149/20250101T13"]
     assert applied["source"] == "exploratory" and applied["config"].step_hours == 1
-    output = app.render(applied)
+    output = view.render(applied)
     assert "720 steps" in output[3] and "outside the frozen benchmark" in output[3]
     new = {**d, "case": "2025-01-02 13:00:00"}
     feedback = app.draft_feedback(*values(new), applied, {"busy": True})
@@ -125,8 +129,8 @@ def test_hourly_calendar_edits_wait_for_run_and_inputs_use_hourly_history(hourly
 @pytest.mark.skipif(not (ROOT / "data/examples/arome-issued-v2/run.json").exists(), reason="saved example not installed")
 def test_calendar_widget_change_event_never_applies_or_runs(hourly, monkeypatch):
     frozen = results.load_run(ROOT / "data/examples/arome-issued-v2")
-    monkeypatch.setattr(app, "RUNS", {frozen.suite: frozen, SUITE: hourly})
-    demo = app.build()
+    monkeypatch.setattr(results, "RUNS", {frozen.suite: frozen, SUITE: hourly})
+    demo = application.build()
     h = demo.wl
     controls = dict(zip(app.DRAFT_KEYS, h["draft"]))
     date = controls["case"]
