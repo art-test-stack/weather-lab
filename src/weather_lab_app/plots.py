@@ -298,7 +298,9 @@ def arome_windows(table: pd.DataFrame, variable: str) -> go.Figure:
                 + "<br>%{customdata[0]}<extra>" + station_label(station) + "</extra>"))
     fig.update_xaxes(title="Forecast origin (UTC)")
     fig.update_yaxes(title=f"48-hour MAE ({unit(variable)})", rangemode="tozero")
-    return _layout(fig, title="AROME · MAE for each complete 48-hour forecast window", height=440)
+    fig = _layout(fig, title="AROME · MAE for each complete 48-hour forecast window", height=470, legend_top=False)
+    fig.update_layout(legend={"orientation": "h", "yanchor": "top", "y": -0.2, "x": 0}, margin={"b": 100})
+    return fig
 
 
 def station_map(stations: list[dict], selected: str | None) -> go.Figure:
