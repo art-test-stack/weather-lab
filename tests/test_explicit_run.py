@@ -338,21 +338,22 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     demo = app.init(run_bootstrap=False)
     h = demo.wl
     main_metric = dict(zip(app.DRAFT_KEYS, h["draft"]))["metric"]
-    assert main_metric.label == h["benchmark_metric"].label == "Main metric"
-    assert main_metric.value == h["benchmark_metric"].value == "mae"
+    assert main_metric.label == "Main metric"
+    assert main_metric.value == "mae"
     assert {v for _, v in main_metric.choices} == {"mae", "rmse"}
     controls = dict(zip(app.DRAFT_KEYS, h["draft"]))
     assert "t0-gamma" in {v for _, v in controls["size"].choices}
-    benchmark_controls = dict(zip(app.bench.KEYS, h["benchmark"]["draft"]))
-    assert "t0-gamma" in {v for _, v in benchmark_controls["size"].choices}
     assert {v for _, v in controls["retrieval_method"].choices} == {"none", "level", "shape"}
-    assert {"mae", "rmse"} <= {v for _, v in h["benchmark_metric"].choices}
     assert any(c.get("props", {}).get("label") == "Forecast" for c in demo.config["components"])
     overview = h["render"]
     protected = {h["applied"]._id} | {c._id for c in overview if c not in h["draft"]}
     fns = demo.fns
     load_callbacks = {fn.name for fn in fns.values() if any(t[1] == "load" for t in fn.targets)}
-    assert {"refresh_retrieval", "refresh"} <= load_callbacks
+    assert "refresh_retrieval" in load_callbacks
+    assert "refresh" not in load_callbacks
+    tabs = [c["props"]["label"] for c in demo.config["components"] if c["type"] == "tabitem"]
+    assert tabs == ["Forecast", "Benchmark"]
+    assert not any("Execute or replay" in str(c.get("props", {}).get("value", "")) for c in demo.config["components"])
 
     def root(fn):
         while fn.trigger_after is not None:
@@ -378,23 +379,16 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     worker = next(f for f in fns.values() if f.fn is app.run_captured)
     assert worker.trigger_only_on_success and worker.inputs == [h["captured_request"]]
     assert any(f.fn is app.finish_forecast for f in fns.values())
-    from weather_lab_app import benchmark as bench
-
-    b = h["benchmark"]
-    assert not draft_ids & {c._id for c in b["draft"]}
-    protected_b = {b["applied"]._id} | {c._id for c in b["render"]}
-    for fn in fns.values():
-        roots = {(t[0], t[1]) for t in root(fn).targets}
-        if {o._id for o in fn.outputs} & protected_b:
-            assert roots <= {(b["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
-        if roots & {(c._id, "input") for c in b["draft"]}:
-            assert not ({o._id for o in fn.outputs} & protected_b)
-            assert fn.fn in (bench.feedback, bench.on_suite, bench.on_saved)
-            assert fn.show_progress == "hidden"
-    click = [f for f in fns.values() if (b["run"]._id, "click") in f.targets]
-    assert len(click) == 1 and click[0].fn is bench.begin and click[0].trigger_mode == "once"
-    worker = next(f for f in fns.values() if f.fn is bench.execute)
-    assert worker.trigger_only_on_success and worker.inputs == [b["captured_request"]]
+    b = h["saved_benchmark"]
+    if b is not None:
+        assert not draft_ids & {c._id for c in b["draft"]}
+        protected_b = {b["applied"]._id} | {c._id for c in b["render"]}
+        for fn in fns.values():
+            roots = {(t[0], t[1]) for t in root(fn).targets}
+            if {o._id for o in fn.outputs} & protected_b:
+                assert roots <= {(b["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
+            if roots & {(c._id, "input") for c in b["draft"]}:
+                assert fn.name == "edit" and not ({o._id for o in fn.outputs} & protected_b)
 
 
 @needs_example
