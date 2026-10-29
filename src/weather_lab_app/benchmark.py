@@ -9,7 +9,7 @@ import gradio as gr
 import pandas as pd
 
 from weather_lab import development, features, models
-from weather_lab.common import read_json, sha256_file
+from weather_lab.common import read_json
 from weather_lab.forecast_config import ForecastConfig, check, describe
 from weather_lab_app import zerogpu
 from weather_lab_app.results import load_run
@@ -119,10 +119,10 @@ def execute(request, progress=gr.Progress()):
         if d["saved"]:
             if d["saved"] not in {p for _, p in development.saved_runs(d["suite"])}:
                 raise ValueError("Select a saved development run of this suite")
-            rec = read_json(Path(d["saved"]) / "run.json")
-            for name, digest in rec["files_sha256"].items():
-                if sha256_file(Path(d["saved"]) / name) != digest:
-                    raise ValueError("A saved development artifact failed its checksum")
+            try:
+                rec = development.verify_run(Path(d["saved"]))
+            except ValueError as exc:
+                raise ValueError("A saved development artifact failed its checksum") from exc
             if rec["forecast_config"] != cfg.as_dict():
                 raise ValueError("Settings differ from the selected saved run; choose New development run")
             path, kind, message = d["saved"], "development", "Replayed the saved development benchmark."
