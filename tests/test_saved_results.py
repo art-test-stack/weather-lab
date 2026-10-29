@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.saved_results import calendar, horizon, matched, one_forecast
+from weather_lab.saved_results import annual_temperature, calendar, horizon, matched, one_forecast
 from weather_lab_app.results import Run, _parquet
 
 
@@ -82,6 +82,25 @@ def test_arome_support_is_explicit_and_variables_are_separate(saved):
     duplicate = pd.concat([p, p.iloc[:1]])
     with pytest.raises(pd.errors.MergeError):
         matched({"one": duplicate}, truth, cases, "t")
+
+
+def test_annual_temperature_ranks_identical_pairs_by_origin_year_and_retains_unavailable(saved):
+    run, truth, cases = saved
+    first, second = (run.point_predictions(model, "t") for model in ("first", "second"))
+    old = cases.iloc[:1].assign(case_id="old", origin=pd.Timestamp("2025-12-31T23:00Z"))
+    old_truth = truth.iloc[:1].assign(case_id="old", valid_time=pd.Timestamp("2026-01-01T00:00Z"))
+    old_point = first.iloc[:1].assign(case_id="old", origin=old.origin.iloc[0],
+                                     valid_time=old_truth.valid_time.iloc[0], point=1000.)
+    frames = {"one": pd.concat([first, old_point]), "two": pd.concat([second, old_point])}
+    table, support = annual_temperature(frames, pd.concat([truth, old_truth]), pd.concat([cases, old]), split="test")
+    assert table.model.tolist() == ["one", "two"] and table.mae.tolist() == [2., 3.]
+    assert table.n.tolist() == [2, 2] and table.n_cases.tolist() == [2, 2]
+    assert support["scheduled_windows"] == 3 and support["observed_pairs"] == 2
+    broad, _ = annual_temperature({"one": first}, truth, cases)
+    assert broad.mae.iloc[0] == pytest.approx(13 / 3)  # pairs, not the mean of per-window means
+    empty, audit = annual_temperature({"one": first, "absent": second.iloc[:0]}, truth, cases)
+    assert empty.model.tolist() == ["one", "absent"] and empty.mae.isna().all()
+    assert empty.n.tolist() == [0, 0] and audit["observed_pairs"] == 0
 
 
 def test_one_forecast_preserves_gaps_and_fixed_issue_relative_leads(saved):
