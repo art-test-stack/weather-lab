@@ -365,7 +365,7 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
         r = root(fn)
         writes = {o._id for o in fn.outputs} & protected
         roots = {(t[0], t[1]) for t in r.targets}
-        if any(t[0] in edit_ids and t[1] == "input" for t in roots):
+        if any(t[0] in edit_ids and t[1] in ("input", "change") for t in roots):
             assert fn.show_progress == "hidden", fn.name
         if writes:
             assert roots <= {(h["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
