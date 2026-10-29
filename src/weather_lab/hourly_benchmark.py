@@ -35,7 +35,7 @@ def inputs(obs, issued, case, cfg):
 
 def prepare(cfg, store=None):
     """Freeze every hourly origin through each station's last genuine 2026 measurement."""
-    from weather_lab.evaluate import score
+    from weather_lab.scoring import score
 
     store = store or Store()
     if cfg.get("artifact_id"):
