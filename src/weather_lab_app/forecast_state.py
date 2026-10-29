@@ -72,11 +72,6 @@ def has_setups(suite: str) -> bool:
     return bool(EXPERIMENTS[suite].get("matrix"))
 
 
-def setup_choices(suite: str) -> list[tuple[str, str]]:
-    mx = EXPERIMENTS[suite].get("matrix") or {}
-    return [(SETUP_NAMES[k][0], k) for k in mx.get("setups", {})]
-
-
 def experiment_view(suite: str, size: str | None, setup: str | None = None) -> dict:
     """The experiment's presentation for a checkpoint size and AROME input setup.
 
