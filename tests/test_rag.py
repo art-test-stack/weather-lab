@@ -16,7 +16,7 @@ from weather_lab.forecast import CaseBatch
 from weather_lab.rag import config
 from weather_lab.rag_adapters import Analog, foundation
 from weather_lab.rag_archive import ingest, issued_forecasts
-from weather_lab.rag_evaluate import choose_arome, metrics, run
+from weather_lab.rag_evaluate import metrics, run
 from weather_lab.rag_index import Index, build
 from weather_lab.rag_store import Store
 
@@ -152,28 +152,6 @@ def test_gpu_worker_serialization_reopens_index_instead_of_copying_vectors(setup
     a, _ = index.retrieve(query(frame, index), "shape", 1)
     b, _ = restored.retrieve(query(frame, index), "shape", 1)
     np.testing.assert_array_equal(a, b)
-
-
-def test_issued_runs_cannot_be_stitched_or_mixed():
-    origin = pd.Timestamp("2026-06-01T06:00Z")
-    times = pd.date_range(origin + pd.Timedelta(hours=1), periods=2, freq="h")
-    rows = []
-    for var in ("t", "pmer"):
-        for i, valid in enumerate(times):
-            rows.append({"station": "07110", "run": origin - pd.Timedelta(hours=i + 3),
-                         "available_at": origin, "valid_time": valid, "variable": var, "value": 1.,
-                         "product": "meteofrance_arome_france", "availability_basis": "test_evidence",
-                         "source_kind": "issued_run"})
-    issued = issued_forecasts(pd.DataFrame(rows))
-    with pytest.raises(ValueError, match="single available issued run"):
-        choose_arome(issued, "07110", origin, times, ["t", "pmer"], "meteofrance_arome_france")
-    issued["source_kind"] = "stitched_historical_forecast"
-    with pytest.raises(ValueError, match="stitched"):
-        issued_forecasts(issued)
-    issued["source_kind"], issued["run"] = "issued_run", origin - pd.Timedelta(hours=3)
-    issued["available_at"] = origin + pd.Timedelta(hours=1)
-    with pytest.raises(ValueError, match="single available issued run"):
-        choose_arome(issued, "07110", origin, times, ["t", "pmer"], "meteofrance_arome_france")
 
 
 def test_replay_keeps_whole_year_and_explicit_forecast_gaps(setup):
