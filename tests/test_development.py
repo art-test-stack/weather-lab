@@ -193,3 +193,11 @@ def test_error_correction_saves_physical_predictions_and_missing_archives_withou
     assert len(corrected) == 4
     assert corrected.arome_baseline.eq(12).all() and corrected.predicted_error.eq(-1).all()
     assert corrected.point.eq(11).all()
+
+
+@pytest.mark.parametrize("name", ["../predictions.parquet", "/tmp/predictions.parquet", "nested/predictions.parquet"])
+def test_saved_run_inventory_rejects_nonlocal_payloads_before_reading(tmp_path, monkeypatch, name):
+    write_json(tmp_path / "run.json", {"files_sha256": {name: "synthetic digest"}})
+    monkeypatch.setattr(development, "sha256_file", lambda *a: pytest.fail("unsafe inventory was read"))
+    with pytest.raises(ValueError, match="saved run failed verification"):
+        development.verify_run(tmp_path)
