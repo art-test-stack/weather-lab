@@ -9,7 +9,7 @@ import pandas as pd
 import yaml
 
 from weather_lab.common import ROOT, load_config, now_utc, read_json, write_json
-from weather_lab.evaluate import score
+from weather_lab.scoring import score
 from weather_lab.suite import cases_from_manifest
 
 OUT = ROOT / "experiments" / "context_selection"
