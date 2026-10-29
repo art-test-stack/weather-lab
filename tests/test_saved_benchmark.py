@@ -10,6 +10,7 @@ import pytest
 from weather_lab import development
 from weather_lab.common import sha256_file
 from weather_lab.forecast_config import ForecastConfig
+from weather_lab.saved_results import matrix_overview
 from weather_lab_app import results, saved_benchmark as panel
 
 
@@ -50,6 +51,27 @@ def catalog(tmp_path, monkeypatch):
     cached_verifier.cache_clear()
     results.load_run.cache_clear()
     results._parquet.cache_clear()
+
+
+@pytest.fixture
+def matrix(catalog):
+    directory = Path(next(iter(catalog))).parents[1] / "comparisons"
+    directory.mkdir()
+    support = pd.DataFrame({"case_id": ["a"] * 3, "variable": ["t", "t", "pmer"], "lead_h": [1, 2, 1]})
+    support.to_parquet(directory / "common_support.parquet")
+    digest = sha256_file(directory / "common_support.parquet")
+    configurations = {r["summary"]["configuration_id"]: {"run_id": Path(p).name,
+        "run_json_sha256": r["summary"]["run_json_sha256"]} for p, r in catalog.items()}
+    models = [*configurations, "arome-raw", "persistence"]
+    scores = pd.DataFrame([{"model": model, "variable": variable, "split": "test", "station": "ALL", "season": "ALL",
+        "lead_h": np.nan, "mae": (i + 1) * scale, "n": pairs, "support_sha256": digest}
+        for i, model in enumerate(models) for variable, scale, pairs in (("t", 1., 2), ("pmer", 10., 1))])
+    scores.to_csv(directory / "shared_arome_metrics.csv", index=False)
+    record = {"suite": "hourly-2026-v3", "matrix": "synthetic", "configurations": configurations,
+        "support_sha256": digest, "scores_sha256": sha256_file(directory / "shared_arome_metrics.csv")}
+    (directory / "provenance.json").write_text(json.dumps(record))
+    yield catalog, directory
+    results._matrix_files.cache_clear()
 
 
 def test_discovery_filters_and_saved_only_routing(catalog, monkeypatch):
@@ -153,6 +175,7 @@ def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     assert controls["spread"].value and not controls["calendar_spread"].value
     headings = [c["props"].get("value") for c in demo.config["components"] if c["type"] == "markdown"]
     assert [v for v in headings if v and v.startswith("### ")] == [
+        "### All saved matrix configurations · temperature and pressure",
         "### 2026 temperature leaderboard", "### Error versus forecast horizon", "### Hour-of-day MAE",
         "### Error over the calendar", "### AROME error per 48-hour forecast window", "### Inspect one saved forecast"]
     columns = {c["props"].get("elem_id"): c["id"] for c in demo.config["components"] if c["type"] == "column"}
@@ -181,7 +204,7 @@ def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     monkeypatch.setattr(panel, "read_saved", lambda *_: pytest.fail("Editing must never read predictions"))
     edit = next(f.fn for f in demo.fns.values() if f.name == "edit")
     d = panel.defaults(catalog, "test")
-    _, _, message, button = edit(*[d[k] for k in panel.KEYS], None, {"busy": True})
+    _, _, message, button, _ = edit(*[d[k] for k in panel.KEYS], None, {"busy": True})
     assert "pending" in message and not button["interactive"]
     guard = {"busy": False}
     vals = [d[k] for k in panel.KEYS]
@@ -193,6 +216,76 @@ def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     previous = {"draft": d}
     applied, _, changed = panel.apply({"draft": d}, *[newer[k] for k in panel.KEYS], previous, "")
     assert applied is previous and not changed
+
+
+def test_frozen_matrix_reads_both_variables_on_separate_common_support_and_caches(matrix, monkeypatch):
+    catalog, directory = matrix
+    source = results.load_run(Path(next(iter(catalog))))
+    monkeypatch.setattr(results.Run, "point_predictions", lambda *_: pytest.fail("The matrix reads frozen aggregates only"))
+    reads, read = [], pd.read_csv
+    monkeypatch.setattr(pd, "read_csv", lambda *a, **kw: (reads.append(a[0]), read(*a, **kw))[1])
+    first = panel.overview("hourly-2026-v3", catalog, source)
+    second = panel.overview("hourly-2026-v3", catalog, source)
+    assert len(reads) == 1
+    pd.testing.assert_frame_equal(first["table"], second["table"])
+    table = first["table"]
+    assert len(table) == 4 and table["Temperature MAE (°C)"].tolist() == [1., 2., 3., 4.]
+    assert table["Pressure MAE (hPa)"].tolist() == [10., 20., 30., 40.]
+    assert table["Temperature pairs"].tolist() == [2] * 4 and table["Pressure pairs"].tolist() == [1] * 4
+    assert "Temperature: **2 pairs · 1 windows**" in first["note"] and "Pressure: **1 pairs · 1 windows**" in first["note"]
+    saved = results.saved_matrix("hourly-2026-v3", catalog)
+    wrong = saved["scores"].copy()
+    wrong.loc[0, "n"] = 3
+    with pytest.raises(ValueError, match="pair counts differ"):
+        matrix_overview(wrong, saved["support"], source.cases(), wrong.model.unique(), "test")
+    results._matrix_files.cache_clear()
+    (directory / "shared_arome_metrics.csv").write_text("changed frozen scores")
+    with pytest.raises(ValueError, match="checksum differs"):
+        results.saved_matrix("hourly-2026-v3", catalog)
+
+
+def test_matrix_row_selection_routes_by_label_and_only_changes_pending_controls(matrix, monkeypatch):
+    catalog, _ = matrix
+    source = results.load_run(Path(next(iter(catalog))))
+    with gr.Blocks() as demo:
+        h = panel.build("hourly-2026-v3", source, demo)
+    assert h["matrix_data"] is not None
+    monkeypatch.setattr(panel, "read_saved", lambda *_: pytest.fail("Table clicks cannot read saved predictions"))
+    monkeypatch.setattr(results, "verified_run", lambda *_: pytest.fail("Table clicks cannot load runs"))
+    chooser = next(f for f in demo.fns.values() if (h["matrix"]._id, "select") in f.targets)
+    assert chooser.name == "choose" and chooser.show_progress == "hidden" and not chooser.queue
+    protected = {h["applied"]._id} | {o._id for o in h["render"]}
+    assert not protected & {o._id for o in chooser.outputs}
+    d = panel.defaults(catalog, "test")
+    rows = panel.overview_selection(h["matrix_data"], d).data.values.tolist()
+    path = h["matrix_data"]["routes"][rows[0][1]]
+    event = gr.SelectData(None, {"index": [99, 0], "value": rows[0][1], "row_value": rows[0], "selected": True})
+    outputs = chooser.fn(event, *[d[k] for k in panel.KEYS], None, {"busy": True})
+    assert outputs[0]["value"] == [p for p in d["selected"] if p != path]
+    assert "pending" in outputs[2] and not outputs[3]["interactive"]
+    updated = {**d, "selected": outputs[0]["value"]}
+    added = chooser.fn(event, *[updated[k] for k in panel.KEYS], None, {"busy": False})
+    assert set(added[0]["value"]) == set(d["selected"])
+    conditioned = next(row for row in rows if "archived-arome" in row[1])
+    blocked = gr.SelectData(None, {"index": [0, 1], "value": conditioned[1], "row_value": conditioned})
+    out = chooser.fn(blocked, *[{**d, "cohort": "weather"}[k] for k in panel.KEYS], None, {"busy": False})
+    assert "excluded by the current cohort" in out[2]
+    reference = gr.SelectData(None, {"index": [2, 1], "value": rows[2][1], "row_value": rows[2]})
+    out = chooser.fn(reference, *[d[k] for k in panel.KEYS], None, {"busy": False})
+    assert "reference" in out[2] and h["applied"].value is None
+
+
+def test_frozen_matrix_is_discovered_after_explicit_bucket_publication(matrix):
+    import shutil
+
+    catalog, directory = matrix
+    mounted = development.location().parent / "benchmark-matrices/synthetic-published"
+    mounted.parent.mkdir(parents=True)
+    shutil.copytree(directory, mounted)
+    directory.rename(directory.with_name("unmounted-comparison"))
+    saved = results.saved_matrix("hourly-2026-v3", catalog)
+    assert saved["provenance"]["matrix"] == "synthetic"
+    assert set(saved["paths"].values()) == set(catalog)
 
 
 def test_inspector_reads_saved_issue_never_later_archive_forecasts(catalog, monkeypatch):
