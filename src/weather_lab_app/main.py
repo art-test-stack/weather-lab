@@ -1704,6 +1704,10 @@ def build() -> gr.Blocks:
             # ---------------- benchmark
             with gr.Tab("Benchmark", id="benchmark"):
                 benchmark_suite = "hourly-2026-v3" if "hourly-2026-v3" in RUNS else DEFAULT_SUITE
+                from weather_lab_app import saved_benchmark
+
+                saved_panel = saved_benchmark.build(benchmark_suite, RUNS[benchmark_suite], demo)
+                gr.Markdown("## Execute or replay one development benchmark")
                 b0 = bench.defaults(benchmark_suite)
                 b_applied = gr.State({"draft": b0, "config": bench.configuration(b0),
                                       "path": str(RUNS[benchmark_suite].path), "kind": "reference" if RUNS[benchmark_suite].run.get("hourly_benchmark") else "frozen"})
@@ -1894,6 +1898,7 @@ def build() -> gr.Blocks:
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
                    "benchmark_metric": metric,
+                   "saved_benchmark": saved_panel,
                    "benchmark": {"draft": b_draft, "applied": b_applied, "run": b_btn, "render": b_outputs,
                                   "submission": b_guard, "captured_request": b_request},
                    "advanced": [resid_vars, atmos_fields, tend_lags, systems, band, err_mode, show_old]}
