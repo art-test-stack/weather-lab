@@ -315,12 +315,6 @@ def load_timestral(checkpoint: str, revision: str, device: str = "cpu") -> tuple
     return item.forecaster, item.info
 
 
-def weights_cached(checkpoint: str, revision: str) -> bool:
-    from weather_lab.models import local_dir, resolve
-
-    return local_dir(resolve(checkpoint, revision)) is not None
-
-
 def ensure_checkpoint(size: str, allow_download: bool) -> bool:
     """Make the pinned checkpoint available locally (no GPU needed). Returns True if it was downloaded."""
     from weather_lab.models import CHECKPOINTS as REGISTRY, prefetch
