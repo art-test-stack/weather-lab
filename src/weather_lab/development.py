@@ -16,7 +16,7 @@ import pandas as pd
 
 from weather_lab import features, models
 from weather_lab.common import ROOT, environment, git_revision, now_utc, read_json, sha256_file, sha256_text, write_json
-from weather_lab.evaluate import score
+from weather_lab.scoring import score
 from weather_lab.forecast import QUANTILE_LEVELS, exploratory_inputs, qcol
 from weather_lab.forecast_config import ForecastConfig, build_adapter, check
 from weather_lab.predcache import make_key
@@ -171,7 +171,8 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
     ck = models.CHECKPOINTS[cfg.model]
     code_files = [Path(__file__), Path(__file__).with_name("forecast.py"),
                   Path(__file__).with_name("features.py"), Path(__file__).with_name("evaluate.py"),
-                  Path(__file__).with_name("forecast_config.py"), Path(__file__).with_name("arome_inputs.py")]
+                  Path(__file__).with_name("forecast_config.py"), Path(__file__).with_name("arome_inputs.py"),
+                  Path(__file__).with_name("scoring.py")]
     if cfg.precision != "native":
         code_files.append(Path(__file__).with_name("precision.py"))
     if ck.family == "t0":
