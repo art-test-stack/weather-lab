@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from weather_lab import arome as arome_mod
+from weather_lab.arome_inputs import build_frozen_arome_inputs
 from weather_lab.baselines import Climatology, Persistence, SeasonalNaive
 from weather_lab.common import (Config, environment, git_revision, load_config, now_utc, read_json, sha256_file,
                                 write_json)
@@ -104,7 +104,7 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
     future = origins[:, None] + (np.arange(1, h + 1) * np.timedelta64(f["step_hours"], "h"))[None, :]
     arome_arr, hist_args = None, {}
     if arome_df is not None:
-        arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, cfg["arome"]["fields"], h,
+        arome_arr, hist_args = build_frozen_arome_inputs(arome_df, cases, origins, variables, cfg["arome"]["fields"], h,
                                             f["step_hours"], history_steps)
     aux_args = {}
     if aux_df is not None:
@@ -119,31 +119,6 @@ def make_batch(cfg: Config, obs: pd.DataFrame, cases: pd.DataFrame, history_step
     batch = CaseBatch(cases.reset_index(drop=True), variables, hist, origins, future, f["step_hours"], arome_arr,
                       **hist_args, **aux_args, station_coords=station_coords)
     return batch, targets
-
-
-def arome_inputs(arome_df: pd.DataFrame, cases: pd.DataFrame, origins: np.ndarray, variables: list[str],
-                 fields: list[str], h: int, step_hours: int, history_steps: int) -> tuple[np.ndarray, dict]:
-    """Issued AROME over the horizon (run named per case, available at its origin) and the archived
-    AROME history with provenance, as `CaseBatch` fields. Shared by the benchmark and exploratory runs."""
-    n, step = len(cases), pd.Timedelta(hours=step_hours)
-    arome_arr = np.full((n, len(variables), h), np.nan, dtype=np.float32)
-    a = arome_df.set_index(["run", "station", "variable", "valid_time"])["value"]
-    avail = arome_df.groupby("run")["available_at"].max()
-    for i, c in enumerate(cases.itertuples()):
-        run = pd.Timestamp(c.arome_run)
-        if avail[run] > c.origin:
-            raise ValueError(f"{c.case_id}: AROME run {run} not available at origin")
-        for j, var in enumerate(variables):
-            if var not in fields:
-                continue
-            for k in range(h):
-                valid = pd.Timestamp(origins[i], tz="UTC") + (k + 1) * step
-                arome_arr[i, j, k] = a.get((run, c.station, var, valid), np.nan)
-    hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(step_hours, "h"))[None]
-    decisions = cases["origin"].to_numpy(dtype="datetime64[ns]")
-    vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), decisions, hist_times,
-                                                   variables)
-    return arome_arr, {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}
 
 
 def targets_frame(batch: CaseBatch, targets: np.ndarray) -> pd.DataFrame:
