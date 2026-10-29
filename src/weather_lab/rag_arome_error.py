@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from weather_lab.arome_inputs import build_arome_inputs
+from weather_lab.arome_inputs import build_arome_inputs, choose_arome
 from weather_lab.common import ROOT, read_json, sha256_file, ts, write_json
-from weather_lab.forecast import CaseBatch
+from weather_lab.forecast import CaseBatch, hourly_inputs
 from weather_lab.rag_archive import issued_forecasts, observations
-from weather_lab.rag_evaluate import choose_arome
 from weather_lab.rag_index import Index, METHODS
 from weather_lab.rag_store import Store
 
@@ -22,23 +22,15 @@ VERSION = 1
 def make_batch(obs, issued, case, variables, context_hours, horizon_hours, delay, product):
     """Inputs only: observations end at decision minus delay; one issued run covers the horizon."""
     origin = ts(case["origin"])
-    end = origin - pd.Timedelta(hours=delay)
-    past = pd.date_range(end=end, periods=context_hours, freq="h")
-    future = pd.date_range(end + pd.Timedelta(hours=1), periods=horizon_hours + delay, freq="h")
-    source = obs[obs.station.eq(case["station"])].set_index("time")
-    history = source.reindex(past)[variables].to_numpy(np.float32).T
-    if (np.isfinite(history).mean(axis=-1) < 0.8).any() or not np.isfinite(history[:, -1]).all():
-        raise ValueError("insufficient causal hourly observation context")
+    cases = pd.DataFrame([{"case_id": case.name, "station": case["station"], "origin": origin}])
+    batch = hourly_inputs(obs[obs.station.eq(case["station"])], cases, variables,
+                          context_hours, horizon_hours, delay)
+    future = pd.to_datetime(batch.future_times[0], utc=True)
     values, provenance = choose_arome(issued, case["station"], origin, future, variables, product)
-    cases = pd.DataFrame([{"case_id": case.name, "station": case["station"], "origin": origin,
-                           "arome_run": provenance["run"], "arome_product": product}])
-    anchors = np.array([end.tz_localize(None)], dtype="datetime64[ns]")
-    past_axis = past.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None]
-    future_axis = future.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None]
-    named = build_arome_inputs(issued[issued["product"].eq(product)], cases, anchors,
-                               past_axis, future_axis, variables)
-    batch = CaseBatch(cases, variables, history[None], anchors, future_axis, 1,
-                      arome=values[None], arome_inputs=named)
+    cases = cases.assign(arome_run=provenance["run"], arome_product=product)
+    named = build_arome_inputs(issued[issued["product"].eq(product)], cases, batch.origins,
+                               batch.history_times(), batch.future_times, variables)
+    batch = replace(batch, cases=cases, arome=values[None], arome_inputs=named)
     return batch, provenance
 
 
