@@ -1,4 +1,8 @@
 """Hourly origins, causal year-boundary inputs and explicit unverified tails."""
+
+from weather_lab_app import benchmark as bench
+from weather_lab_app import main as application
+from weather_lab_app import results
 import numpy as np
 import pandas as pd
 import pytest
@@ -113,7 +117,7 @@ def test_benchmark_only_offers_hourly_indexes_of_its_pinned_archive(tmp_path, mo
     import json
     from types import SimpleNamespace
     from weather_lab import rag_store
-    from weather_lab_app import benchmark as bench, main as app
+    from weather_lab_app import benchmark as bench, forecast_state as app
 
     choices = [('current', 'a' * 64), ('old archive', 'b' * 64), ('daily', 'c' * 64)]
     for (_, ident), archive, stride in zip(choices, ('current-archive', 'old-archive', 'current-archive'), (1, 1, 24)):
@@ -121,13 +125,13 @@ def test_benchmark_only_offers_hourly_indexes_of_its_pinned_archive(tmp_path, mo
         directory.mkdir(parents=True)
         (directory / 'index.json').write_text(json.dumps({'archive_id': archive, 'retrieval': {'stride_hours': stride}}))
     monkeypatch.setattr(rag_store, 'Store', lambda: SimpleNamespace(root=tmp_path, list=lambda kind: choices))
-    monkeypatch.setitem(app.RUNS, 'fixture', SimpleNamespace(run={'archive_id': 'current-archive'}))
+    monkeypatch.setitem(results.RUNS, 'fixture', SimpleNamespace(run={'archive_id': 'current-archive'}))
     assert bench.index_choices('fixture') == choices[:1]
 
 
 def test_launch_only_adds_public_benchmark_source_and_result_paths(monkeypatch, tmp_path):
     from types import SimpleNamespace
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     options = {}
     class Demo:
@@ -136,11 +140,11 @@ def test_launch_only_adds_public_benchmark_source_and_result_paths(monkeypatch, 
         def launch(self, **kwargs):
             options.update(kwargs)
     source, saved = tmp_path / 'verified-source', tmp_path / 'saved-results'
-    monkeypatch.setattr(app, 'init', lambda: Demo())
-    monkeypatch.setattr(app, 'RUNS', {'annual': SimpleNamespace(path=source, run={'hourly_benchmark': True}),
+    monkeypatch.setattr(application, 'init', lambda: Demo())
+    monkeypatch.setattr(results, 'RUNS', {'annual': SimpleNamespace(path=source, run={'hourly_benchmark': True}),
                                     'unrelated': SimpleNamespace(path=tmp_path / 'unrelated', run={})})
-    monkeypatch.setattr(app.bench.development, 'location', lambda: saved)
-    app.main()
+    monkeypatch.setattr(bench.development, 'location', lambda: saved)
+    application.main()
     assert options['allowed_paths'] == [str(source), str(saved)]
 
 
