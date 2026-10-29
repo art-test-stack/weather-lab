@@ -10,7 +10,7 @@ import pandas as pd
 
 from weather_lab.arome_inputs import build_arome_inputs, choose_arome
 from weather_lab.common import ROOT, read_json, sha256_file, ts, write_json
-from weather_lab.forecast import CaseBatch, hourly_inputs
+from weather_lab.forecast import hourly_inputs
 from weather_lab.rag_archive import issued_forecasts, observations
 from weather_lab.rag_index import Index, METHODS
 from weather_lab.rag_store import Store
@@ -26,11 +26,11 @@ def make_batch(obs, issued, case, variables, context_hours, horizon_hours, delay
     batch = hourly_inputs(obs[obs.station.eq(case["station"])], cases, variables,
                           context_hours, horizon_hours, delay)
     future = pd.to_datetime(batch.future_times[0], utc=True)
-    values, provenance = choose_arome(issued, case["station"], origin, future, variables, product)
+    _, provenance = choose_arome(issued, case["station"], origin, future, variables, product)
     cases = cases.assign(arome_run=provenance["run"], arome_product=product)
     named = build_arome_inputs(issued[issued["product"].eq(product)], cases, batch.origins,
                                batch.history_times(), batch.future_times, variables)
-    batch = replace(batch, cases=cases, arome=values[None], arome_inputs=named)
+    batch = replace(batch, cases=cases, arome=named.future, arome_inputs=named)
     return batch, provenance
 
 
