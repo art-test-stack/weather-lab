@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.saved_results import annual_temperature, calendar, horizon, matched, one_forecast
+from weather_lab.saved_results import annual_temperature, arome_window_mae, calendar, horizon, matched, one_forecast
 from weather_lab_app.results import Run, _parquet
 
 
@@ -82,6 +82,34 @@ def test_arome_support_is_explicit_and_variables_are_separate(saved):
     duplicate = pd.concat([p, p.iloc[:1]])
     with pytest.raises(pd.errors.MergeError):
         matched({"one": duplicate}, truth, cases, "t")
+
+
+def test_arome_scores_each_complete_48_hour_station_origin_from_saved_files(tmp_path):
+    cases = pd.DataFrame({"case_id": list("abcde"), "station": ["07149", "07630", "07149", "07149", "07149"],
+        "origin": pd.to_datetime(["2026-01-01T23:00Z"] * 2 + ["2026-01-02T00:00Z", "2026-01-02T01:00Z", "2026-01-02T02:00Z"]),
+        "eligible": True, "split": "test"})
+    truth = cases[["case_id", "origin"]].merge(pd.DataFrame({"lead_h": range(1, 49)}), how="cross")
+    truth["valid_time"] = truth.origin + pd.to_timedelta(truth.lead_h, unit="h")
+    truth["variable"], truth["observed"] = "t", 0.
+    points = truth.drop(columns="observed").merge(cases[["case_id", "station"]], on="case_id")
+    points["model"], points["point"] = "arome-raw", points.lead_h.astype(float)
+    points.loc[points.case_id.eq("b"), "point"] = -2.
+    points.loc[points.case_id.eq("c") & points.lead_h.eq(48), "point"] = np.nan
+    points = points[~points.case_id.eq("e")]
+    truth.loc[truth.case_id.eq("d") & truth.lead_h.eq(24), "observed"] = np.nan
+    points.to_parquet(tmp_path / "predictions.parquet")
+    truth.to_parquet(tmp_path / "targets.parquet")
+    run = Run("fixture", tmp_path, "fixture", {}, {})
+    table, support = arome_window_mae(run.point_predictions("arome-raw", "t"), run.targets(), cases, "t", split="test")
+    assert table.case_id.tolist() == list("abcde")
+    assert table.n.tolist() == [48, 48, 47, 47, 0]
+    assert table.complete.tolist() == [True, True, False, False, False]
+    assert table.mae.iloc[:2].tolist() == [24.5, 2.] and table.mae.iloc[2:].isna().all()
+    assert support["complete_windows"] == 2 and support["incomplete_windows"] == 3
+    filtered, _ = arome_window_mae(points, truth, cases, "t", station="07149")
+    assert filtered.case_id.tolist() == list("acde") and filtered.complete.sum() == 1
+    empty, _ = arome_window_mae(points, truth, cases, "pmer")
+    assert empty.mae.isna().all() and not empty.complete.any()
 
 
 def test_annual_temperature_ranks_identical_pairs_by_origin_year_and_retains_unavailable(saved):
