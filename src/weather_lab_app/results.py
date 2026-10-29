@@ -15,6 +15,8 @@ from weather_lab.forecast import QUANTILE_LEVELS, qcol
 from weather_lab_app.labels import EXPERIMENT_ORDER, EXPERIMENTS, model_name
 
 
+RUNS: dict = {}  # loaded saved-run catalogue; session draft/applied state stays in gr.State
+
 def training_status(model: str) -> str:
     if model.startswith(("timestral", "t0")):
         return "pretrained, no local fine-tuning"
