@@ -65,7 +65,14 @@ EXPLORE_MAX_HOURS = 120              # app limit for exploratory runs (Timestral
 CONTEXT_DAYS = (7, 90)               # range of the Observed context control
 AROME_MODES = {"none": None, "archived": "archived", "substobs": "substituted_observations", "futureonly": "missing"}
 
-CSS = """
+FONT_DIR = Path(__file__).with_name("assets") / "fonts"
+CSS = "\n".join(
+    "@font-face {font-family: 'Latin Modern Roman'; "
+    f"src: url('/gradio_api/file={FONT_DIR / ('lmroman10-' + face + '.otf')}') format('opentype'); "
+    f"font-weight: {weight}; font-style: {style}; font-display: swap;}}"
+    for face, weight, style in (("regular", 400, "normal"), ("bold", 700, "normal"),
+                                ("italic", 400, "italic"), ("bolditalic", 700, "italic"))
+) + """
 .gradio-container {max-width: 1240px !important; margin: auto;}
 #hero h1 {font-size: 1.45rem; margin: 0 0 .1rem 0;}
 #hero p {color: #3d3c39; margin: 0; font-size: .98rem;}
@@ -1626,6 +1633,7 @@ def on_experiment(suite: str, variable: str | None, station: str | None = None, 
 
 
 def build() -> gr.Blocks:
+    gr.set_static_paths(paths=[FONT_DIR])
     with gr.Blocks(title="Weather-lab") as demo:
         if DEFAULT_SUITE is None:
             gr.Markdown("# Weather-lab\nNo saved results found. Run `uv run weather-lab bootstrap`.")
@@ -1955,8 +1963,7 @@ def init(run_bootstrap: bool = True) -> gr.Blocks:
 def main() -> None:
     demo = init()
     demo.queue(default_concurrency_limit=4).launch(
-        theme=gr.themes.Soft(primary_hue="blue", neutral_hue="stone",
-                             font=[gr.themes.GoogleFont("Inter"), "ui-sans-serif", "system-ui", "sans-serif"]),
+        theme=gr.themes.Soft(primary_hue="blue", neutral_hue="stone", font=plots.FONT.split(", ")),
         css=CSS,
         allowed_paths=[str(r.path) for r in RUNS.values() if r.run.get("hourly_benchmark")]
                       + [str(bench.development.location())])
