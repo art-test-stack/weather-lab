@@ -86,9 +86,9 @@ class ForecastConfig:
         return result
 
 
-def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | None = None, **runtime):
-    """Construct a native adapter from the shared configuration, without loading weights."""
-    if cfg.retrieval_method != "none":
+def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | None = None, *, index=None, **runtime):
+    """Construct a native or retrieved adapter; callers verify index storage and allocate devices."""
+    if cfg.retrieval_method != "none" and index is None:
         raise ValueError("Hourly RAG requires the verified index/archive path in rag_forecast.forecast")
     from weather_lab.forecast import Timestral
     from weather_lab.models import resolve
@@ -102,6 +102,15 @@ def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | Non
         constructor = T0
     else:
         raise ValueError(f"No adapter for checkpoint family {checkpoint.family!r}")
+    if cfg.retrieval_method != "none":
+        from weather_lab.rag_adapters import RetrievedTimestral, RetrievedT0
+
+        if (index.ident != cfg.retrieval_index or index.meta["variables"] != list(cfg.targets)
+                or index.meta["context_hours"] != cfg.context_days * 24):
+            raise ValueError("The retrieval index identity, variables or context differ from the forecast configuration")
+        constructor = RetrievedTimestral if checkpoint.family == "timestral" else RetrievedT0
+        runtime.update(index=index, method=cfg.retrieval_method)
+        runtime.setdefault("k", index.meta["retrieval"]["k"])
     mode = runtime.pop("arome", cfg.arome_mode)
     # Preserve the recorded v1 spelling when reproducing old benchmark identities.
     if mode != cfg.arome_mode and not (mode == "observations" and cfg.conditioning == "substobs"):
