@@ -29,6 +29,12 @@ def cmd_prepare(args) -> None:
     prepare_suite(load_config(args.config))
 
 
+def cmd_forecast_data(args) -> None:
+    from weather_lab.forecast_data import prepare
+
+    prepare(args.config)
+
+
 def cmd_evaluate(args) -> None:
     from weather_lab.evaluate import run_evaluation
 
@@ -242,6 +248,9 @@ def main(argv: list[str] | None = None) -> None:
         sp = dsub.add_parser(name, help=help_)
         sp.add_argument("--config", required=True)
         sp.set_defaults(func=fn)
+    hourly_data = dsub.add_parser("forecast-hourly", help="explicitly refresh hourly Forecast observations; no inference or publication")
+    hourly_data.add_argument("--config", default=str(Path(__file__).resolve().parents[2] / "configs/forecast_hourly.yaml"))
+    hourly_data.set_defaults(func=cmd_forecast_data)
     ev = sub.add_parser("evaluate", help="run every system on the frozen suite and save predictions + scores")
     ev.add_argument("--config", required=True)
     ev.add_argument("--reuse", metavar="RUN_DIR", help="copy predictions of identical systems from an earlier run of "
