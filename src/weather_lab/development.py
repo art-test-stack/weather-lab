@@ -36,7 +36,9 @@ def location() -> Path:
 
 def saved_runs(suite: str) -> list[tuple[str, str]]:
     runs = []
-    for p in sorted(location().glob("*/run.json"), reverse=True):
+    # Local matrix outputs and explicitly published runs on the existing bucket mount.
+    paths = set(location().glob("*/run.json")) | set((ROOT / "runs").glob("*/runs/*/run.json"))
+    for p in sorted(paths, reverse=True):
         summary = p.parent / "matrix_setup.json"
         rec = read_json(summary if summary.exists() else p)
         if rec.get("source_suite") == suite:
