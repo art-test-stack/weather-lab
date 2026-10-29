@@ -165,7 +165,8 @@ NOMINAL = {"coverage80": 0.8, "coverage90": 0.9}
 
 
 def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: str | None,
-                    hatched: frozenset[str] = frozenset()) -> go.Figure:
+                    hatched: frozenset[str] = frozenset(), names: dict | None = None,
+                    styles: dict | None = None) -> go.Figure:
     """Horizontal bars sorted best first; reference system highlighted; values labelled with units."""
     if table.empty:
         return _empty("No scores for this selection")
@@ -178,8 +179,8 @@ def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: 
     else:
         t["key"] = t[metric] if lower_better is not False else -t[metric]
     t = t.sort_values("key", ascending=False)                   # plotly draws bottom-up: best ends on top
-    names = [model_name(m) for m in t["model"]]
-    colors = [model_style(m)[0] for m in t["model"]]
+    names = [(names or {}).get(m, model_name(m)) for m in t["model"]]
+    colors = [(styles or {}).get(m, model_style(m))[0] for m in t["model"]]
     text = [f"{v:.0%}" if cov else f"{v:.2f}{u}" for v in t[metric]]
     fig = go.Figure(go.Bar(
         x=t[metric], y=names, orientation="h", marker={"color": colors, "pattern": {
@@ -207,7 +208,7 @@ def metric_by_lead(table: pd.DataFrame, metric: str, variable: str, models: list
     """Score against lead from `weather_lab.horizon.by_lead`; systems outside `primary` start hidden.
 
     cumulative=False: value at each lead. cumulative=True: value over all leads up to H (a different
-    quantity). Error bars appear only where the table holds a block-bootstrap interval of the mean.
+    quantity). Spread requests use population SD bars; otherwise saved bootstrap intervals are retained.
     """
     df = table[table["model"].isin(models)]
     if df.empty:
@@ -221,26 +222,23 @@ def metric_by_lead(table: pd.DataFrame, metric: str, variable: str, models: list
             continue
         color, dash, width = (styles or {}).get(m, model_style(m))
         name = (names or {}).get(m, model_name(m))
-        if spread and not cumulative and "spread" in g:
-            fig.add_trace(go.Scatter(
-                x=list(g.lead_h) + list(g.lead_h[::-1]),
-                y=list(g[metric] + g.spread) + list((g[metric] - g.spread)[::-1]),
-                fill="toself", fillcolor=_rgba(color, 0.12), line={"width": 0},
-                name=f"±1 SD of absolute errors · {name}", hoverinfo="skip", legendgroup=m))
-        has_ci = g["ci95_low"].notna().any()
-        err = {"type": "data", "symmetric": False, "array": g["ci95_high"] - g[metric],
-               "arrayminus": g[metric] - g["ci95_low"], "color": _rgba(color, 0.5), "thickness": 1.2,
-               "width": 3} if has_ci else None
+        has_spread = spread and not cumulative and "spread" in g
+        has_ci = not has_spread and g["ci95_low"].notna().any()
+        err = ({"type": "data", "symmetric": True, "array": g.spread,
+                "color": _rgba(color, 0.5), "thickness": 1.2, "width": 3} if has_spread else
+               {"type": "data", "symmetric": False, "array": g["ci95_high"] - g[metric],
+                "arrayminus": g[metric] - g["ci95_low"], "color": _rgba(color, 0.5), "thickness": 1.2,
+                "width": 3} if has_ci else None)
         fmt = ".0%" if cov else ".2f"
         where = "all leads ≤ %{x} h" if cumulative else "%{x} h ahead"
         fig.add_trace(go.Scatter(
             x=g["lead_h"], y=g[metric], name=name, mode="lines+markers", error_y=err, legendgroup=m,
             line={"color": color, "dash": dash, "width": width}, marker={"size": 6},
             visible=True if primary is None or m in primary else "legendonly",
-            customdata=list(zip(g["n"], g["n_cases"], g["ci95_low"], g["ci95_high"])),
+            customdata=list(zip(g["n"], g["n_cases"], g["ci95_low"], g["ci95_high"], g["spread"] if "spread" in g else [None] * len(g))),
             hovertemplate=f"%{{y:{fmt}}} · {where}<br>%{{customdata[0]}} pairs from %{{customdata[1]}} forecasts"
                           + ("<br>95% interval of the mean %{customdata[2]:.2f}–%{customdata[3]:.2f}" if has_ci
-                             else "") + "<extra>" + name + "</extra>"))
+                             else "<br>±1 population SD of absolute errors %{customdata[4]:.3f}" if has_spread else "") + "<extra>" + name + "</extra>"))
     if cov:
         fig.add_hline(y=NOMINAL[metric], line={"color": INK2, "dash": "dot"},
                       annotation_text=f"nominal {NOMINAL[metric]:.0%}", annotation_position="bottom right")
@@ -265,12 +263,9 @@ def calendar_errors(table: pd.DataFrame, variable: str, period: str, clock: str,
     for model, g in table.groupby("model", sort=False):
         color, dash, width = (styles or {}).get(model, model_style(model))
         name = (names or {}).get(model, model_name(model))
-        if spread:
-            fig.add_trace(go.Scatter(x=list(g.bucket) + list(g.bucket[::-1]),
-                y=list(g.mae + g.spread) + list((g.mae - g.spread)[::-1]),
-                fill="toself", fillcolor=_rgba(color, 0.12), line={"width": 0},
-                name=f"±1 SD of absolute errors · {name}", legendgroup=model, hoverinfo="skip", connectgaps=False))
-        fig.add_trace(go.Scatter(x=g.bucket, y=g.mae, name=name, mode="lines+markers", marker={"size": 3}, connectgaps=False,
+        fig.add_trace(go.Scatter(x=g.bucket, y=g.mae, name=name, mode="lines+markers", marker={"size": 5}, connectgaps=False,
+            error_y={"type": "data", "symmetric": True, "array": g.spread, "color": _rgba(color, 0.5),
+                     "thickness": 1, "width": 3} if spread else None,
             line={"color": color, "dash": dash, "width": width}, legendgroup=model,
             customdata=list(zip(g.n, g.n_cases, g.spread)),
             hovertemplate="%{x}<br>MAE %{y:.3f} " + unit(variable)
