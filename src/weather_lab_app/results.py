@@ -287,7 +287,7 @@ def saved_matrix(suite: str, catalog: dict):
 @lru_cache(maxsize=8)
 def verified_run(path: Path) -> Run:
     """Verify immutable saved payloads once per cached run, reusing the regular UI loader."""
-    from weather_lab.local_benchmark import verify_run
+    from weather_lab.development import verify_run
 
     verify_run(path)
     return load_run(path)
