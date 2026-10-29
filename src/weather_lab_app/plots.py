@@ -11,7 +11,7 @@ from weather_lab_app.labels import OBS_COLOR, model_name, model_style, unit, var
 from weather_lab_app.results import station_label
 
 INK, INK2, GRID, SURFACE, FORECAST_BG = "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb", "#eef4fb"
-FONT = "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+FONT = "Latin Modern Roman, Georgia, serif"
 
 
 def _layout(fig: go.Figure, title: str = "", height: int = 380, legend_top: bool = True, **kw) -> go.Figure:
@@ -57,7 +57,8 @@ ERROR_LABELS = {"absolute": ("|Forecast − obs.|", "Absolute error |forecast �
 
 def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, variable: str, systems: list[str],
                     band_model: str | None, context_hours: int = 720, view_hours: int = 48, height: int = 300,
-                    error_mode: str = "absolute") -> go.Figure:
+                    error_mode: str = "absolute", error_rows: pd.DataFrame | None = None,
+                    names: dict | None = None, styles: dict | None = None) -> go.Figure:
     """The forecast window first; the whole input context is plotted but the view opens on the last
     `view_hours` (zoom out to see more: display only, no model input changes).
 
@@ -104,8 +105,8 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
     last = last_observation(obs, origin)
     for model in [m for m in systems if m in set(sel["model"])]:
         g = sel[sel["model"] == model].sort_values("valid_time")
-        color, dash, width = model_style(model)
-        name = model_name(model)
+        color, dash, width = (styles or {}).get(model, model_style(model))
+        name = (names or {}).get(model, model_name(model))
         lead = ((pd.to_datetime(g["valid_time"]) - origin) / pd.Timedelta(hours=1)).round().astype(int)
         first = g.dropna(subset=["point"]).head(1)
         if last is not None and len(first):                   # rendering only: never part of the data
@@ -113,13 +114,21 @@ def forecast_figure(rows: pd.DataFrame, obs: pd.DataFrame, case: pd.Series, vari
                                      mode="lines", line={"color": color, "dash": "dot", "width": max(width - 0.8, 1)},
                                      legendgroup=model, showlegend=False, hoverinfo="skip",
                                      name=f"bridge · {name}", meta="bridge"), row=1, col=1)
+        issued = "arome_lead_h" in g and g.arome_lead_h.notna().any()
+        custom = list(zip(lead, g.arome_lead_h, g.arome_run.astype(str))) if issued else lead
+        hover = ("%{customdata[0]} h after origin · %{customdata[1]} h after AROME initialization"
+                 "<br>AROME initialized %{customdata[2]}" if issued else "%{customdata} h ahead")
+        identifier = "" if names and model in names else f"<br><sub>{model}</sub>"
         fig.add_trace(go.Scatter(x=g["valid_time"], y=g["point"], name=name, mode="lines+markers",
                                  line={"color": color, "dash": dash, "width": width}, marker={"size": 5},
-                                 legendgroup=model, customdata=lead,
-                                 hovertemplate="%{y:.1f} " + u + " · %{customdata} h ahead"
-                                               f"<extra>{name}<br><sub>{model}</sub></extra>"), row=1, col=1)
+                                 legendgroup=model, customdata=custom,
+                                 hovertemplate="%{y:.1f} " + u + " · " + hover +
+                                               f"<extra>{name}{identifier}</extra>"), row=1, col=1)
         if panel:
             err = g["point"].to_numpy() - verif.reindex(pd.to_datetime(g["valid_time"])).to_numpy()
+            if error_rows is not None:
+                saved_errors = error_rows[error_rows.model.eq(model)].set_index("valid_time").err
+                err = g.valid_time.map(saved_errors).to_numpy()
             err = abs(err) if error_mode == "absolute" else err
             fig.add_trace(go.Scatter(x=g["valid_time"], y=err, name=name, mode="lines+markers", showlegend=False,
                                      line={"color": color, "dash": dash, "width": max(width - 0.6, 1.2)},
@@ -156,7 +165,8 @@ NOMINAL = {"coverage80": 0.8, "coverage90": 0.9}
 
 
 def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: str | None,
-                    hatched: frozenset[str] = frozenset()) -> go.Figure:
+                    hatched: frozenset[str] = frozenset(), names: dict | None = None,
+                    styles: dict | None = None) -> go.Figure:
     """Horizontal bars sorted best first; reference system highlighted; values labelled with units."""
     if table.empty:
         return _empty("No scores for this selection")
@@ -169,8 +179,8 @@ def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: 
     else:
         t["key"] = t[metric] if lower_better is not False else -t[metric]
     t = t.sort_values("key", ascending=False)                   # plotly draws bottom-up: best ends on top
-    names = [model_name(m) for m in t["model"]]
-    colors = [model_style(m)[0] for m in t["model"]]
+    names = [(names or {}).get(m, model_name(m)) for m in t["model"]]
+    colors = [(styles or {}).get(m, model_style(m))[0] for m in t["model"]]
     text = [f"{v:.0%}" if cov else f"{v:.2f}{u}" for v in t[metric]]
     fig = go.Figure(go.Bar(
         x=t[metric], y=names, orientation="h", marker={"color": colors, "pattern": {
@@ -193,11 +203,12 @@ def comparison_bars(table: pd.DataFrame, metric: str, variable: str, reference: 
 
 
 def metric_by_lead(table: pd.DataFrame, metric: str, variable: str, models: list[str],
-                   primary: list[str] | None = None, cumulative: bool = False) -> go.Figure:
+                   primary: list[str] | None = None, cumulative: bool = False, spread: bool = False,
+                   names: dict | None = None, styles: dict | None = None) -> go.Figure:
     """Score against lead from `weather_lab.horizon.by_lead`; systems outside `primary` start hidden.
 
     cumulative=False: value at each lead. cumulative=True: value over all leads up to H (a different
-    quantity). Error bars appear only where the table holds a block-bootstrap interval of the mean.
+    quantity). Spread requests use population SD bars; otherwise saved bootstrap intervals are retained.
     """
     df = table[table["model"].isin(models)]
     if df.empty:
@@ -209,21 +220,25 @@ def metric_by_lead(table: pd.DataFrame, metric: str, variable: str, models: list
         g = df[df["model"] == m].sort_values("lead_h")
         if g.empty:
             continue
-        color, dash, width = model_style(m)
-        has_ci = g["ci95_low"].notna().any()
-        err = {"type": "data", "symmetric": False, "array": g["ci95_high"] - g[metric],
-               "arrayminus": g[metric] - g["ci95_low"], "color": _rgba(color, 0.5), "thickness": 1.2,
-               "width": 3} if has_ci else None
+        color, dash, width = (styles or {}).get(m, model_style(m))
+        name = (names or {}).get(m, model_name(m))
+        has_spread = spread and not cumulative and "spread" in g
+        has_ci = not has_spread and g["ci95_low"].notna().any()
+        err = ({"type": "data", "symmetric": True, "array": g.spread,
+                "color": _rgba(color, 0.5), "thickness": 1.2, "width": 3} if has_spread else
+               {"type": "data", "symmetric": False, "array": g["ci95_high"] - g[metric],
+                "arrayminus": g[metric] - g["ci95_low"], "color": _rgba(color, 0.5), "thickness": 1.2,
+                "width": 3} if has_ci else None)
         fmt = ".0%" if cov else ".2f"
         where = "all leads ≤ %{x} h" if cumulative else "%{x} h ahead"
         fig.add_trace(go.Scatter(
-            x=g["lead_h"], y=g[metric], name=model_name(m), mode="lines+markers", error_y=err,
+            x=g["lead_h"], y=g[metric], name=name, mode="lines+markers", error_y=err, legendgroup=m,
             line={"color": color, "dash": dash, "width": width}, marker={"size": 6},
             visible=True if primary is None or m in primary else "legendonly",
-            customdata=list(zip(g["n"], g["n_cases"], g["ci95_low"], g["ci95_high"])),
+            customdata=list(zip(g["n"], g["n_cases"], g["ci95_low"], g["ci95_high"], g["spread"] if "spread" in g else [None] * len(g))),
             hovertemplate=f"%{{y:{fmt}}} · {where}<br>%{{customdata[0]}} pairs from %{{customdata[1]}} forecasts"
                           + ("<br>95% interval of the mean %{customdata[2]:.2f}–%{customdata[3]:.2f}" if has_ci
-                             else "") + "<extra>" + model_name(m) + "</extra>"))
+                             else "<br>±1 population SD of absolute errors %{customdata[4]:.3f}" if has_spread else "") + "<extra>" + name + "</extra>"))
     if cov:
         fig.add_hline(y=NOMINAL[metric], line={"color": INK2, "dash": "dot"},
                       annotation_text=f"nominal {NOMINAL[metric]:.0%}", annotation_position="bottom right")
@@ -236,6 +251,55 @@ def metric_by_lead(table: pd.DataFrame, metric: str, variable: str, models: list
     fig = _layout(fig, title=title, height=470, legend_top=False)
     fig.update_layout(legend={"orientation": "h", "yanchor": "top", "y": -0.2, "x": 0, "font": {"size": 11}},
                       margin={"b": 130})
+    return fig
+
+
+def calendar_errors(table: pd.DataFrame, variable: str, period: str, clock: str,
+                    spread: bool = False, names: dict | None = None, styles: dict | None = None) -> go.Figure:
+    """Descriptive calendar MAE, retaining missing buckets as gaps."""
+    if table.empty or table.mae.isna().all():
+        return _empty("No matched observed pairs for this calendar selection")
+    fig = go.Figure()
+    for model, g in table.groupby("model", sort=False):
+        color, dash, width = (styles or {}).get(model, model_style(model))
+        name = (names or {}).get(model, model_name(model))
+        fig.add_trace(go.Scatter(x=g.bucket, y=g.mae, name=name, mode="lines+markers", marker={"size": 5}, connectgaps=False,
+            error_y={"type": "data", "symmetric": True, "array": g.spread, "color": _rgba(color, 0.5),
+                     "thickness": 1, "width": 3} if spread else None,
+            line={"color": color, "dash": dash, "width": width}, legendgroup=model,
+            customdata=list(zip(g.n, g.n_cases, g.spread)),
+            hovertemplate="%{x}<br>MAE %{y:.3f} " + unit(variable)
+                + "<br>%{customdata[0]} observed pairs · %{customdata[1]} overlapping windows"
+                + "<br>Population SD of absolute errors %{customdata[2]:.3f}<extra>" + name + "</extra>"))
+    clock_label = "target valid time" if clock == "valid_time" else "forecast origin"
+    fig.update_xaxes(title=f"{'Hour of day' if period == 'hour' else 'Date'} by {clock_label} (UTC)")
+    if period == "hour":
+        fig.update_xaxes(tickvals=list(range(0, 24, 3)), range=[0, 23])
+    fig.update_yaxes(title=f"MAE ({unit(variable)})", rangemode="tozero")
+    fig = _layout(fig, title=f"{'Hour-of-day profile' if period == 'hour' else 'Daily MAE'} · {clock_label} (UTC)",
+                   height=440, legend_top=False)
+    fig.update_layout(legend={"orientation": "h", "yanchor": "top", "y": -0.25, "x": 0}, margin={"b": 120})
+    return fig
+
+
+def arome_windows(table: pd.DataFrame, variable: str) -> go.Figure:
+    """A dot per complete station/origin window; never average stations or downsample."""
+    complete = table[table.complete]
+    if complete.empty:
+        return _empty("No complete saved AROME 48-hour windows with all 48 observed pairs")
+    fig = go.Figure()
+    for number, (station, group) in enumerate(complete.groupby("station", sort=True)):
+        fig.add_trace(go.Scatter(x=group.origin, y=group.mae, mode="markers", name=station_label(station),
+            marker={"color": model_style("arome-raw")[0], "size": 5, "opacity": 0.65,
+                    "symbol": ["circle", "square", "diamond", "cross", "x"][number % 5]},
+            customdata=list(zip(group.case_id, group.n)),
+            hovertemplate="Origin %{x}<br>48-hour MAE %{y:.3f} " + unit(variable)
+                + "<br>%{customdata[1]} hourly pairs · leads 1–48"
+                + "<br>%{customdata[0]}<extra>" + station_label(station) + "</extra>"))
+    fig.update_xaxes(title="Forecast origin (UTC)")
+    fig.update_yaxes(title=f"48-hour MAE ({unit(variable)})", rangemode="tozero")
+    fig = _layout(fig, title="AROME · MAE for each complete 48-hour forecast window", height=470, legend_top=False)
+    fig.update_layout(legend={"orientation": "h", "yanchor": "top", "y": -0.2, "x": 0}, margin={"b": 100})
     return fig
 
 

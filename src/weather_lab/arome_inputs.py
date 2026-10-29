@@ -18,7 +18,8 @@ class AromeInputs:
     future_run: np.ndarray
     future_available_at: np.ndarray
 
-    def validate(self, origins, history_times, future_times) -> None:
+    def validate(self, origins, history_times, future_times, decision_origins=None) -> None:
+        decisions = origins if decision_origins is None else decision_origins
         assert len(set(self.fields)) == len(self.fields), "duplicate AROME input fields"
         assert (history_times <= origins[:, None]).all(), "AROME history extends past the origin"
         assert (future_times > origins[:, None]).all(), "AROME future times must follow the origin"
@@ -31,7 +32,7 @@ class AromeInputs:
             assert not np.isinf(values).any(), "infinite AROME input"
             has = np.isfinite(values)
             valid = np.broadcast_to(times[:, None, :], shape)
-            origin = np.broadcast_to(origins[:, None, None], shape)
+            origin = np.broadcast_to(decisions[:, None, None], shape)
             assert (~np.isnat(runs[has]) & ~np.isnat(available[has])).all(), "AROME input without provenance"
             assert (runs[has] <= available[has]).all(), "AROME input published before its run"
             assert (available[has] <= origin[has]).all(), "AROME input unavailable at the origin"
@@ -71,7 +72,7 @@ def build_arome_inputs(frame: pd.DataFrame, cases: pd.DataFrame, origins: np.nda
         raise ValueError("infinite AROME input")
     data = data.dropna(subset=["value"])
     for i, case in enumerate(cases.itertuples()):
-        origin = pd.Timestamp(origins[i], tz="UTC")
+        origin = pd.Timestamp(getattr(case, "origin", pd.Timestamp(origins[i], tz="UTC")))
         sub = data[(data["station"] == case.station) & (data["available_at"] <= origin)]
         past = sub[(sub["available_at"] <= sub["valid_time"]) & (sub["run"] < sub["valid_time"])]
         past = past.sort_values(["run", "available_at"]).drop_duplicates(["variable", "valid_time"], keep="last")
@@ -85,5 +86,6 @@ def build_arome_inputs(frame: pd.DataFrame, cases: pd.DataFrame, origins: np.nda
             runs[k][i] = aligned["run"].to_numpy(dtype="datetime64[ns]").reshape(-1, len(fields)).T
             available[k][i] = aligned["available_at"].to_numpy(dtype="datetime64[ns]").reshape(-1, len(fields)).T
     inputs = AromeInputs(fields, values[0], values[1], runs[0], available[0], runs[1], available[1])
-    inputs.validate(origins, history_times, future_times)
+    decisions = cases["origin"].to_numpy(dtype="datetime64[ns]") if "origin" in cases else origins
+    inputs.validate(origins, history_times, future_times, decisions)
     return inputs

@@ -55,6 +55,8 @@ def audit_table(cfg: Config, case_id: str, variable: str = "t") -> pd.DataFrame:
     run_future = case["arome_run"]
     origin = pd.Timestamp(case["origin"])
     for k, vt in enumerate(batch.future_times[i]):
+        if batch.lead_hours[i, k] <= 0:
+            continue
         vt = pd.Timestamp(vt, tz="UTC")
         a = float(batch.arome[i, j, k])
         rows.append({
@@ -74,11 +76,12 @@ def lead_and_coverage_summary(cfg: Config) -> dict:
     j = batch.variables.index("t")
     has = ~np.isnat(batch.arome_history_run)
     hist_leads = batch.arome_history_lead_h[has]
+    keep = batch.lead_hours > 0
     fut_leads = np.array([(pd.Timestamp(vt, tz="UTC") - pd.Timestamp(r)).total_seconds() / 3600
                           for r, row in zip(batch.cases["arome_run"], batch.future_times) for vt in row])
+    fut_leads = fut_leads[keep.ravel()]
     hist_err = np.abs(batch.arome_history[:, j][has] - batch.history[:, j][has])
-    fut_err = np.abs(batch.arome[:, j] - targets[:, j]).ravel()
-    fut_leads_2d = fut_leads.reshape(batch.arome[:, j].shape).ravel()
+    fut_err = np.abs(batch.arome[:, j] - targets[:, j])[keep]
 
     def by_lead(leads, err):
         df = pd.DataFrame({"lead_h": leads, "abs_err": err}).dropna()
@@ -96,7 +99,7 @@ def lead_and_coverage_summary(cfg: Config) -> dict:
         "future_lead_h": {"min": float(fut_leads.min()), "max": float(fut_leads.max()),
                           "median": float(np.median(fut_leads))},
         "t_abs_err_history_by_lead": by_lead(hist_leads, hist_err),
-        "t_abs_err_future_by_lead": by_lead(fut_leads_2d, fut_err),
+        "t_abs_err_future_by_lead": by_lead(fut_leads, fut_err),
     }
 
 
@@ -192,9 +195,9 @@ def sensitivity(cfg: Config, delta: float = 5.0, case_ids: list[str] | None = No
     t_idx = mA.variables.index("t")
 
     def diff(a, b):
-        d = np.abs(q[a] - q[b])
+        d = np.abs(q[a] - q[b]).transpose(0, 2, 1, 3)[batch.lead_hours > 0]
         return {"max_abs_all_vars": float(d.max()), "max_abs_t": float(d[:, t_idx].max()),
-                "mean_abs_t_median": float(d[:, t_idx, :, 10].mean())}
+                "mean_abs_t_median": float(d[:, t_idx, 10].mean())}
 
     pairs = {"A vs B (future-only AROME added)": diff("A", "B"),
              "A vs C (archived history + future AROME added)": diff("A", "C"),
@@ -267,10 +270,15 @@ def forecast_only_response(cfg: Config, sizes: tuple[str, ...] = ("Timestral-28M
                           arome=mode, arome_fields=cfg["arome"]["fields"])
             ctx, known = m.build_inputs(batch)
             row = known.shape[1] - len(m.arome_fields) + m.arome_fields.index("t")
-            t_ctx, k = ctx.shape[-1], local_lead_h // batch.step_hours - 1
+            t_ctx = ctx.shape[-1]
+            local = batch.lead_hours == local_lead_h
+            if not (local.sum(axis=1) == 1).all():
+                raise ValueError("local diagnostic lead is outside the requested forecast grid")
+            k = local.argmax(axis=1)
+            case_index = np.arange(len(batch.cases))
             variants = {"reorder": known.copy(), "local": known.copy(), "uniform": known.copy()}
             variants["reorder"][:, row, t_ctx:] = known[:, row, t_ctx:][:, ::-1]
-            variants["local"][:, row, t_ctx + k] += delta
+            variants["local"][case_index, row, t_ctx + k] += delta
             variants["uniform"][:, row, t_ctx:] += delta
             z0, m0 = normalized_known_row(fc, ctx, known, h, row)
             q0 = _quantiles(m, ctx, known, h)
@@ -280,12 +288,14 @@ def forecast_only_response(cfg: Config, sizes: tuple[str, ...] = ("Timestral-28M
                 assert np.array_equal(m0, m1), "perturbation changed the observation mask"
                 q1 = _quantiles(m, ctx, kv, h)
                 d = np.abs(q1[:, ti] - q0[:, ti])                      # (N, H, Q)
+                scored = d[batch.lead_hours > 0]
+                others = np.abs(np.delete(q1 - q0, ti, axis=1)).transpose(0, 2, 1, 3)[batch.lead_hours > 0]
                 res[f"{mode}/{name}"] = {
                     "normalized_input_max_abs_change": float(np.abs(z1 - z0).max()),
-                    "t_quantiles_max_abs_change_c": float(d.max()),
-                    "t_median_mean_abs_change_c": float(d[..., 10].mean()),
-                    "t_median_mean_abs_change_at_lead_c": float(d[:, k, 10].mean()),
-                    "other_variables_max_abs_change": float(np.abs(np.delete(q1 - q0, ti, axis=1)).max()),
+                    "t_quantiles_max_abs_change_c": float(scored.max()),
+                    "t_median_mean_abs_change_c": float(scored[..., 10].mean()),
+                    "t_median_mean_abs_change_at_lead_c": float(d[case_index, k, 10].mean()),
+                    "other_variables_max_abs_change": float(others.max()),
                 }
         out["checkpoints"][size] = {"revision": ck.revision, "responses": res}
     return out

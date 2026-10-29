@@ -29,6 +29,12 @@ def cmd_prepare(args) -> None:
     prepare_suite(load_config(args.config))
 
 
+def cmd_forecast_data(args) -> None:
+    from weather_lab.forecast_data import prepare
+
+    prepare(args.config)
+
+
 def cmd_evaluate(args) -> None:
     from weather_lab.evaluate import run_evaluation
 
@@ -225,6 +231,16 @@ def cmd_features_select(args) -> None:
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="weather-lab", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
+    from weather_lab.rag import parser as rag_parser
+
+    rag_parser(sub)
+    from weather_lab.local_benchmark import parser as local_parser
+    local_parser(sub)
+    from weather_lab.hourly_benchmark import CONFIG, command as prepare_hourly
+
+    hourly = sub.add_parser("prepare-hourly-benchmark", help="freeze the hourly 2026 benchmark from its pinned archive")
+    hourly.add_argument("--config", default=str(CONFIG))
+    hourly.set_defaults(func=prepare_hourly)
     data = sub.add_parser("data", help="download / prepare observations and AROME extracts")
     dsub = data.add_subparsers(dest="data_command", required=True)
     for name, fn, help_ in [("fetch", cmd_fetch, "download annual SYNOP files (+ AROME messages) once"),
@@ -232,6 +248,9 @@ def main(argv: list[str] | None = None) -> None:
         sp = dsub.add_parser(name, help=help_)
         sp.add_argument("--config", required=True)
         sp.set_defaults(func=fn)
+    hourly_data = dsub.add_parser("forecast-hourly", help="explicitly refresh hourly Forecast observations; no inference or publication")
+    hourly_data.add_argument("--config", default=str(Path(__file__).resolve().parents[2] / "configs/forecast_hourly.yaml"))
+    hourly_data.set_defaults(func=cmd_forecast_data)
     ev = sub.add_parser("evaluate", help="run every system on the frozen suite and save predictions + scores")
     ev.add_argument("--config", required=True)
     ev.add_argument("--reuse", metavar="RUN_DIR", help="copy predictions of identical systems from an earlier run of "
@@ -339,3 +358,4 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+

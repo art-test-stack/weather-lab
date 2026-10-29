@@ -1,0 +1,10 @@
+# Exploration observations only. Never replaces a frozen suite or its inputs.
+start: '2022-01-01T00:00:00Z'
+history_start: '2021-10-01T00:00:00Z'
+download_cap_mib: 500
+stations:
+  - {id: '07110', national_id: '29075001', department: '29', name: BREST-GUIPAVAS}
+  - {id: '07149', national_id: '91027002', department: '91', name: ORLY}
+  - {id: '07190', national_id: '67124001', department: '67', name: STRASBOURG-ENTZHEIM}
+  - {id: '07630', national_id: '31069001', department: '31', name: TOULOUSE-BLAGNAC}
+  - {id: '07690', national_id: '06088001', department: '06', name: NICE}

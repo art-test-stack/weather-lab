@@ -1,0 +1,108 @@
+protocol: arome-error-context-v1
+version: 1
+status: prospective_design_archive_collection_required
+approved: '2026-10-26'
+collection_start: '2026-10-10T06:00:00Z'
+anchor_rule: First installed daily AROME origin, fixed without consulting forecast errors.
+schedule:
+  history_days: 90
+  validation_origin_days: 30
+  purge_origin_days: 2
+  confirmation_origin_days: 60
+  origin_hour_utc: 6
+  validation_first_origin: '2027-01-08T06:00:00Z'
+  validation_last_origin: '2027-02-06T06:00:00Z'
+  confirmation_first_origin: '2027-02-09T06:00:00Z'
+  confirmation_last_origin: '2027-04-09T06:00:00Z'
+  last_confirmation_label: '2027-04-11T06:00:00Z'
+  missing_data: Never move dates to obtain better coverage or errors; retain unavailable planned cases.
+  calibration: None reserved in this schedule; any fitted comparator must use earlier causal labels.
+  context_reuse: Observations from before each origin may be reused, including validation observations during confirmation.
+  confirmation_rule: Freeze one validation winner before confirmation; score once, without ranking candidates on confirmation.
+stations: ['07110', '07149', '07190', '07630', '07690']
+variables: [t, pmer]
+units: {t: degC, pmer: hPa}
+case_plan:
+  suite: ar-error-context-v1
+  validation_cases_before_input_eligibility: 150
+  confirmation_cases_before_input_eligibility: 300
+  step_hours: 3
+  maximum_native_horizon_hours: 48
+  shared_leads_hours: [3, 6, 9, 12, 15, 18, 21, 24]
+  primary_leads_hours: [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48]
+  eligibility:
+    history_windows_days: [30, 90]
+    minimum_observation_fraction_per_variable: 0.8
+    minimum_residual_fraction_per_variable: 0.8
+    observation_within_hours_per_variable: 24
+    required_selected_run: Same-day 03 UTC, fully available by the 06 UTC origin.
+    required_issued_anchors: All 16 future steps for both variables, even for native 24-hour candidates.
+    observation_latency_hours: 0
+    explicit_observation_availability: Use available_at when provided; otherwise historical zero-latency replay assumption.
+    archive_availability: Complete-run archive Last-Modified proxy, not certified operational dissemination time.
+    future_observations: Never used for input eligibility; missing verification targets handled identically at scoring.
+    freeze: Freeze the shared input mask before errors are computed; no candidate-specific case trimming.
+    candidate_failure: Record failure; no model substitution or promotion on a reduced successful subset.
+model:
+  name: Timestral-209M
+  repository: mistralai/Timestral-209M
+  checkpoint_revision: 9874d252ab0aae16f7f7c999f98f98d6ad7d8365
+  checkpoint_sha256: 1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa
+  package_revision: a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff
+  device: cpu
+  precision: float32
+  torch_threads: 4
+candidate_grid:
+  contexts_days: [30, 90]
+  native_horizons_hours: [24, 48]
+  prediction_target: arome_error
+  residual_definition: latest_qualifying_archived_forecast_v1
+  residual_formula: observation(v) - latest qualifying archived forecast(v), available by min(v, origin).
+  fixed_lead_R2: Separate experiment; must not silently replace this platform residual definition.
+  inverse_transform: Add the selected run's issued forecast at the matching future valid time to every residual quantile.
+  forecast_lead_input: true
+  conditioning: futureonly
+  calendar: false
+  optional_feature_groups: []
+  horizon_rule: Each native context/horizon combination is a different candidate; a 48-hour slice is not native 24-hour inference.
+  feature_followup: Register each additional feature bundle separately before evaluating it on validation; keep this case plan fixed.
+selection:
+  primary: Station-balanced mean of per-station temperature MAEs using forecast medians, 3-48h on common valid pairs.
+  eligible_primary_candidates: Native 48-hour candidates only.
+  shared_24h_comparison: Compare all four candidates on leads 3-24h as a separate secondary endpoint.
+  strongest_simple_comparator: Lowest validation primary MAE among the previously frozen causal AROME correctors.
+  engineering_target_relative_MAE_improvement: 0.02
+  winner_rule: Lowest primary validation MAE meeting the engineering target; otherwise no improvement.
+  tie_rule: Prefer shorter context, then lexicographic candidate id.
+  secondary: [micro_MAE, RMSE, forecast_minus_observation_bias, pinball, coverage80, width80, coverage90, width90]
+  pressure: Separate secondary outcome in hPa; no cross-variable pooling or promotion from pressure gains.
+  uncertainty: Paired 2-day and 7-day time blocks keeping stations and leads together; seed 20261026.
+  context_horizon_feature_selection: Validation only; never select per-case models from realised errors.
+comparators:
+  raw: Original nearest-cell AROME; deterministic, no probabilistic interpretation.
+  corrections: Preserve existing causal bias plus approved C1 seven-day shrinkage and C2 decaying nudging definitions.
+  correction_parameters: Choose parameters on validation only, then freeze algorithms and parameters; causal rolling state may consume earlier confirmation observations available by each origin.
+  prospective_calibration: Any new fitted probabilistic comparator needs a separately frozen earlier-label fit identity.
+prior_evaluations:
+  October_2026: Repeatedly inspected development data; never confirmation.
+  year_2023: Previously used for validation.
+  year_2024: Not certified pristine; excluded from confirmation.
+  year_2025: Already observed frozen no-feature result; not reused for selection.
+  platform_configuration: Earlier 90-day/48-hour all-feature diagnosis had only 8-88 observed residual steps of 720; not evidence of dense 90-day efficacy or an optimum.
+inventory_inputs:
+  observations:
+    path: data/processed/synop_07630-07149-07110-07190-07690_2022-2026.parquet
+    sha256: 0f2cb9781daffa5189746f8ac7166f787e4a1f0748d38977b387b09ba3f990a1
+  forecasts:
+    path: data/processed/arome_arome-issued-v2.parquet
+    sha256: ef21d77eeb190c719ca0d80175e6e94aaf090389d1f8d3978dd7f83c1dcfa1a1
+  development_manifest:
+    path: runs/arome-issued-v2/smoke-features-dev-v1-20261025T115012-54707186/manifest.json
+    sha256: 229a52f4f4754900c44cd725b9ce72900abd1926f1621972d3f4f152a8d4e883
+budget:
+  existing_global_cap_cpu_minutes: 60
+  previous_successful_stage_subtotal_cpu_seconds: 302.48
+  preparation_allocation_cpu_seconds: 120
+  main_batch: Blocked pending archive support; benchmark and record projected cost before granting an inference slot.
+  downloads: No downloads in this preparation; no paid resources.
+execution: Manual commands only; no forecast scheduling, baseline replacement, or Space deployment.

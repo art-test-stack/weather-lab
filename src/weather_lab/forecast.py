@@ -43,6 +43,8 @@ class CaseBatch:
                   cover) at the same history times (<= origin); context-enrichment inputs only.
     station_coords: optional {station: (lat, lon)} for astronomical features.
     arome_inputs: optional named fields, independent of targets; source runs and availability per field.
+    origins: model-axis anchors (history ends here). cases.origin retains the decision time;
+             delayed replay generates bridge steps which are excluded from exported leads.
     """
 
     cases: pd.DataFrame
@@ -67,6 +69,7 @@ class CaseBatch:
         step = np.timedelta64(self.step_hours, "h")
         # Future targets strictly after the origin; history ends at the origin.
         assert (self.future_times[:, 0] == self.origins + step).all(), "first lead must be origin + 1 step"
+        assert (self.origins <= self.decision_origins).all(), "history ends after the decision time"
         if self.arome is not None:
             assert self.arome.shape == (n, v, self.future_times.shape[1])
         if self.arome_history is not None:
@@ -82,7 +85,8 @@ class CaseBatch:
         if self.aux_history is not None:
             assert self.aux_history.shape == (n, len(self.aux_variables or []), t), "aux history shape"
         if self.arome_inputs is not None:
-            self.arome_inputs.validate(self.origins, self.history_times(), self.future_times)
+            self.arome_inputs.validate(self.origins, self.history_times(), self.future_times,
+                                       self.decision_origins)
 
     def subset(self, sl) -> "CaseBatch":
         pick = (lambda a: None if a is None else a[sl])
@@ -95,6 +99,15 @@ class CaseBatch:
     @property
     def horizon(self) -> int:
         return self.future_times.shape[1]
+
+    @property
+    def decision_origins(self) -> np.ndarray:
+        return (self.cases["origin"].to_numpy(dtype="datetime64[ns]")
+                if "origin" in self.cases else self.origins)
+
+    @property
+    def lead_hours(self) -> np.ndarray:
+        return ((self.future_times - self.decision_origins[:, None]) / np.timedelta64(1, "h")).astype(int)
 
     def history_times(self, length: int | None = None) -> np.ndarray:
         """(N, T) absolute times of the last `length` history steps."""
@@ -154,9 +167,9 @@ class ForecastBatch:
             "suite": suite,
             "case_id": cases["case_id"].to_numpy()[idx_c],
             "station": cases["station"].to_numpy()[idx_c],
-            "origin": pd.to_datetime(batch.origins[idx_c], utc=True),
+            "origin": pd.to_datetime(batch.decision_origins[idx_c], utc=True),
             "valid_time": pd.to_datetime(batch.future_times[idx_c, idx_h], utc=True),
-            "lead_h": (idx_h + 1) * batch.step_hours,
+            "lead_h": batch.lead_hours[idx_c, idx_h],
             "variable": np.array(self.variables)[idx_v],
             "model": self.model,
             "model_revision": self.revision,
@@ -173,7 +186,7 @@ class ForecastBatch:
         for col in ("arome_run", "arome_available_at"):
             if col in cases:
                 df[col] = cases[col].to_numpy()[idx_c]
-        return df
+        return df.loc[df["lead_h"] > 0].reset_index(drop=True)
 
 
 def qcol(level: float) -> str:
@@ -266,7 +279,7 @@ class AromeBiasCorrected(Adapter):
         step = np.timedelta64(batch.step_hours, "h")
         n_used = np.zeros(out.shape, dtype=np.int16)
         for i, c in enumerate(batch.cases.itertuples()):
-            origin = pd.Timestamp(batch.origins[i], tz="UTC")
+            origin = pd.Timestamp(batch.decision_origins[i], tz="UTC")
             run0 = pd.Timestamp(c.arome_run)
             hist_t = pd.DatetimeIndex(batch.history_times()[i], tz="UTC")
             hist_pos = {t: k for k, t in enumerate(hist_t)}
@@ -324,6 +337,43 @@ def calendar_features(times: np.ndarray) -> np.ndarray:
     return np.stack([np.sin(a), np.cos(a), np.sin(b), np.cos(b)], axis=1).astype(np.float32)
 
 
+def error_inputs(batch: CaseBatch, variables: list[str], t_ctx: int):
+    """Verified residual history, issued baseline and source-run leads for native adapters."""
+    if batch.arome is None or (batch.arome_history is None and batch.arome_inputs is None):
+        raise ValueError("AROME error prediction needs issued and qualifying archived AROME forecasts")
+    idx = [batch.variables.index(v) for v in variables]
+    baseline = batch.arome[:, idx]
+    for j, name in enumerate(variables):
+        if not np.isfinite(baseline[:, j]).all():
+            raise ValueError(f"AROME error prediction needs an issued {name} forecast at every requested lead")
+    if batch.arome_inputs is not None:
+        fields = [batch.arome_inputs.fields.index(v) for v in variables]
+        archived = batch.arome_inputs.history[:, fields, -t_ctx:]
+    else:
+        archived = batch.arome_history[:, idx, -t_ctx:]
+    history = batch.history[:, idx, -t_ctx:] - archived
+    for j, name in enumerate(variables):
+        if not np.isfinite(history[:, j]).any(axis=-1).all():
+            raise ValueError(f"no observed {name} errors from qualifying archived AROME in this context")
+    runs = pd.to_datetime(batch.cases["arome_run"], utc=True).to_numpy(dtype="datetime64[ns]")
+    if np.isnat(runs).any() or (runs > batch.decision_origins).any():
+        raise ValueError("AROME error prediction needs a source run at or before the forecast origin")
+    future_leads = (batch.future_times - runs[:, None]) / np.timedelta64(1, "h")
+    if not np.isfinite(future_leads).all() or (future_leads <= 0).any():
+        raise ValueError("AROME error prediction needs a source run earlier than every future valid time")
+    if batch.arome_inputs is not None:
+        if not np.array_equal(baseline, batch.arome_inputs.future[:, fields], equal_nan=True):
+            raise ValueError("AROME baseline differs from its named provenance")
+        past_leads = (batch.history_times(t_ctx)[:, None] - batch.arome_inputs.history_run[:, fields, -t_ctx:]) / np.timedelta64(1, "h")
+        past_leads = np.where(np.isfinite(history), past_leads, np.nan)
+        future = np.broadcast_to(future_leads[:, None], (*history.shape[:2], batch.horizon))
+        leads = np.concatenate([past_leads, future], axis=-1)
+    else:
+        past_leads = np.where(np.isfinite(history).any(axis=1), batch.arome_history_lead_h[:, -t_ctx:], np.nan)
+        leads = np.concatenate([past_leads, future_leads], axis=1)[:, None]
+    return history.astype(np.float32), baseline, leads.astype(np.float32)
+
+
 class Timestral(Adapter):
     """Timestral zero-shot inference: no local fine-tuning, no calibration.
 
@@ -352,11 +402,15 @@ class Timestral(Adapter):
     def __init__(self, id: str, variables: list[str], targets: list[str], checkpoint: str, revision: str,
                  context_days: int = 30, calendar: bool = False, arome: str | None = None,
                  arome_fields: list[str] | None = None, batch_size: int = 32, device: str = "cpu",
-                 features: list[str] | dict | None = None, prediction_target: str = "weather", **p):
+                 features: list[str] | dict | None = None, prediction_target: str = "weather", precision: str = "native", **p):
         from weather_lab import features as feats
 
         if prediction_target not in ("weather", "arome_error"):
             raise ValueError(f"unknown prediction target {prediction_target!r}")
+        from weather_lab import precision as precision_module
+        self.precision = precision
+        if precision != "native":
+            p["precision"] = precision_module.describe(precision)
         self.prediction_target = prediction_target
         self.feature_spec = feats.normalize(features or [])     # {group: complete parameters}
         self.features = list(self.feature_spec)
@@ -388,6 +442,9 @@ class Timestral(Adapter):
         """(N, t_ctx) historical segment of the AROME covariate row for batch variable `j`."""
         n = len(batch.cases)
         if self.arome_mode == "archived":
+            if batch.arome_inputs is not None:
+                field = batch.arome_inputs.fields.index(batch.variables[j])
+                return batch.arome_inputs.history[:, field, -t_ctx:]
             if batch.arome_history is None:
                 raise ValueError(f"{self.id} needs archived historical AROME in the batch")
             return batch.arome_history[:, j, -t_ctx:]
@@ -397,27 +454,7 @@ class Timestral(Adapter):
 
     def error_inputs(self, batch: CaseBatch) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Residual history, issued baseline and lead row; original observation inputs stay intact."""
-        if batch.arome is None or batch.arome_history is None:
-            raise ValueError("AROME error prediction needs issued and qualifying archived AROME forecasts")
-        t_ctx = self.context_steps(batch.step_hours)
-        idx = [batch.variables.index(v) for v in self.variables]
-        baseline = batch.arome[:, idx]
-        for j, name in enumerate(self.variables):
-            if not np.isfinite(baseline[:, j]).all():
-                raise ValueError(f"AROME error prediction needs an issued {name} forecast at every requested lead")
-        history = batch.history[:, idx, -t_ctx:] - batch.arome_history[:, idx, -t_ctx:]
-        for j, name in enumerate(self.variables):
-            if not np.isfinite(history[:, j]).any(axis=-1).all():
-                raise ValueError(f"no observed {name} errors from qualifying archived AROME in this context")
-        runs = pd.to_datetime(batch.cases["arome_run"], utc=True).to_numpy(dtype="datetime64[ns]")
-        if np.isnat(runs).any() or (runs > batch.origins).any():
-            raise ValueError("AROME error prediction needs a source run at or before the forecast origin")
-        future_leads = (batch.future_times - runs[:, None]) / np.timedelta64(1, "h")
-        if not np.isfinite(future_leads).all() or (future_leads <= 0).any():
-            raise ValueError("AROME error prediction needs a source run earlier than every future valid time")
-        past_leads = np.where(np.isfinite(history).any(axis=1), batch.arome_history_lead_h[:, -t_ctx:], np.nan)
-        leads = np.concatenate([past_leads, future_leads], axis=1)[:, None].astype(np.float32)
-        return history.astype(np.float32), baseline, leads
+        return error_inputs(batch, self.variables, self.context_steps(batch.step_hours))
 
     def build_inputs(self, batch: CaseBatch) -> tuple[np.ndarray, np.ndarray | None]:
         """(context (N, V, T), known covariates (N, C, T + H) or None) exactly as passed to Timestral."""
@@ -455,9 +492,6 @@ class Timestral(Adapter):
             return None, None, {}
         return feats.build(self.feature_spec, batch, self.context_steps(batch.step_hours))
 
-    def past_covariates(self, batch: CaseBatch) -> np.ndarray | None:
-        return self.feature_rows(batch)[0]
-
     def predict(self, batch: CaseBatch) -> ForecastBatch:
         import torch
 
@@ -472,14 +506,16 @@ class Timestral(Adapter):
         h = batch.horizon
         out = np.full((len(ctx), len(idx), h, len(fc.quantile_levels)), np.nan, dtype=np.float32)
         t0 = time.perf_counter()
-        with item.lock, torch.inference_mode():   # inputs are per call; the lock guards the shared module
+        from weather_lab import precision as precision_module
+        with item.lock, torch.inference_mode(), precision_module.inference(self.precision, self.device) as precision_guard:
+            # Inputs are per call; precision contexts never mutate the cached model.
             for s in range(0, len(ctx), self.batch_size):
                 sl = slice(s, s + self.batch_size)
                 res = fc.forecast(ctx[sl], prediction_length=h,
                                   known_covariates=None if known is None else known[sl],
                                   past_covariates=None if past is None else past[sl],
                                   clip_nonnegative=False)  # temperatures and wind components can be negative
-                out[sl] = res.quantiles.cpu().numpy()
+                out[sl] = res.quantiles.float().cpu().numpy()
         residual_info = {}
         if self.prediction_target == "arome_error":
             _, baseline, _ = self.error_inputs(batch)
@@ -497,6 +533,8 @@ class Timestral(Adapter):
                                    "known_covariate_rows": 0 if known is None else known.shape[1],
                                    "past_covariate_rows": 0 if past is None else past.shape[1],
                                    **residual_info,
+                                   **({"precision": precision_module.describe(self.precision),
+                                       "narrowed_fp64_ops": precision_guard.narrowed_fp64_ops} if precision_guard else {}),
                                    **({"feature_inputs": feat_report} if feat_report else {})})
 
     def latency_probe(self, batch: CaseBatch, repeats: int = 5) -> dict:
@@ -516,7 +554,7 @@ class Timestral(Adapter):
 def _registry() -> dict:
     from weather_lab.models import CHECKPOINTS as REGISTRY
 
-    return REGISTRY
+    return {name: ck for name, ck in REGISTRY.items() if ck.family == "timestral"}
 
 
 CHECKPOINTS = {k: (c.repo, c.revision, c.mb) for k, c in _registry().items()}   # (repo, revision, MB)
@@ -616,8 +654,11 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     from weather_lab import features as feats
     from weather_lab import predcache
     from weather_lab.models import offline, prefetch
+    from weather_lab.forecast_config import ForecastConfig, _FROM_MODE, build_adapter
 
-    ck = _registry()[size]
+    from weather_lab.models import CHECKPOINTS as REGISTRY
+
+    ck = REGISTRY[size]
     if prediction_target not in ("weather", "arome_error"):
         raise ValueError(f"unknown prediction target {prediction_target!r}")
     correction = prediction_target == "arome_error"
@@ -631,24 +672,31 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
     horizon_h = horizon_steps * step_hours
     flabel = "".join(" +" + n + ("*" if feats.non_default({n: p}) else "") for n, p in spec.items())
     method_label = " +AROME error correction" if correction else ""
-    model = Timestral(f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
-                      f"{AROME_LABELS[arome_mode]}{flabel}{method_label} [{device}]", variables, targets=variables,
-                      checkpoint=ck.repo, revision=ck.revision, context_days=context_days, calendar=calendar,
-                      arome=arome_mode, arome_fields=["t", "pmer"], batch_size=1, device=device, features=spec,
-                      prediction_target=prediction_target)
-    ctx, known = model.build_inputs(batch)
-    past, _, feat_report = model.feature_rows(batch)
+    cfg = ForecastConfig.make(ck.name, _FROM_MODE[arome_mode], spec, context_days=context_days,
+                              horizon_h=horizon_h, calendar=calendar, targets=tuple(variables),
+                              step_hours=step_hours, prediction_target=prediction_target)
+    model = build_adapter(cfg, f"exploratory {size} ctx{context_days}d h{horizon_h}{' +cal' if calendar else ''}"
+                          f"{AROME_LABELS[arome_mode]}{flabel}{method_label} [{device}]",
+                          arome=arome_mode, arome_fields=["t", "pmer"], batch_size=1, device=device)
+    native = model.build_inputs(batch)
+    ctx, known = native[:2]
+    if ck.family == "t0":
+        past, feat_report = None, native[2]
+    else:
+        past, _, feat_report = model.feature_rows(batch)
     for row, share in (feat_report.get("observed_fraction") or {}).items():
         if share == 0:      # an empty covariate row is masked but not neutral: never run it silently
             raise ValueError(f"feature row '{row}' has no observed value in the {context_days}-day context before "
                              "this forecast time")
-    payload = {"adapter": model.kind, "adapter_version": Timestral.ADAPTER_VERSION,
-               "preprocessing": Timestral.PREPROCESSING_VERSION, "checkpoint": ck.repo, "revision": ck.revision,
+    payload = {"adapter": model.kind, "adapter_version": model.ADAPTER_VERSION,
+               "preprocessing": model.PREPROCESSING_VERSION, "checkpoint": ck.repo, "revision": ck.revision,
                "variables": variables, "station": case["station"], "origin": str(case["origin"]),
                "horizon_steps": horizon_steps, "step_hours": step_hours, "context_steps": ctx.shape[-1],
                "calendar": calendar, "arome_mode": arome_mode, "arome_run": case.get("arome_run") if arome_mode else None,
                "quantile_levels": list(QUANTILE_LEVELS), "device": device, "dtype": "float32",
                "torch": torch.__version__, "stochastic": "none (deterministic forward pass)"}
+    if ck.family == "t0":
+        payload.update(inference_options=model.options, runtime="tfc-t0==0.6.0")
     if spec:     # feature definitions (name, version, role, rows, parameters); actual values/masks hashed below
         payload["features"] = feats.definition(spec)
         payload["arome_history_runs"] = sorted({str(r) for r in np.ravel(batch.arome_history_run)

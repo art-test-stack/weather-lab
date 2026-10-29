@@ -80,13 +80,13 @@ FAMILIES: dict[str, Family] = {
         native_quantiles=TIMESTRAL_QUANTILES, max_context=None, max_horizon=None,
         runtime="PyTorch (timestral @ a534bdb)", status="integrated",
         checkpoints=("Timestral-5M", "Timestral-28M", "Timestral-209M")),
-    # Next candidate, NOT integrated: capabilities from the model card (2026-10-25), to be rechecked and
-    # pinned (package version + weight revision) when the adapter is written. See docs/adding_a_model.md.
     "t0": Family(
-        "TFC t0", adapter=None, past_covariates=True, known_covariates=True,
-        missing_values="to verify against tfc-t0", native_quantiles=None, max_context=None, max_horizon=None,
-        runtime="tfc-t0 >= 0.6.0 (PyTorch or MLX)", status="planned",
-        notes="theforecastingcompany/t0-gamma; quantile levels, limits and revision to pin at integration"),
+        "TFC t0", adapter="t0", past_covariates=True, known_covariates=True,
+        missing_values="NaN means missing; past rows are jointly forecast native variates",
+        native_quantiles=TIMESTRAL_QUANTILES, max_context=None, max_horizon=1024,
+        runtime="tfc-t0==0.6.0 (PyTorch)", status="integrated",
+        notes="Research adapter; runtime installed, weights require explicit setup and are not in Space preload",
+        checkpoints=("t0-gamma",)),
 }
 
 CHECKPOINTS: dict[str, Checkpoint] = {c.name: c for c in (  # pinned Hub revisions inspected on 2026-10-24
@@ -97,6 +97,9 @@ CHECKPOINTS: dict[str, Checkpoint] = {c.name: c for c in (  # pinned Hub revisio
     Checkpoint("Timestral-209M", "timestral", "mistralai/Timestral-209M",
                "9874d252ab0aae16f7f7c999f98f98d6ad7d8365", 837,
                "1456effb9927e3daa8c7234f10497e3424233869245a9c72b8ecebaf7ad2b7fa"),
+    Checkpoint("t0-gamma", "t0", "theforecastingcompany/t0-gamma",
+               "e08aee083778f1f32da4974c0a34276776a35c52", 1023,
+               "1603e255629be22ea45518b502f16c55d06821c7090a1a851673e779e9c245a6"),
 )}
 
 
@@ -218,23 +221,46 @@ class ModelCache:
 
     def _load(self, ck: Checkpoint, device: str, dtype: str) -> Loaded:
         import torch
-        from timestral import TimestralForecaster
 
         if dtype != "float32":
-            raise ValueError("only float32 inference is supported for Timestral here")
+            raise ValueError("only float32 inference is supported here")
+        if ck.family not in ("timestral", "t0"):
+            raise CheckpointError(f"No model loader for family {ck.family!r}")
+        if ck.family == "t0":
+            from importlib.metadata import PackageNotFoundError, version
+
+            try:
+                runtime = version("tfc-t0")
+            except PackageNotFoundError as e:
+                raise CheckpointError("t0 requires the pinned tfc-t0==0.6.0 runtime; run uv sync") from e
+            if runtime != "0.6.0":
+                raise CheckpointError(f"t0 runtime {runtime} differs from pinned tfc-t0==0.6.0")
         meta = prefetch(ck)                                 # local files (or an actionable error)
         t0 = time.perf_counter()
         # Load from the local snapshot directory: no Hub request, whatever the online state.
-        fc = TimestralForecaster.from_pretrained(meta["path"], device=device)
-        fc.model.eval()
-        n = int(sum(p.numel() for p in fc.model.parameters()))
+        if ck.family == "timestral":
+            from timestral import TimestralForecaster
+
+            fc = TimestralForecaster.from_pretrained(meta["path"], device=device)
+            module = fc.model
+            known, levels = bool(fc.supports_known_covariates), list(fc.quantile_levels)
+        else:
+            from t0 import T0Forecaster
+
+            fc = T0Forecaster.from_pretrained(meta["path"], local_files_only=True).to(device)
+            module = fc
+            if fc.config.xpos_scale_layout != "halves" or fc.config.scaler_zero_no_value is not False:
+                raise CheckpointError("t0-gamma config conventions were not loaded correctly")
+            known, levels = True, list(fc.config.quantile_levels)
+        module.eval()
+        n = int(sum(p.numel() for p in module.parameters()))
         with _STATS_LOCK:
             STATS["loads"] += 1
         info = {"first_load_s": round(time.perf_counter() - t0, 3), "weights_were_cached": not meta["downloaded"],
                 "weights_path": meta["path"], "device": device, "dtype": dtype,
                 "torch_threads": torch.get_num_threads(), "n_parameters": n,
-                "supports_known_covariates": bool(fc.supports_known_covariates),
-                "quantile_levels": list(fc.quantile_levels)}
+                "supports_known_covariates": known, "quantile_levels": levels,
+                **({"tfc_t0": runtime} if ck.family == "t0" else {})}
         return Loaded(fc, info, threading.Lock(), 4 * n)
 
     def _evict(self, keep: tuple) -> None:
@@ -274,3 +300,4 @@ def checkpoint_status() -> list[dict]:
         rows.append({"checkpoint": c.name, "repo": c.repo, "revision": c.revision[:12], "on_disk": folder is not None,
                      "mb": round(size / 1e6), "path": str(folder) if folder else ""})
     return rows
+

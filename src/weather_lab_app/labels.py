@@ -69,6 +69,15 @@ MODELS = {
         "As Timestral 209M · 30-day history, plus 3 h and 24 h tendencies of observed temperature and pressure. Inference only, no training."),
 }
 
+# RAG pilot systems live in their separate research tab and artifact namespace.
+for _mid, _name, _description, _colour in [
+    ("analogue-level", "Weather analogues · levels", "Weighted historical continuations retrieved by weather levels.", "#718096"),
+    ("analogue-shape", "Weather analogues · shape", "Endpoint-aligned continuations retrieved by recent trajectory shape.", "#4a5568"),
+    ("timestral-209m", "Timestral 209M", "Pinned Timestral with observation history and calendar inputs.", "#184f95"),
+    ("t0-gamma", "t0-gamma", "Pinned t0-gamma with observation history and calendar inputs.", "#805ad5"),
+]:
+    MODELS[_mid] = (_name, _description)
+
 # One colour family per kind of system: observations ink, Timestral blues, Timestral+AROME teal,
 # AROME error correction purple, AROME orange, simple references greys.
 OBS_COLOR = "#0b0b0b"
@@ -104,13 +113,22 @@ STYLE = {
 }
 # Colour family per model family for ids without an explicit STYLE entry (next family: TFC t0, browns).
 FAMILY_STYLE = {"t0-": ("#a0522d", "solid", 2.4)}
+for _mid, _colour in [("analogue-level", "#718096"), ("analogue-shape", "#4a5568"),
+                      ("timestral-209m", "#184f95"), ("t0-gamma", "#805ad5")]:
+    STYLE[_mid] = (_colour, "solid", 2.4)
+for _base in ("timestral-209m", "t0-gamma"):
+    for _method in ("level", "shape"):
+        _mid = f"{_base}-rag-{_method}"
+        MODELS[_mid] = (f"{MODELS[_base][0]} + RAG · {_method}",
+                        "Retrieved pre-2026 analogue trajectories passed as native known covariates; no fine-tuning.")
+        STYLE[_mid] = (STYLE[_base][0], "dash" if _method == "shape" else "dot", 2.4)
 # Systems whose inputs differ in kind (not just in model): hatched in comparisons, explained in the summary.
 DIFFERENT_INPUT = frozenset({"timestral-28m-mv-cal-arome-substobs", "timestral-209m-mv-cal-arome-substobs",
                              "timestral-28m-mv-cal-arome"})
 
 
 def model_name(mid: str) -> str:
-    if mid.startswith("timestral-dev "):
+    if mid.startswith(("timestral-dev ", "t0-dev ")):
         _, ck, target, conditioning, _ = mid.split()
         method = "AROME error correction" if target == "arome_error" else \
             "direct + AROME" if conditioning != "none" else "direct"
@@ -119,14 +137,28 @@ def model_name(mid: str) -> str:
         checkpoint = mid.split()[1].replace("Timestral-", "Timestral ")
         method = "AROME error correction" if "+AROME error correction" in mid else \
             "direct + AROME" if " +AROME " in mid else "direct"
+        if "+RAG " in mid:
+            method = "RAG · " + mid.split("+RAG ", 1)[1].split()[0]
+            if "+error-cases" in mid:
+                method = "AROME-error " + method
+            if "+AROME error correction" in mid:
+                method += " · residual prediction"
+            elif " +AROME " in mid:
+                method += " + AROME"
         return f"{checkpoint} · {method}"
     return MODELS.get(mid, (mid, ""))[0]
 
 
 def model_description(mid: str) -> str:
-    if mid.startswith("timestral-dev "):
+    if mid.startswith(("timestral-dev ", "t0-dev ")):
         return "Explicit full-suite development run with recorded configuration; inference only, no local fine-tuning."
     if mid.startswith("exploratory"):
+        if "+error-cases" in mid:
+            return ("Retrieved verified errors from earlier issued AROME cases, with archived AROME conditioning. "
+                    "Only fully verified cases before the query qualify; no fine-tuning or demonstrated improvement claim.")
+        if "+RAG " in mid:
+            return ("Historical measured analogue trajectories from a verified pre-2026 index, supplied as native "
+                    "known covariates. Hourly observations delayed 3 h; no fine-tuning; outside frozen benchmarks.")
         if "+AROME error correction" in mid:
             return ("Issued AROME + Timestral-predicted observation-minus-AROME error; archived error history, "
                     "forecast lead and selected inputs. Inference only, no local fine-tuning; outside the frozen benchmark.")
@@ -135,10 +167,14 @@ def model_description(mid: str) -> str:
 
 
 def model_style(mid: str) -> tuple[str, str, float]:
-    if mid.startswith("timestral-dev "):
+    if mid.startswith(("timestral-dev ", "t0-dev ")):
         _, _, target, conditioning, _ = mid.split()
+        if mid.startswith("t0-dev "):
+            return ("#805ad5", "solid", 2.8)
         return ("#6250d6" if target == "arome_error" else "#0f7a54" if conditioning != "none" else "#184f95", "solid", 2.8)
     if mid.startswith("exploratory"):
+        if mid.startswith("exploratory t0-gamma "):
+            return ("#805ad5", "longdash", 2.2)
         if "+AROME error correction" in mid:
             return ("#6250d6", "solid", 2.8)
         return ("#0f7a54" if " +AROME " in mid else "#184f95", "longdash", 2.2)
@@ -169,6 +205,25 @@ def unit(v: str) -> str:
 
 # Experiments shown in the app (benchmark id -> presentation). `headline` drives the overview tiles.
 EXPERIMENTS = {
+    "rag-arome-error-2026-v1": {
+        "name": "AROME-error RAG · verified earlier cases",
+        "status": "Development research",
+        "short": "Orly and Blagnac · genuine issued AROME · causal error retrieval",
+        "scope": "Past weather, recent verified errors and the issued forecast identify similar earlier AROME cases.",
+        "caveat": "Only completely verified earlier cases qualify. No fine-tuning or demonstrated improvement claim.",
+        "headline": [], "reference": "arome-raw", "default_systems": [], "band": "",
+    },
+    "rag-weather-2026-v1": {
+        "name": "Weather RAG · 2026 replay",
+        "status": "Development research",
+        "short": "2022–2025 retrieval archive · daily 2026 cases · separate 24/48 h runs",
+        "scope": "Hourly station observations; rolling contexts; immutable archive, index and evaluation artifacts.",
+        "caveat": "Missing issued forecasts remain unavailable; publication times use explicit replay assumptions.",
+        "headline": ["arome-raw", "timestral-209m", "t0-gamma"],
+        "reference": "arome-raw",
+        "default_systems": ["arome-raw", "timestral-209m", "t0-gamma"],
+        "band": "",
+    },
     "arome-issued-v2": {
         "name": "AROME vs Timestral · Oct 2026",
         "status": "Integration study",
@@ -242,3 +297,29 @@ SETUP_NAMES = {
 }
 DEFAULT_EXPERIMENT = "arome-issued-v2"
 EXPERIMENT_ORDER = ["arome-issued-v2", "synop-ctxval-2023-v1", "synop-historical-v1", "arome-issued-v1"]
+
+EXPERIMENTS["hourly-explorer-v1"] = {
+    "name": "Hourly exploration · 2022–latest", "status": "Exploratory",
+    "scope": "Five stations, hourly UTC observations from January 2022 through each station's last recorded hour.",
+    "short": "Hourly observations · 2022–latest · forecasts run only when requested",
+    "caveat": "QC gaps remain missing. Historical observations assume availability at validity; no held-out claim.",
+    "headline": [], "default_systems": [], "band": None, "reference": None, "compare": {},
+}
+
+
+EXPERIMENTS["hourly-2026-v2"] = {
+    "name": "2026 · hourly 48-hour windows · Orly and Blagnac", "status": "Development replay",
+    "scope": "Every UTC hour from January 2026 through the last measured record; 1–48 h leads.",
+    "caveat": "Overlapping windows; observations and issued AROME use a 3-hour replay availability assumption.",
+    "headline": ["persistence"], "reference": "persistence", "default_systems": ["persistence"],
+    "band": None, "sample": "Hourly 2026 station observations", "benchmark_only": True,
+}
+for _new, _old in [("rag-weather-2026-hourly-v2", "rag-weather-2026-v1"),
+                   ("rag-arome-error-2026-hourly-v2", "rag-arome-error-2026-v1")]:
+    EXPERIMENTS[_new] = {**EXPERIMENTS[_old], "name": EXPERIMENTS[_old]["name"] + " · hourly sliding windows"}
+
+EXPERIMENTS["hourly-2026-v3"] = {**EXPERIMENTS["hourly-2026-v2"],
+                                "caveat": "All available three-hourly AROME issues; incomplete windows remain unavailable."}
+for _new, _old in [("rag-weather-2026-hourly-v3", "rag-weather-2026-hourly-v2"),
+                   ("rag-arome-error-2026-hourly-v3", "rag-arome-error-2026-hourly-v2")]:
+    EXPERIMENTS[_new] = {**EXPERIMENTS[_old], "name": EXPERIMENTS[_old]["name"] + " · expanded issues"}

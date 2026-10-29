@@ -180,6 +180,73 @@ def _vals(app, d):
     return [d[k] for k in app.DRAFT_KEYS]
 
 
+@needs_example
+def test_forecast_t0_routing_and_rag_draft_validation(app_env):
+    app, fake, counters, a = app_env
+    d = {**a["draft"], "size": "t0-gamma", "conditioning": "none"}
+    before = counters()
+    cfg, issues = app.draft_config(d)
+    assert cfg.model == "t0-gamma" and not issues
+    assert counters() == before
+    result, _ = app.run_forecast(*_vals(app, d), a)
+    assert result["applied"]["config"].model == "t0-gamma"
+    assert fake.inference == 1
+    rag = {**d, "retrieval_method": "shape", "retrieval_index": "a" * 64, "ctx": 30,
+           "horizon": 24, "variable": "t", "features": []}
+    cfg, issues = app.draft_config(rag)
+    assert not issues and cfg.step_hours == 1 and cfg.targets == ("t", "pmer")
+    assert app.saved_match(rag, cfg) is None
+    assert "RAG shape" in app.applied_text({**a, "config": cfg})
+    _, issues = app.draft_config({**rag, "retrieval_index": ""})
+    assert any(i.kind == "unavailable" and i.subject == "retrieval" for i in issues)
+    _, issues = app.draft_config({**rag, "variable": "u"})
+    assert any(i.kind == "unsupported" and i.subject == "retrieval" for i in issues)
+
+
+@needs_example
+def test_rag_conditioning_draft_uses_no_frozen_arome_availability(app_env, monkeypatch):
+    app, fake, counters, applied = app_env
+    d = {**applied["draft"], "conditioning": "archived", "retrieval_method": "shape",
+         "retrieval_index": "a" * 64, "ctx": 30, "horizon": 48, "features": []}
+    def no_frozen_availability(*args):
+        pytest.fail("RAG conditioning must resolve the selected archive on Run")
+    monkeypatch.setattr(app, "availability", no_frozen_availability)
+    before = counters()
+    cfg, issues = app.draft_config(d)
+    assert not issues and cfg.conditioning == "archived"
+    app.draft_feedback(*_vals(app, d), applied, {"busy": False})
+    assert counters() == before
+
+
+@needs_example
+def test_forecast_rag_cache_route_and_presentation_reuse(app_env, monkeypatch):
+    from weather_lab import rag_forecast
+
+    app, fake, counters, a = app_env
+    d = {**a["draft"], "size": "t0-gamma", "conditioning": "none", "ctx": 30, "horizon": 24,
+         "retrieval_method": "shape", "retrieval_index": "a" * 64}
+    calls = []
+
+    def cached(case, cfg, **kwargs):
+        calls.append(kwargs)
+        mid = "exploratory t0-gamma ctx30d h24 +RAG shape " + cfg.retrieval_index
+        frame = _frame(mid, case, cfg.horizon_h)
+        frame = frame[frame.variable.isin(cfg.targets)]
+        return frame, {"cache_hit": True, "key": "rag-cache", "settings": {
+            "checkpoint": cfg.model, "retrieval_method": "shape", "archive_id": "b" * 64,
+            "context_days": 30, "context_steps": 720, "horizon_steps": 27, "step_hours": 1}}
+
+    monkeypatch.setattr(rag_forecast, "forecast", cached)
+    result, message = app.run_forecast(*_vals(app, d), a)
+    assert result and "cached exploratory" in message and calls == [{"device": "cpu", "lookup_only": True}]
+    new = result["applied"]
+    assert new["config"].retrieval_index == "a" * 64 and fake.calls == 0
+    again, message = app.run_forecast(*_vals(app, {**d, "variable": "pmer"}), new)
+    assert again and "presentation settings" in message and len(calls) == 1
+    applied, _, changed = app.apply_if_current(result, *_vals(app, {**d, "retrieval_index": "c" * 64}), a, "")
+    assert applied is a and not changed
+
+
 def _run(app, d, applied):
     """Run forecast followed by the apply step with the same draft (the click chain)."""
     res, msg = app.run_forecast(*_vals(app, d), applied)
@@ -271,14 +338,22 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     demo = app.init(run_bootstrap=False)
     h = demo.wl
     main_metric = dict(zip(app.DRAFT_KEYS, h["draft"]))["metric"]
-    assert main_metric.label == h["benchmark_metric"].label == "Main metric"
-    assert main_metric.value == h["benchmark_metric"].value == "mae"
+    assert main_metric.label == "Main metric"
+    assert main_metric.value == "mae"
     assert {v for _, v in main_metric.choices} == {"mae", "rmse"}
-    assert {"mae", "rmse"} <= {v for _, v in h["benchmark_metric"].choices}
+    controls = dict(zip(app.DRAFT_KEYS, h["draft"]))
+    assert "t0-gamma" in {v for _, v in controls["size"].choices}
+    assert {v for _, v in controls["retrieval_method"].choices} == {"none", "level", "shape"}
     assert any(c.get("props", {}).get("label") == "Forecast" for c in demo.config["components"])
     overview = h["render"]
     protected = {h["applied"]._id} | {c._id for c in overview if c not in h["draft"]}
     fns = demo.fns
+    load_callbacks = {fn.name for fn in fns.values() if any(t[1] == "load" for t in fn.targets)}
+    assert "refresh_retrieval" in load_callbacks
+    assert "refresh" not in load_callbacks
+    tabs = [c["props"]["label"] for c in demo.config["components"] if c["type"] == "tabitem"]
+    assert tabs == ["Forecast", "Benchmark"]
+    assert not any("Execute or replay" in str(c.get("props", {}).get("value", "")) for c in demo.config["components"])
 
     def root(fn):
         while fn.trigger_after is not None:
@@ -291,7 +366,7 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
         r = root(fn)
         writes = {o._id for o in fn.outputs} & protected
         roots = {(t[0], t[1]) for t in r.targets}
-        if any(t[0] in edit_ids and t[1] == "input" for t in roots):
+        if any(t[0] in edit_ids and t[1] in ("input", "change") for t in roots):
             assert fn.show_progress == "hidden", fn.name
         if writes:
             assert roots <= {(h["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
@@ -304,23 +379,16 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     worker = next(f for f in fns.values() if f.fn is app.run_captured)
     assert worker.trigger_only_on_success and worker.inputs == [h["captured_request"]]
     assert any(f.fn is app.finish_forecast for f in fns.values())
-    from weather_lab_app import benchmark as bench
-
-    b = h["benchmark"]
-    assert not draft_ids & {c._id for c in b["draft"]}
-    protected_b = {b["applied"]._id} | {c._id for c in b["render"]}
-    for fn in fns.values():
-        roots = {(t[0], t[1]) for t in root(fn).targets}
-        if {o._id for o in fn.outputs} & protected_b:
-            assert roots <= {(b["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
-        if roots & {(c._id, "input") for c in b["draft"]}:
-            assert not ({o._id for o in fn.outputs} & protected_b)
-            assert fn.fn in (bench.feedback, bench.on_suite, bench.on_saved)
-            assert fn.show_progress == "hidden"
-    click = [f for f in fns.values() if (b["run"]._id, "click") in f.targets]
-    assert len(click) == 1 and click[0].fn is bench.begin and click[0].trigger_mode == "once"
-    worker = next(f for f in fns.values() if f.fn is bench.execute)
-    assert worker.trigger_only_on_success and worker.inputs == [b["captured_request"]]
+    b = h["saved_benchmark"]
+    if b is not None:
+        assert not draft_ids & {c._id for c in b["draft"]}
+        protected_b = {b["applied"]._id} | {c._id for c in b["render"]}
+        for fn in fns.values():
+            roots = {(t[0], t[1]) for t in root(fn).targets}
+            if {o._id for o in fn.outputs} & protected_b:
+                assert roots <= {(b["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
+            if roots & {(c._id, "input") for c in b["draft"]}:
+                assert fn.name == "edit" and not ({o._id for o in fn.outputs} & protected_b)
 
 
 @needs_example

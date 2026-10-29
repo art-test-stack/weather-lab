@@ -38,6 +38,9 @@ class ForecastConfig:
     targets: tuple[str, ...] = TARGETS
     step_hours: int = 3
     prediction_target: str = "weather"
+    retrieval_method: str = "none"
+    retrieval_index: str = ""
+    precision: str = "native"
 
     @classmethod
     def make(cls, model: str, conditioning: str = "none", features=(), **kw) -> "ForecastConfig":
@@ -45,6 +48,10 @@ class ForecastConfig:
             raise ValueError(f"conditioning {conditioning!r}; one of {list(CONDITIONING)}")
         if kw.get("prediction_target", "weather") not in PREDICTION_TARGETS:
             raise ValueError(f"forecast method must be one of {list(PREDICTION_TARGETS)}")
+        if kw.get("retrieval_method", "none") not in ("none", "level", "shape"):
+            raise ValueError("retrieval method must be none, level or shape")
+        from weather_lab.precision import describe as precision_description
+        precision_description(kw.get("precision", "native"))
         spec = feats.normalize(features)
         return cls(model, conditioning, tuple((n, tuple(sorted(p.items()))) for n, p in spec.items()), **kw)
 
@@ -63,13 +70,48 @@ class ForecastConfig:
     def forecast_part(self) -> tuple:
         """Everything that determines the predictions except the horizon (a saved forecast can be sliced)."""
         return (self.model, self.conditioning, self.features, self.calendar, self.context_days, self.targets,
-                self.step_hours, self.prediction_target)
+                self.step_hours, self.prediction_target, self.retrieval_method, self.retrieval_index, self.precision)
 
     def as_dict(self) -> dict:
-        return {"model": self.model, "conditioning": self.conditioning, "arome_mode": self.arome_mode,
+        result = {"model": self.model, "conditioning": self.conditioning, "arome_mode": self.arome_mode,
                 "features": feats.definition(self.feature_spec), "calendar": self.calendar,
                 "context_days": self.context_days, "horizon_h": self.horizon_h, "targets": list(self.targets),
                 "step_hours": self.step_hours, "prediction_target": self.prediction_target}
+        if self.retrieval_method != "none":
+            result.update(retrieval_method=self.retrieval_method, retrieval_index=self.retrieval_index,
+                          observation_delay_hours=3)
+        if self.precision != "native":
+            from weather_lab.precision import describe
+            result["precision"] = describe(self.precision)
+        return result
+
+
+def build_adapter(cfg: ForecastConfig, model_id: str, variables: list[str] | None = None, **runtime):
+    """Construct a native adapter from the shared configuration, without loading weights."""
+    if cfg.retrieval_method != "none":
+        raise ValueError("Hourly RAG requires the verified index/archive path in rag_forecast.forecast")
+    from weather_lab.forecast import Timestral
+    from weather_lab.models import resolve
+
+    checkpoint = resolve(cfg.model, runtime.pop("revision", None))
+    if checkpoint.family == "timestral":
+        constructor = Timestral
+    elif checkpoint.family == "t0":
+        from weather_lab.t0_adapter import T0
+
+        constructor = T0
+    else:
+        raise ValueError(f"No adapter for checkpoint family {checkpoint.family!r}")
+    mode = runtime.pop("arome", cfg.arome_mode)
+    # Preserve the recorded v1 spelling when reproducing old benchmark identities.
+    if mode != cfg.arome_mode and not (mode == "observations" and cfg.conditioning == "substobs"):
+        raise ValueError("AROME mode differs from the forecast configuration")
+    if cfg.precision != "native":
+        runtime["precision"] = cfg.precision
+    return constructor(model_id, list(cfg.targets) if variables is None else variables,
+                       targets=list(cfg.targets), checkpoint=checkpoint.repo, revision=checkpoint.revision,
+                       context_days=cfg.context_days, calendar=cfg.calendar, arome=mode,
+                       features=cfg.feature_spec, prediction_target=cfg.prediction_target, **runtime)
 
 
 def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastConfig | None:
@@ -80,6 +122,8 @@ def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastCo
     """
     from weather_lab.models import CHECKPOINTS
 
+    if (record.get("input_alignment") or {}).get("observation_delay_hours", 0):
+        return None  # the explorer's zero-delay inputs cannot reproduce delayed replay
     p = record.get("params") or {}
     if record.get("kind") != "timestral" or "checkpoint" not in p or "context_days" not in p:
         return None
@@ -91,11 +135,15 @@ def from_system(record: dict, horizon_h: int, step_hours: int = 3) -> ForecastCo
     versions = p.get("feature_versions", {})
     if any(versions.get(f, 1) != feats.GROUPS[f].version for f in p.get("features", [])):
         return None                               # a different feature version: not this configuration
+    precision = p.get("precision", {})
+    from weather_lab.precision import VERSION as precision_version
+    if precision and precision.get("version") != precision_version:
+        return None
     spec = {f: (p.get("feature_params") or {}).get(f, {}) for f in p.get("features", [])}
     return ForecastConfig.make(name, _FROM_MODE[p.get("arome")], spec, calendar=bool(p.get("calendar", False)),
                                context_days=int(p["context_days"]), horizon_h=horizon_h,
                                targets=tuple(record.get("variables") or TARGETS), step_hours=step_hours,
-                               prediction_target=p.get("prediction_target", "weather"))
+                               prediction_target=p.get("prediction_target", "weather"), precision=precision.get("policy", "native"))
 
 
 # --------------------------------------------------------------------------- capability / availability
@@ -141,13 +189,27 @@ def check(cfg: ForecastConfig, data: Availability | None = None, max_horizon_h: 
         return [Issue("unsupported", "model", f"{cfg.model} is not a registered checkpoint")]
     if fam.status != "integrated":
         return [Issue("unsupported", "model", f"{fam.name} is not integrated yet (no adapter)")]
+    if ck.family == "t0" and cfg.conditioning == "substobs":
+        out.append(Issue("unsupported", "conditioning", "t0 requires archived AROME history or explicitly "
+                         "missing history; substituted observations are unsupported"))
     if cfg.conditioning != "none" and not fam.known_covariates:
         out.append(Issue("unsupported", "conditioning", f"{fam.name} takes no known-future covariates"))
     if cfg.calendar and not fam.known_covariates:
         out.append(Issue("unsupported", "calendar", f"{fam.name} takes no known-future covariates"))
     correction = cfg.prediction_target == "arome_error"
-    if correction and (ck.family != "timestral" or not fam.known_covariates):
-        out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires the Timestral adapter "
+    if cfg.retrieval_method != "none":
+        if not cfg.retrieval_index:
+            out.append(Issue("unavailable", "retrieval", "select a saved hourly retrieval index; create one in RAG research"))
+        if cfg.context_days != 30 or cfg.step_hours != 1 or cfg.horizon_h not in (24, 48):
+            out.append(Issue("invalid", "retrieval", "hourly RAG requires 30 days of context and a 24 or 48 h horizon"))
+        if cfg.targets != ("t", "pmer"):
+            out.append(Issue("unsupported", "retrieval", "the hourly index covers temperature and pressure only"))
+        if cfg.conditioning == "substobs":
+            out.append(Issue("unsupported", "conditioning", "RAG requires genuine issued AROME; observation substitution is unsupported"))
+        if cfg.features:
+            out.append(Issue("unsupported", "retrieval", "RAG supports weather or residual prediction with no additional feature groups"))
+    if correction and (ck.family not in ("timestral", "t0") or not fam.known_covariates):
+        out.append(Issue("unsupported", "prediction_target", "AROME error prediction requires a native residual adapter "
                          "and known-future forecast-lead inputs"))
     for name in cfg.feature_names:
         g = feats.GROUPS[name]
@@ -202,8 +264,11 @@ def describe(cfg: ForecastConfig, conditioning_names: dict | None = None) -> str
         cond = "no additional AROME covariates"
     fl = ", ".join(_feature_text(n, dict(p)) for n, p in cfg.features) or "no additional features"
     method = f"{PREDICTION_TARGETS[cfg.prediction_target]} · " if cfg.prediction_target != "weather" else ""
+    if cfg.retrieval_method != "none":
+        method += f"RAG {cfg.retrieval_method} · index {cfg.retrieval_index[:12]} · hourly archive · observations delayed 3 h · "
     return (f"{cfg.model} · {method}{cond} · {fl} · calendar {'on' if cfg.calendar else 'off'} · context "
-            f"{cfg.context_days} d ({cfg.context_days * 24 // cfg.step_hours} steps) · horizon {cfg.horizon_h} h")
+            f"{cfg.context_days} d ({cfg.context_days * 24 // cfg.step_hours} steps) · horizon {cfg.horizon_h} h"
+            + (f" · {cfg.precision} compute / FP32 math" if cfg.precision != "native" else ""))
 
 
 def _feature_text(name: str, p: dict) -> str:

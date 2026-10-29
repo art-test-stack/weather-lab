@@ -187,12 +187,26 @@ def _diff(x: np.ndarray, k: int) -> np.ndarray:
 def _block(name: str, p: dict, batch, t_ctx: int) -> np.ndarray:
     step = batch.step_hours
     if name == "resid":
-        if batch.arome_history is None:
-            raise ValueError("feature 'resid' needs archived AROME history in the batch")
-        rows = [batch.history[:, batch.variables.index(v), -t_ctx:]
-                - batch.arome_history[:, batch.variables.index(v), -t_ctx:] for v in p["variables"]]
-        if p["lead_row"]:
-            rows.append(batch.arome_history_lead_h[:, -t_ctx:].astype(np.float32))
+        if batch.arome_inputs is not None:
+            fields = [batch.arome_inputs.fields.index(v) for v in p["variables"]]
+            archived = batch.arome_inputs.history[:, fields, -t_ctx:]
+            runs = batch.arome_inputs.history_run[:, fields, -t_ctx:]
+            leads = (batch.history_times(t_ctx)[:, None] - runs) / np.timedelta64(1, "h")
+            leads = np.where(np.isfinite(archived), leads, np.nan).astype(np.float32)
+            shared_lead = np.fmax.reduce(leads, axis=1)
+            if p["lead_row"] and (np.isfinite(leads) & (leads != shared_lead[:, None])).any():
+                raise ValueError("resid v1 requires a common archived forecast lead across selected fields")
+            rows = [batch.history[:, batch.variables.index(v), -t_ctx:] - archived[:, i]
+                    for i, v in enumerate(p["variables"])]
+            if p["lead_row"]:
+                rows.append(shared_lead)
+        else:
+            if batch.arome_history is None:
+                raise ValueError("feature 'resid' needs archived AROME history in the batch")
+            rows = [batch.history[:, batch.variables.index(v), -t_ctx:]
+                    - batch.arome_history[:, batch.variables.index(v), -t_ctx:] for v in p["variables"]]
+            if p["lead_row"]:
+                rows.append(batch.arome_history_lead_h[:, -t_ctx:].astype(np.float32))
         return np.stack(rows, axis=1)
     if name == "atmos":
         if batch.aux_history is None:

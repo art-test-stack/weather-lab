@@ -54,13 +54,15 @@ uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benc
 
 ## The app
 
-`uv run weather-lab-app` (or the Space) opens on three tabs. Forecast and Benchmark have independent configurations.
+`uv run weather-lab-app` (or the Space) opens on four tabs: Forecast, Benchmark, RAG research and Methods.
+Forecast and Benchmark have independent configurations and both offer Timestral-28M, Timestral-209M and t0-gamma.
 
 - **Forecast** (landing): one **forecast block** above the chart, then the result summary, the chart with an aligned error panel (default **absolute error** |forecast − observation|; signed optional), the primary cards, captions, this forecast's table, the CSV download and the map.
-  - **Forecast block:** *Station* (default **Paris-Orly**, `07149`), *Forecast issued*, *Weather variable*, *Model (checkpoint)* (Timestral-28M / **Timestral-209M**, identity only), *AROME conditioning* (none; issued forecast + archived AROME history; issued forecast + observed history, substituted; issued forecast only, diagnostic), *Additional feature groups* (recent AROME errors, dew point and cloud cover, solar elevation, tendencies; any compatible combination; none selected = **no additional features**, a valid configuration), *Calendar inputs*, *Observed context (days)* (the one editable history unit; hours and steps shown read-only) and *Forecast horizon (hours)*. Inside the same block, **Advanced** holds feature parameters (AROME-error variables, dew point / cloud fields, tendency lags), comparison overlays, the shaded-range source, the error display and superseded experiments. **Run forecast** comes last.
+  - **UTC calendar:** when hourly exploration data is installed, Forecast defaults to **Hourly exploration · 2022–latest**, with no prediction applied until **Run forecast**. *Forecast issued (UTC)* is a date-and-time calendar accepting exact hours from 1 January 2022 through the selected station's latest usable record. Hourly inputs use 24 samples per context day. Calendar and station edits update pending feedback and coverage limits only. Existing saved experiments remain separate choices, with their original three-hourly cadence and saved forecast origins; selecting a date never relabels one of those forecasts as hourly.
+  - **Forecast block:** *Station* (default **Paris-Orly**, `07149`), *Forecast issued*, *Weather variable*, *Model (checkpoint)* (Timestral-28M / **Timestral-209M** / t0-gamma, identity only), *AROME conditioning* (none; issued forecast + archived AROME history; issued forecast + observed history, substituted; issued forecast only, diagnostic), *Additional feature groups* (recent AROME errors, dew point and cloud cover, solar elevation, tendencies; any compatible combination; none selected = **no additional features**, a valid configuration), *Calendar inputs*, *Observed context (days)* (the one editable history unit; hours and steps shown read-only) and *Forecast horizon (hours)*. Inside the same block, **Advanced** holds feature parameters (AROME-error variables, dew point / cloud fields, tendency lags), comparison overlays, the shaded-range source, the error display and superseded experiments. **Run forecast** comes last.
   - **Composable configuration** (`weather_lab.forecast_config.ForecastConfig`): model identity + forecast method + conditioning + feature groups with parameters + calendar + context + horizon. Combinations are not separate model choices. Saved benchmark systems map into the same representation from their recorded `run.json` parameters (`from_system`); their identifiers and results are unchanged.
   - **Forecast method:** *Direct weather prediction* (default), or *AROME + predicted error*. The latter forecasts ε = observation − the latest qualifying archived AROME prediction, then adds the issued AROME baseline to every error quantile. Forecast lead is a known input; Calendar inputs encode UTC hour of day and day of year. Selected engineered features still use the original observations. A Run retains the previous direct forecast for the same case, whether saved or exploratory, alongside raw AROME; it does not recompute the direct forecast. The installed archive supports correction of temperature and MSLP only. Correction always needs archived error history and an issued baseline, even with additional AROME conditioning disabled. Missing errors stay missing; captions show actual coverage within the requested context. This is inference with pretrained weights, with no local fine-tuning or established calibration.
-  - **Strictly explicit execution.** Editing any setting (forecast or presentation, Advanced included) only updates the draft: a **Changes pending — click Run forecast** line, read-only conversions, horizon limits and capability / availability messages. It never resolves, loads weights, builds inputs, infers, applies a cached prediction or redraws. **Run forecast** captures the whole draft at click time, validates it, then: same forecast → presentation only, no model run; else the matching saved benchmark system (a shorter horizon is a labelled slice); else the exploratory cache; else inference. Chart, overlays, intervals, error panel, cards, captions, tables and the CSV are applied together. A per-session guard rejects duplicate submissions and keeps the button disabled through rendering, including when controls are edited; a result that arrives after the draft changed is not applied (it stays cached); a failure keeps the previous result and says why. The page load shows the default saved result once.
+  - **Strictly explicit execution.** Editing any setting (forecast or presentation, Advanced included) only updates the draft: a **Changes pending — click Run forecast** line, read-only conversions, horizon limits and capability / availability messages. It never resolves, loads weights, builds inputs, infers, applies a cached prediction or redraws. **Run forecast** captures the whole draft at click time, validates it, then: same forecast → presentation only, no model run; else the matching saved benchmark system (a shorter horizon is a labelled slice); else the exploratory cache; else inference. Chart, overlays, intervals, error panel, cards, captions, tables and the CSV are applied together. A per-session guard rejects duplicate submissions and keeps the button disabled through rendering, including when controls are edited; a result that arrives after the draft changed is not applied (it stays cached); a failure keeps the previous result and says why. Hourly exploration opens without a forecast; saved experiments replay their default saved result once.
   - **Why a configuration cannot run** is stated per subject and kind: *unsupported* (the model family cannot take the input: `models.FAMILIES`), *unavailable* (the data do not exist for this case: no AROME run, no archived AROME before this time, no auxiliary observations), *invalid* (horizon, context, empty parameter). Nothing is dropped or substituted. Recent AROME errors need qualifying archived forecasts even without AROME conditioning. AROME conditioning stops where the issued run ends (48 h after these 06 UTC forecast times; the horizon control's maximum follows and any reduction is stated); without it, up to 120 h (app limit).
   - **Result summary:** *Saved benchmark forecast* (run id) or *Exploratory · cached / computed* (outside the frozen benchmark), with the applied model, conditioning, features (non-default parameters shown), calendar, context and the horizon actually shown. It changes only when a result is applied.
   - **Main metric:** MAE by default, with RMSE selectable independently in Forecast and Benchmark. Forecast shows both scores, selected one first, and applies the choice only on **Run forecast** without rerunning inference. RMSE gives larger errors more weight; both metrics use the same observed leads. Benchmark applies its metric and other display edits only on **Run benchmark / Rerun**.
@@ -68,16 +70,43 @@ uv run weather-lab spec freeze --config <cfg> [--run-dir <run>]     # write benc
   - **Chart:** it plots the whole observation context the model read and opens on the last 48 h. Dotted lines join the last real observation to each forecast's first value. They are a drawing aid only: not in predictions, errors, coverage, exports or caches.
   - **CSV:** the plotted systems of the applied result over the applied horizon, each row labelled saved or exploratory, with the applied configuration and each curve's own method and configuration. Corrected rows include the AROME baseline and predicted error. Export filenames hash the CSV contents under `.tmp/codex/forecast-exports/`, so applying different overlays cannot overwrite an earlier download.
 - **Benchmark**: its own suite, checkpoint, forecast method, conditioning, features, calendar, context and horizon controls. **Run benchmark** captures that draft and attempts every eligible station/origin in the selected suite, across its recorded splits; station, season and period controls only filter the display. It saves a **separate development run**, including predictions, scores, configuration, pinned checkpoint and input hashes, provenance and explicit unavailable/failed cases. Frozen results are never overwritten, and exploratory cached predictions are never scored. Checkpoints must already be installed (`models prefetch` locally; Space preload).
+  - **Compare saved configurations**, above the execution form, reads hourly 48-hour saved predictions and targets. Defaults compare four configurations (209M weather-only, 209M direct with archived AROME, 209M residual, t0 residual) plus AROME on AROME-supported coverage. Filters narrow actual saved configurations by model, prediction target, conditioning, feature/calendar inputs and RAG. Broader weather-only coverage is a separate cohort. The selected systems must have identical source-suite, case and target provenance; support is intersected separately for temperature and pressure, never pooled. An identical immutable run found in multiple locations appears once; distinct replays retain their run IDs, precision and recorded windows per model call.
+  - Saved-view edits only update pending feedback and selector choices. Page load and **Run saved comparison** use a separate capture → saved read → stale-result check → render chain; they never invoke inference, exploratory caches, downloads or frozen rescoring. Presentation-only applies reuse row losses; cached Parquet reads project point columns for the selected system/variable, omitting quantiles. The horizon view shows at-lead or pair-weighted cumulative MAE; optional ±1 population SD of absolute errors is available only at lead. The forecast inspector keeps available curves and missing values, uses matched signed errors, and exposes the fixed saved AROME initialization, assumed publication time and initialization-relative leads. Calendar views show daily MAE, monthly summaries and UTC hour-of-day profiles, explicitly grouped by origin or target valid time (default). Every matched (window, lead) pair has equal weight within a bucket; monthly MAE uses pairs, not daily means. Calendar SD uses those same absolute errors with `ddof=0`. All spread is descriptive, not a confidence interval; overlapping windows are dependent. Dates, stations, pair/window counts, exclusions, availability and original configuration/provenance remain visible. These inspected development replays establish neither held-out performance nor calibrated uncertainty.
   - All configuration and display edits remain pending until **Run benchmark / Rerun**. Forecast edits and runs never update Benchmark. Applying display-only changes reuses the current development predictions; **Rerun** with unchanged settings executes a new full-suite run. Failures retain the previous display; results arriving after edits are saved without being applied. Select a saved development run to fill its configuration, then click **Run benchmark** to replay it without inference.
   - The initial display replays frozen scores, including their experiment matrix. Development results compare the selected configuration with saved reference systems on matched observed pairs, separately by split and variable. Views include input-history provenance, sorted comparison bars, MAE/RMSE tables and a lead-time chart (at each lead or cumulative), with block-bootstrap intervals only for at least ten two-day blocks. Downloads include score CSVs, predictions, the case manifest, provenance and per-case availability. Development runs make no held-out performance claim.
   - Runs are saved under `development-runs/` on the configured writable bucket mount, otherwise `data/evidence/development-runs/`. Without the mounted bucket, Space-local results disappear on restart; download them before restarting. Results on the configured public bucket are publicly readable.
 - **Methods**: a table mapping each readable system name to its exact identifier, definitions of the scores, *Runs, versions and integrity*, *Caches and model files* (checkpoints on disk, models loaded in memory, saved and cached predictions), and the full protocol.
 
+Refresh the hourly calendar data explicitly, then restart the app:
+
+```bash
+uv run weather-lab data forecast-hourly
+```
+
+This prepares all five stations using the existing official hourly reader and the station identities in
+`configs/forecast_hourly.yaml`. It reuses checksum-verified 2020–2024 source files when installed, refreshes
+the five 2025–2026 files into a new raw directory, and enforces a 500 MiB download cap. The prepared data
+retains late-2021 context for January 2022 forecasts, original values and QC flags; only QC 0/1 values enter
+model inputs. Missing hours and rejected values remain missing. The calendar stops at each station's last
+recorded usable hour, rather than padding the remainder of 2026. Observation publication/revision times are
+unknown: non-RAG exploration explicitly assumes availability at validity. RAG keeps its selected index's
+existing archive and three-hour delay; this refresh does not extend retrieval indexes.
+
+The command writes separate `data/processed/forecast_hourly_v1.parquet` and `.meta.json` files and, when
+already installed, copies the verified named hourly AROME issues into `forecast_hourly_arome_v1.parquet`.
+It never rewrites frozen observation files, manifests, saved runs or specs, and never infers or publishes.
+Hourly AROME coverage is limited to the installed issued-run archive (currently Orly/Toulouse from April
+2026); earlier dates and other stations remain explicitly unavailable. No stitched forecasts or observations
+substitute for issued AROME. Hourly dew-point/cloud features are unavailable until corresponding inputs are
+prepared. The ordinary snapshot builder includes the new processed files; publishing remains an explicit
+separate action. If hourly data is absent, the app retains its saved-replay default.
+
 Experiments offered (`EXPERIMENTS` in `src/weather_lab_app/labels.py`):
 
 | In the app | Suite | Status |
 |---|---|---|
-| AROME vs Timestral · Oct 2026 (default) | `arome-issued-v2` | Integration study |
+| Hourly exploration · 2022–latest (default when installed) | `hourly-explorer-v1` | Unscored hourly forecasts, only on Run; existing saved experiments below retain their provenance. |
+| AROME vs Timestral · Oct 2026 (saved replay default) | `arome-issued-v2` | Integration study |
 | History length · 2023 validation | `synop-ctxval-2023-v1` | Validation. Shown from a combined run of the 7 / 30 / 90-day candidates, created with `uv run weather-lab compare --export-combined runs/synop-ctxval-2023-v1/combined`. |
 | Station history · integration example | `synop-historical-v1` | Integration check |
 | AROME vs Timestral · v1 (superseded) | `arome-issued-v1` | Hidden unless *Show superseded experiment versions* is ticked in the forecast block's Advanced |
@@ -277,3 +306,228 @@ tests/                      unit tests; test_real_timestral.py is opt-in
 ```
 
 **Adding a model.** See [docs/adding_a_model.md](docs/adding_a_model.md) (contract, capabilities, and the concrete integration points for TFC t0-gamma, the next candidate). In short: subclass `Adapter`, return a `ForecastBatch` on the benchmark quantile grid, register its `kind` in `evaluate.ADAPTERS` and its capabilities and pinned checkpoint in `weather_lab.models`. Scoring, storage, caching and the app pick it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`); `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces this.
+
+
+## Weather RAG research (2026 pilot)
+
+Branch `research/ts-rag-weather` extends PR #1. This independent experiment is configured in
+`configs/rag_weather_v1.yaml`; it never rewrites an existing frozen suite or its scores.
+The Space has a **RAG research** tab with explicit collection, index, evaluation and saved-result actions.
+The **Forecast** tab also exposes TFC t0-gamma and optional **RAG · levels / shape** retrieval. Select a saved
+hourly index (use **Refresh retrieval indexes** after creating one), a 30-day context, a 24- or 48-hour horizon,
+temperature or pressure, direct or AROME-error prediction and no additional feature groups. Genuine issued AROME may
+condition the forecast (archived history or explicitly missing history); observation substitution is refused.
+Only **Run forecast** executes or applies changes. RAG reads the index's hourly observation archive for the
+selected station/time, uses the declared three-hour observation delay, and excludes generated bridge steps.
+Missing hourly context, indexes or installed weights remain explicit failures; no data are interpolated or
+models substituted. Exploratory cache identities include model, retrieval method, verified index/archive,
+calendar, inputs and device; results never enter frozen benchmark runs. Download t0 weights explicitly under
+**RAG research → Prepare data → Model setup** (about 1 GB for t0; up to 1.86 GB with Timestral-209M).
+
+The RAG research tab separates available datasets/indexes, optional preparation (collapsed), and batch
+evaluations/saved results. A single forecast belongs in Forecast. The batch evaluator currently supports
+weather-analogue indexes; AROME-error indexes are used in Forecast.
+
+**AROME-error retrieval** is a separate protocol in `configs/rag_arome_error_v1.yaml`, for Orly and Blagnac.
+Its new immutable index uses standard AROME's genuinely issued runs from April 2026 onward; the older
+2022–2025 weather index stays unchanged. Choose an index labelled **AROME errors** and **archived AROME
+conditioning** in Forecast. The research tab also has an explicit **Build AROME-error index** button.
+Both Timestral and t0-gamma also support **AROME + predicted error** with RAG: native model inputs are
+verified historical observation-minus-AROME errors, with forecast leads and retrieved errors. The issued
+AROME baseline is added once to every predicted quantile to return weather values. Exported forecasts
+include the baseline and predicted error, with the three-hour bridge excluded. This is inference with
+fixed pretrained weights, not local fine-tuning or a measured accuracy improvement.
+
+Matching uses the last 72 hours of observed weather and verified AROME errors, plus the first 24 hours of
+the forecast available at issue time. Level matching preserves physical levels; shape matching anchors
+weather/forecast trajectories to the latest observation while retaining error signs and biases.
+Scaling uses only 2022–2025 station observations. The five nearest same-station, same-product cases receive
+inverse-distance weights. All completely verified earlier cases are eligible; a candidate's entire
+48-hour outcome window plus the three-hour observation delay must end strictly before the query decision.
+Unknown future outcomes and later-issued runs cannot affect the query or its eligible neighbors.
+
+Retrieved **observation-minus-issued-AROME error trajectories** enter the native known-covariate rows,
+alongside current issued AROME and vintage-checked AROME history. Missing historical steps stay missing
+when no neighbor supplies them; incomplete query or verification windows are refused. Neighbor audit
+records include run times, verification times, distances, weights and separate temperature/pressure MAE
+and bias over the declared 48-hour window. These are historical case diagnostics, not a benchmark ranking.
+This is retrieval-augmented inference without fine-tuning or a demonstrated improvement claim.
+
+```bash
+uv run weather-lab rag index --config configs/rag_arome_error_v1.yaml
+```
+
+This builds on CPU and publishes a checksum-verified index from the protocol's pinned archive; it neither
+downloads source data nor runs a model. Use `--local-only <artifact-store>` for local-only construction.
+Browsing saved runs does not call a model. The new `tfc-t0[torch]==0.6.0` dependency enables the existing
+pinned t0-gamma adapter alongside Timestral-209M; torch and all checkpoint revisions stay unchanged.
+
+**Question.** Does retrieval of historical weather analogues improve Timestral-209M or t0-gamma against
+issued AROME forecasts? The pilot compares two transparent, exact vector searches, each with its own
+retrieval-only reference and a foundation-model variant:
+
+- **Levels:** squared L2 over a 72-hour multivariate window, scaled using pre-2026 standard deviations.
+- **Shape:** the same window after subtracting each variable's endpoint. Retrieved trajectories are
+  shifted to the query endpoint. This compares changes while keeping physical units and amplitudes.
+
+Candidates come from the same station and UTC hour, within 45 days of the calendar season. The five
+nearest windows are inverse-distance weighted. Their complete 30-day past and up to 51-hour measured
+continuations are stored as payloads. Both models receive these historical analogue trajectories through
+native **known covariates**, alongside the original observation context and calendar rows. This is
+retrieval-augmented inference with historical measured continuations, without local fine-tuning or a
+claim that the payloads are issued historical AROME forecasts. Exact NumPy vectors, metadata and payloads
+form the first vector database; no embedding training or approximate-neighbour service is needed.
+
+**Dates and causality.** The archive collects station weather from 2022 onward, including 2025. The index
+uses only windows whose complete continuation, plus the declared observation delay, ends before
+1 January 2026. Its scaling is also fitted before this cutoff. Daily 06 UTC origins cover the requested
+2026 year. The 30-day rolling context initially comes from late 2025, then incorporates observations
+available by each 2026 origin; this is a series of short-range forecasts, not one year-long forecast
+issued in December 2025. Model inputs end three hours before the decision; generated bridge steps are
+excluded from scores. Each run has exactly one AROME product and one 24- or 48-hour horizon.
+
+**Coverage limits.** Official hourly station measurements are verified against themselves, never against
+an interpolated SYNOP series or another forecast. Historical stitched AROME series are collected for
+inventory and kept separate from issued forecasts. Open-Meteo's named AROME runs start **2 April 2026**:
+<https://open-meteo.com/en/docs/single-runs-api>. Earlier named-run coverage has not been established.
+Missing years, null fields, incomplete horizons and future 2026 dates remain explicit gaps. An issued
+forecast must come from one named run available at the decision time; the evaluator never combines runs
+or products to fill it. The collection declares a **run + 3 hours** availability assumption and a
+**validity + 3 hours** observation assumption; original publication/revision timestamps are not available.
+These are retrospective development comparisons, without a held-out or operational-latency claim.
+The collection requests a complete named run's returned horizon; it does not invent missing leads.
+
+**Storage.** Source data (including collected raw files), vector indexes, and each completed evaluation
+are immutable SHA-256-addressed artifacts under
+`hf://buckets/ai-testack/weather-lab-storage/rag/weather-v1/{archives,indexes,runs}/<id>/`.
+The mounted Space bucket is used directly. Elsewhere the Hub Bucket API uploads and verifies the bytes
+before publishing the completion marker, while retaining a local cache. A failed upload fails the action;
+it is never reported as durable success. Restoring an artifact verifies its inventory and every file.
+The bucket API requires `HF_TOKEN` with access to this bucket when writes are not through the mount.
+The configured bucket is public, as are these experimental artifacts.
+
+Evaluations save all requested cases, per-system availability/failure reasons, native predictions and
+quantiles, point scores, neighbour identities/distances/weights, pinned model descriptions, archive/index
+ids, configuration and source hashes. MAE/RMSE stay separate by variable. `all_systems_common` uses the
+same observed targets for every configured system. `paired_vs_arome` also exposes each model's exact
+matched AROME support; supports can differ, so those rows must not be used for a cross-model ranking.
+An absent comparator produces zero matched support and unavailable scores.
+
+```bash
+# Space: use the RAG research tab. Local equivalents (no paid resources are launched):
+uv run weather-lab rag collect                         # bounded to 300 MiB; may take many API calls
+uv run weather-lab rag index --archive <archive-sha256>
+uv run weather-lab rag prefetch                        # explicit: up to 1.86 GB of pinned weights
+uv run weather-lab rag evaluate --index <index-sha256> --horizon 24
+uv run weather-lab rag evaluate --index <index-sha256> --horizon 48
+uv run weather-lab rag status
+uv run weather-lab rag restore --kind runs --id <run-sha256>
+
+# Reuse an existing prepared hourly archive instead of collecting it again:
+uv run weather-lab rag ingest --observations <observations.parquet> \
+  --issued <issued-runs.parquet> --historical <historical.parquet>
+# --issued and --historical are optional; missing issued data remain unavailable.
+# Every subcommand accepts --local-only <directory> for explicit offline/local work.
+```
+
+Ingested observations require `station`, hourly UTC `time`, and the configured variables in °C/hPa.
+Issued-run rows require `station`, `run`, `available_at`, `valid_time`, `variable`, `value`, `product`,
+`source_kind=issued_run`, and `availability_basis` (evidence or an explicit assumption).
+Stitched historical series cannot pass the issued-run validator.
+Collection, full inference and deployment are separate explicit actions; merely deploying this code
+neither downloads the new archive nor launches an evaluation. The existing Space preload is unchanged.
+
+## Full available 2026 matrix, computed locally
+
+`configs/hourly_matrix_2026_bf16_v2.yaml` declares 39 configurations: Timestral-28M, Timestral-209M and t0-gamma,
+with 13 raw/feature/AROME/RAG setups each. They use Orly and Blagnac, every hourly origin from 1 January
+through the last observed 2026 record, 30 days of context and a 48-hour horizon. The frozen source currently
+ends on 26 October 2026 at 19:00 UTC. Genuine late-2025 observations provide January context. Missing
+AROME windows and unverified targets remain unavailable.
+
+```bash
+# Review the fixed matrix; this performs no inference or uploads.
+uv run weather-lab local-benchmark plan
+
+# Explicit model setup (cached weights are reused).
+uv run weather-lab models prefetch Timestral-28M Timestral-209M t0-gamma
+
+# Compute and save locally. On NVIDIA hardware, use --device cuda instead.
+uv run weather-lab local-benchmark run --out runs/local-hourly-2026-mps-bf16 --device mps
+```
+
+Results stay under `runs/local-hourly-2026-mps-bf16/`. Rerun the identical command to skip checksum-verified completed
+setups; an interrupted setup restarts, while finished setups remain saved. The frozen matrix plan refuses
+changed code, device or settings in the same output directory. Each run retains predictions, targets,
+configuration, provenance, scores and case availability. Full-coverage scores remain in each run;
+`comparisons/shared_arome_metrics.csv` compares all 39 configurations, AROME and persistence on the same
+observed pairs per variable. Its exact support is saved separately. It reports descriptive point scores,
+not independent-window confidence intervals or held-out performance. No automatic upload occurs.
+
+Local execution groups up to eight forecast windows into each model call; the final group may be smaller.
+The matrix plan records this batch size. Predictions and retrieval neighbours remain separate per case.
+If a grouped call fails, the same model retries the cases individually and records `batch_retry_reason`
+for successful retries. The app keeps its single-window execution path. Batching can change floating-point
+rounding; check device comparisons before interpreting small score differences. Use a fresh output directory
+when moving from the earlier single-window worker: its frozen plan cannot resume under changed code.
+An eight-window MPS check across both stations, all three models, raw and weather-RAG shape setups
+found maximum FP32 batch-versus-single quantile differences below 0.001 °C and 0.001 hPa. BF16 median
+differences reached 0.183 °C and 0.491 hPa (a tail quantile differed by 1.082 hPa). These are numerical
+differences, not errors against observations. Batching was not faster in every small timing check;
+the active benchmark shared the device, so those timings do not establish full-run speedups.
+
+Publication remains a separate, explicit command after local completion:
+
+```bash
+uv run weather-lab local-benchmark publish --out runs/local-hourly-2026-mps-bf16-batch8
+```
+
+Publication verifies the completed local runs, uploads their data before their `run.json` completion records,
+and copies the shared comparison to a distinct bucket prefix. The saved comparison catalog scans
+`runs/*/runs/*/run.json` locally and the existing development-run location: `development-runs/` on the
+configured writable HF bucket mount (normally `/data/development-runs`), otherwise
+`data/evidence/development-runs/`. It reads the small `matrix_setup.json` discovery records when present;
+selected payloads are checksum-verified before use. Restart the app after publication to rebuild this
+catalog. Without the bucket mount, results must already be installed at the local discovery location;
+the saved viewer does not fetch them from HF. `benchmark-matrices/<matrix>-<provenance-hash>/` retains the
+published common-support comparison, while the UI reads the original predictions and targets under
+`development-runs/<run-id>/`. Nothing uploads merely by opening the app or changing saved-view controls.
+`publish` performs no inference. Publication uses the existing public bucket;
+model weights are not uploaded. CPU execution of the full matrix may take longer than overnight. Use `--device cpu` or `--device cuda` on the corresponding hardware.
+
+The v2 profile uses BF16 mixed neural compute, FP32 normalization/refinement and FP32 saved forecast columns.
+Checkpoint parameters remain FP32. The bounded precision policy is scoped to each model call: upstream explicit
+FP64 tensor requests are capped at FP32 without modifying the installed Timestral package, the cached model
+or global torch defaults. The policy/version enters configuration, model provenance and cache identity.
+Saved forecast values are FP32; pandas' CPU score reductions are independent of model-compute precision.
+
+A real MPS smoke test passed one saved context for every one of the 39 setups, including residual prediction
+and RAG. This establishes runtime compatibility on those inputs, not full-year forecast accuracy. BF16 can
+change forecasts; use `--config configs/hourly_matrix_2026_fp32_v2.yaml` and a separate output directory for
+FP32 compute. FP32 MPS closely matched the upstream CPU reference in the checked contexts.
+
+Do not resume the old failed `runs/local-hourly-2026-mps` job under the new policy. Its files are preserved;
+use a fresh output directory. A local run now stops when an entire inference batch fails instead of marking
+an all-failed setup completed. The recent-error feature also supports the hourly source's named AROME history;
+its v1 shared-lead row is refused if selected fields have different forecast leads.
+
+
+### Prompt for the later combined RAG + features experiment
+
+```text
+After the precision-corrected 39-run benchmark finishes, verify saved predictions and case availability
+before analyzing accuracy. Preserve its matrix plan, artifacts, precision policy and existing scores.
+Prepare a separate, versioned experiment combining RAG with solar elevation, temperature/pressure
+tendencies and recent AROME-error history, including AROME + predicted-error forecasting.
+Keep Timestral-28M, Timestral-209M and t0-gamma; Timestral-123M remains deferred.
+Reuse the pinned hourly Orly/Blagnac archive and causal indexes. Retain the 30-day context, 48-hour horizon,
+three-hour observation delay, explicit unavailable cases and no-future-label rules. Never interpolate
+missing issued forecasts. Forward every selected feature and its parameters through both model adapters;
+record definitions, actual inputs, precision and retrieval audits in provenance/cache identities.
+First propose matched ablations (no RAG, RAG alone, individual features, combined features, direct versus
+residual prediction) and wait for my choice under AGENTS.md. Compare on identical case/lead supports,
+separately by variable. Treat additive improvement as a hypothesis, not a guarantee.
+If a run is still active, do not modify its checkout; wait or obtain approval for an isolated worktree.
+Use focused tests plus a small real-device preflight. Do not start the full experiment or publish its
+results until I request it. Commit each changed file separately.
+```
