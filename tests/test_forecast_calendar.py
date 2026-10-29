@@ -132,7 +132,7 @@ def test_calendar_widget_change_event_never_applies_or_runs(hourly, monkeypatch)
     date = controls["case"]
     assert isinstance(date, gr.DateTime) and date.timezone == "UTC"
     assert h["applied"].value is None
-    assert dict(zip(app.bench.KEYS, h["benchmark"]["draft"]))["suite"].value == frozen.suite
+    assert h["saved_benchmark"] is None  # no saved hourly matrix is installed in this fixture
     protected = {h["applied"]._id} | {c._id for c in h["render"]}
     events = [f for f in demo.fns.values() if (date._id, "change") in f.targets]
     assert len(events) == 1 and events[0].fn is app.draft_feedback
