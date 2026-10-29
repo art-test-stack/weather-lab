@@ -34,6 +34,14 @@ def location() -> Path:
     return ROOT / "data/evidence/development-runs"
 
 
+def verify_run(path):
+    rec = read_json(path / "run.json")
+    for name, digest in rec["files_sha256"].items():
+        if Path(name).name != name or sha256_file(path / name) != digest:
+            raise ValueError(f"saved run failed verification: {path / name}")
+    return rec
+
+
 def saved_runs(suite: str) -> list[tuple[str, str]]:
     runs = []
     # Local matrix outputs and explicitly published runs on the existing bucket mount.
