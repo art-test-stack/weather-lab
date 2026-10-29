@@ -415,17 +415,6 @@ def station_label(sid: str) -> str:
     return f"{sid} {STATION_NAMES.get(sid, '')}".strip()
 
 
-def filter_metrics(df: pd.DataFrame, split: str, variable: str, station: str, season: str,
-                   lead: str, statuses: list[str] | None = None) -> pd.DataFrame:
-    m = (df["split"] == split) & (df["variable"] == variable) & (df["station"] == station) & (df["season"] == season)
-    m &= df["lead_h"].isna() if lead == "all" else (df["lead_h"] == int(lead))
-    out = df[m].copy()
-    out.insert(1, "training", out["model"].map(training_status))
-    if statuses:
-        out = out[out["training"].isin(statuses)]
-    return out
-
-
 def case_forecast(run: Run, case_id: str, variable: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
     """(forecast rows for every system, observations window, case record)."""
     p = run.predictions()
@@ -455,11 +444,6 @@ AROME_HISTORY = {None: "not used", "archived": "archived AROME runs available at
                  "substituted_observations": "station observations substituted (not AROME)",
                  "observations": "station observations substituted (not AROME)",
                  "missing": "missing (past segment left empty)"}
-
-
-def steps_text(days: float, step_hours: int) -> str:
-    hours = int(round(days * 24))
-    return f"{days:g} days = {hours} hours = {hours // step_hours} {'three-hourly' if step_hours == 3 else f'{step_hours}-hourly'} steps"
 
 
 def input_history(run: Run) -> pd.DataFrame:
