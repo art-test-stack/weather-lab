@@ -8,6 +8,27 @@ import numpy as np
 import pandas as pd
 
 
+def choose_arome(frame, station, origin, times, variables, product):
+    if frame is None:
+        raise ValueError("no issued-run archive; stitched historical series are not a forecast substitute")
+    valid = frame[(frame.station == station) & (frame["product"] == product)
+                  & (frame.available_at <= origin) & (frame.run <= origin)]
+    # Reject incomplete issues before pivoting each one for thousands of shifted hourly queries.
+    required = valid[valid.variable.isin(variables) & valid.valid_time.isin(times) & valid.value.notna()]
+    counts = required.groupby("run").size()
+    candidates = counts[counts >= len(variables) * len(times)].index
+    # Never stitch several runs to construct a complete forecast horizon.
+    for run in sorted(candidates, reverse=True):
+        selected = valid[valid.run == run]
+        table = selected.pivot(index="variable", columns="valid_time", values="value").reindex(
+            index=variables, columns=times)
+        if np.isfinite(table.to_numpy(dtype=float)).all():
+            return table.to_numpy(np.float32), {"run": str(run),
+                    "available_at": str(selected.available_at.max()),
+                    "availability_basis": sorted(selected.availability_basis.unique())}
+    raise ValueError("no single available issued run covers every requested variable and lead")
+
+
 @dataclass
 class AromeInputs:
     fields: tuple[str, ...]
