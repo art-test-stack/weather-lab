@@ -16,7 +16,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from weather_lab.common import unit_of
+from weather_lab.common import ts, unit_of
 from weather_lab.arome_inputs import AromeInputs
 
 OutputType = Literal["point", "quantiles", "ensemble"]
@@ -567,6 +567,21 @@ def arome_coverage_steps(rows: np.ndarray) -> int:
 
 
 STATS = {"inputs_built": 0, "inference": 0}   # exploratory input constructions / model forward runs (process)
+
+
+def hourly_inputs(obs: pd.DataFrame, cases: pd.DataFrame, variables: list[str], context_hours: int,
+                  horizon_hours: int, delay: int, *,
+                  missing_error: str = "insufficient causal hourly observation context") -> CaseBatch:
+    """One station's delayed hourly inputs; preserve the caller's case metadata and never read targets."""
+    end = ts(cases.iloc[0].origin) - pd.Timedelta(hours=delay)
+    past = pd.date_range(end=end, periods=context_hours, freq="h")
+    future = pd.date_range(end + pd.Timedelta(hours=1), periods=horizon_hours + delay, freq="h")
+    history = obs.set_index("time").reindex(past)[variables].to_numpy(np.float32).T
+    if (np.isfinite(history).mean(axis=-1) < 0.8).any() or not np.isfinite(history[:, -1]).all():
+        raise ValueError(missing_error)
+    return CaseBatch(cases, variables, history[None],
+                     np.array([end.tz_localize(None)], dtype="datetime64[ns]"),
+                     future.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None], 1)
 
 
 def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str], context_days: int,
