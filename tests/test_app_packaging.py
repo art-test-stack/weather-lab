@@ -20,6 +20,23 @@ def test_science_package_never_imports_the_app():
             assert not any(n.startswith(("weather_lab_app", "gradio")) for n in names), f"{path.name} imports {names}"
 
 
+def test_latin_modern_assets_are_served_locally_and_shared_with_charts(monkeypatch):
+    from fastapi.testclient import TestClient
+    from gradio.routes import App
+    from weather_lab_app import main, plots
+
+    monkeypatch.setattr(main, "DEFAULT_SUITE", None)
+    demo = main.build()
+    client = TestClient(App.create_app(demo))
+    assert plots.FONT == "Latin Modern Roman, Georgia, serif"
+    for face in ("regular", "bold", "italic", "bolditalic"):
+        path = main.FONT_DIR / f"lmroman10-{face}.otf"
+        response = client.get(f"/gradio_api/file={path}")
+        assert response.status_code == 200 and response.content == path.read_bytes()
+        assert str(path) in main.CSS
+    assert "font-display: swap" in main.CSS
+
+
 def test_space_build_has_metadata_launcher_and_no_data(tmp_path):
     out = build_space(tmp_path / "space", log=lambda *_: None)
     readme = (out / "README.md").read_text()
@@ -34,6 +51,8 @@ def test_space_build_has_metadata_launcher_and_no_data(tmp_path):
     assert not (ROOT / "README.md").read_text().startswith("---")       # GitHub README stays plain
     files = [p for p in out.rglob("*") if p.is_file()]
     assert (out / "src" / "weather_lab_app" / "main.py").exists() and (out / "configs" / "bootstrap.yaml").exists()
+    assert (out / "src/weather_lab_app/assets/fonts/lmroman10-regular.otf").exists()
+    assert (out / "src/weather_lab_app/assets/fonts/GUST-FONT-LICENSE.txt").exists()
     assert not [p for p in files if p.suffix in {".json", ".parquet", ".csv", ".gz", ".grib2", ".safetensors"}]
     assert not any("tests" in p.relative_to(out).parts or ".github" in p.relative_to(out).parts for p in files)
 
