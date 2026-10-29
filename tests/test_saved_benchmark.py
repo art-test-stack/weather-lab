@@ -78,6 +78,7 @@ def test_discovery_filters_and_saved_only_routing(catalog, monkeypatch):
                "calendar_spread": True}
     reused, message = panel.read_saved({"draft": changed, "previous": applied}, catalog)
     assert reused["rows"] is applied["rows"] and "presentation" in message
+    assert reused["arome_windows"] is applied["arome_windows"]
     assert len(panel.render(reused)[1].data) == 3  # no cumulative spread band
     note, daily, monthly, hourly, detail = panel.render_calendar(reused)
     assert "forecast origin in UTC" in note and "lead 1 h only" in note
@@ -105,6 +106,42 @@ def test_mounted_discovery_needs_no_download_and_checksum_failure_is_explicit(ca
     assert applied is None and "verification" in message
 
 
+def test_arome_window_plot_keeps_own_support_when_selected_models_are_missing(catalog, monkeypatch):
+    truth = pd.DataFrame({"case_id": "a", "variable": "t", "lead_h": range(1, 49), "observed": 0.})
+    origin = pd.Timestamp("2026-01-01T23:00Z")
+    truth["valid_time"] = origin + pd.to_timedelta(truth.lead_h, unit="h")
+    for path, record in catalog.items():
+        path = Path(path)
+        run = json.loads((path / "run.json").read_text())
+        primary = truth.drop(columns="observed").assign(station="07149", origin=origin,
+                    model=run["systems"][-1]["id"], point=np.nan)
+        points = [primary]
+        if not panel.weather_only(record["config"]):
+            points.append(primary.assign(model="arome-raw", point=2.))
+        pd.concat(points).to_parquet(path / "predictions.parquet")
+        truth.to_parquet(path / "targets.parquet")
+        for name in ("predictions.parquet", "targets.parquet"):
+            run["files_sha256"][name] = sha256_file(path / name)
+        (path / "run.json").write_text(json.dumps(run))
+        record["summary"]["run_json_sha256"] = sha256_file(path / "run.json")
+    monkeypatch.setattr(results.Run, "arome_extract", lambda *_: pytest.fail("Use saved points, never a later issue"))
+    d = panel.defaults(catalog, "test")
+    weather = {p: r for p, r in catalog.items() if panel.weather_only(r["config"])}
+    for selection in (d, {**d, "cohort": "weather", "selected": list(weather)}):
+        applied, message = panel.read_saved({"draft": selection, "previous": None}, catalog)
+        assert applied is not None, message
+        assert applied["support"]["observed_pairs"] == 0
+        note, fig, table = panel.render_arome_windows(applied)
+        assert "1 points" in note and "48 observed pairs" in note
+        assert table["48-hour MAE"].tolist() == [2.] and table["Complete"].tolist() == [True]
+        assert sum(len(trace.x) for trace in fig.data) == 1
+        assert list(fig.data[0].y) == [2.] and fig.data[0].mode == "markers"
+        assert "07149" in fig.data[0].name and fig.data[0].error_y.array is None
+    applied, _ = panel.read_saved({"draft": selection, "previous": None}, weather)
+    note, _, table = panel.render_arome_windows(applied)
+    assert "No saved AROME reference" in note and table.empty
+
+
 def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     monkeypatch.setattr(results, "saved_configurations", lambda _: catalog)
     source = results.load_run(Path(next(iter(catalog))))
@@ -117,7 +154,7 @@ def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     headings = [c["props"].get("value") for c in demo.config["components"] if c["type"] == "markdown"]
     assert [v for v in headings if v and v.startswith("### ")] == [
         "### 2026 temperature leaderboard", "### Error versus forecast horizon", "### Hour-of-day MAE",
-        "### Error over the calendar", "### Inspect one saved forecast"]
+        "### Error over the calendar", "### AROME error per 48-hour forecast window", "### Inspect one saved forecast"]
     columns = {c["props"].get("elem_id"): c["id"] for c in demo.config["components"] if c["type"] == "column"}
     def subtree(node):
         return {node["id"]} | set().union(*(subtree(c) for c in node.get("children", [])))
@@ -179,10 +216,11 @@ def test_missing_targets_stay_empty_across_all_views(catalog):
     assert applied is not None, message
     assert applied["support"]["observed_pairs"] == 0
     output = panel.render(applied)
-    assert len(output) == 16
+    assert len(output) == 19
     assert "0 matched observed pairs" in output[8]
     assert output[10].empty
     assert output[15]["Observed pairs"].tolist() == [1, 1, 1]  # leaderboard stays temperature
+    assert "0 points" in output[16] and output[18]["Available pairs / 48"].tolist() == [0]
 
 
 def test_saved_comparison_rejects_different_source_cases_and_stale_discovery(catalog, monkeypatch):
