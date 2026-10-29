@@ -4,6 +4,12 @@ the real pipeline is exercised in the `real_model` test at the end."""
 
 from __future__ import annotations
 
+from weather_lab_app import benchmark as bench
+from weather_lab_app import forecast_view as view
+from weather_lab_app import labels
+from weather_lab_app import main as application
+from weather_lab_app import results
+
 import itertools
 
 import numpy as np
@@ -158,10 +164,10 @@ class FakeForecaster:
 @pytest.fixture
 def app_env(monkeypatch):
     from weather_lab import forecast, models, predcache
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
     from weather_lab_app.results import load_run
 
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": load_run(EXAMPLE)})
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": load_run(EXAMPLE)})
     fake = FakeForecaster()
     monkeypatch.setattr(forecast, "exploratory_forecast", fake)
     monkeypatch.setattr(forecast, "ensure_checkpoint", lambda *a, **k: False)
@@ -302,21 +308,21 @@ def test_main_metric_is_applied_only_on_run_without_new_predictions(app_env, tmp
     if computed:
         a0, _, changed = _run(app, {**a0["draft"], "conditioning": "none", "ctx": 45}, a0)
         assert changed and fake.inference == 1
-    monkeypatch.setattr(app, "ROOT", tmp_path)
-    original = app.render(a0)
+    monkeypatch.setattr(view, "ROOT", tmp_path)
+    original = view.render(a0)
     original_csv = Path(original[6]).read_bytes()
     before = counters()
     d = {**a0["draft"], "metric": "rmse"}
     feedback = app.draft_feedback(*_vals(app, d), a0, {"busy": False})
     assert "main metric → RMSE" in feedback[0] and "main metric MAE" in feedback[0]
-    assert app.render(a0)[4] == original[4] and counters() == before
+    assert view.render(a0)[4] == original[4] and counters() == before
     result, msg = app.run_forecast(*_vals(app, d), a0)
     stale, _, changed = app.apply_if_current(result, *_vals(app, a0["draft"]), a0, msg)
     assert stale is a0 and not changed
     applied, _, changed = app.apply_if_current(result, *_vals(app, d), a0, msg)
     assert changed and counters()[:3] == before[:3] and fake.calls == before[-2]
     assert applied["config"] == a0["config"] and applied["view"]["metric"] == "rmse"
-    output = app.render(applied)
+    output = view.render(applied)
     assert "<th>RMSE</th><th>MAE</th>" in output[4] and "Main metric: RMSE" in output[3]
     score_label = "RMSE · this forecast" if computed else "root mean squared error"
     assert score_label in output[8]
@@ -333,9 +339,9 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
     import os
 
     os.environ["WEATHER_LAB_BOOTSTRAP"] = "off"
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
-    demo = app.init(run_bootstrap=False)
+    demo = application.init(run_bootstrap=False)
     h = demo.wl
     main_metric = dict(zip(app.DRAFT_KEYS, h["draft"]))["metric"]
     assert main_metric.label == "Main metric"
@@ -397,7 +403,7 @@ def test_benchmark_owns_its_draft_capture_guard_and_applied_result(app_env, tmp_
 
     app, _, counters, forecast = app_env
     d = bench.defaults(forecast["suite"])
-    previous = {"draft": d, "config": bench.configuration(d), "path": str(app.RUNS[d["suite"]].path), "kind": "frozen"}
+    previous = {"draft": d, "config": bench.configuration(d), "path": str(results.RUNS[d["suite"]].path), "kind": "frozen"}
     guard = {"busy": False}
     vals = lambda v: [v[k] for k in bench.KEYS]
     before = counters()
@@ -413,7 +419,7 @@ def test_benchmark_owns_its_draft_capture_guard_and_applied_result(app_env, tmp_
                        ("features", ["tend"]), ("calendar", False), ("ctx", 90), ("horizon", 24),
                        ("resid_vars", ["t"]), ("atmos_fields", ["td"]), ("tend_lags", [3]),
                        ("variable", "pmer"), ("metric", "rmse"), ("lead", "6"), ("station", "07110"),
-                       ("season", "SON"), ("statuses", [app.STATUSES[0]]), ("lead_mode", "cumulative")):
+                       ("season", "SON"), ("statuses", [bench.STATUSES[0]]), ("lead_mode", "cumulative")):
         text, button = bench.feedback(*vals({**d, key: value}), previous, guard)
         assert "pending" in text and button["interactive"]
     assert not calls and counters() == before
@@ -549,12 +555,12 @@ def test_error_method_reuses_previous_direct_result_and_exports_each_configurati
     assert a["configs_by"][direct] == previous["config"] and repr(previous) == snapshot
     if previous_source == "exploratory":
         pd.testing.assert_frame_equal(a["exploratory"][direct], previous["exploratory"][direct])
-    monkeypatch.setattr(app, "ROOT", tmp_path)
-    _, _, fig, caption, _, _, csv, _, cards = app.render(a)
+    monkeypatch.setattr(view, "ROOT", tmp_path)
+    _, _, fig, caption, _, _, csv, _, cards = view.render(a)
     assert "AROME + predicted error" in app.applied_text(a) and "AROME + predicted error" in cards
     assert "Previous direct prediction retained" in caption and "previously applied forecast" in cards
     assert {"arome-raw", direct, a["primary"]} <= {t.legendgroup for t in fig.data}
-    assert app.model_style(a["primary"]) != app.model_style(direct)
+    assert labels.model_style(a["primary"]) != labels.model_style(direct)
     corrected_traces = [t for t in fig.data if t.legendgroup == a["primary"]]
     assert corrected_traces and all(t.line.color == "#6250d6" for t in corrected_traces)
     assert all(t.name == "Timestral 209M · AROME error correction" for t in corrected_traces if t.meta != "bridge")
@@ -619,14 +625,14 @@ def test_chart_cards_intervals_captions_and_export_share_one_applied_configurati
     app, fake, counters, a0 = app_env
     d = {**a0["draft"], "conditioning": "none", "features": ["tend"], "horizon": 72, "error_mode": "signed"}
     a, _, _ = _run(app, d, a0)
-    systems, band, fig, caption, this, desc, csv, smap, cards = app.render(a)
+    systems, band, fig, caption, this, desc, csv, smap, cards = view.render(a)
     mid = a["primary"]
     assert band["value"] == mid and mid in systems["value"]
     shaded = [t for t in fig.data if t.legendgroup == "band" and t.fill == "toself"]
-    assert shaded and all(t.name.endswith(app.model_name(mid)) for t in shaded if t.name)   # interval: applied system
+    assert shaded and all(t.name.endswith(labels.model_name(mid)) for t in shaded if t.name)   # interval: applied system
     plotted = max(pd.Timestamp(x, tz="UTC") if pd.Timestamp(x).tzinfo is None else pd.Timestamp(x) for t in fig.data if t.legendgroup == mid and t.yaxis == "y" and t.meta != "bridge"
                   for x in t.x)
-    origin = pd.Timestamp(app.RUNS["arome-issued-v2"].cases().set_index("case_id").loc[a["case"], "origin"])
+    origin = pd.Timestamp(results.RUNS["arome-issued-v2"].cases().set_index("case_id").loc[a["case"], "origin"])
     assert plotted - origin == pd.Timedelta(hours=72) and "leads 3–72 h" in caption
     assert "inference horizon 72 h" in cards and "Tendencies" in cards
     out = pd.read_csv(csv)
@@ -636,7 +642,7 @@ def test_chart_cards_intervals_captions_and_export_share_one_applied_configurati
     assert "signed error" in caption and fig.layout.yaxis2.title.text.startswith("Forecast −")
     import gradio as gr
 
-    assert all(x == gr.skip() for x in app.render(a, False))           # nothing applied: nothing redrawn
+    assert all(x == gr.skip() for x in view.render(a, False))           # nothing applied: nothing redrawn
 
 
 # --------------------------------------------------------------------------- applied exports
@@ -644,10 +650,10 @@ def test_chart_cards_intervals_captions_and_export_share_one_applied_configurati
 @needs_example
 def test_new_registered_group_uses_its_defaults_and_declared_data_dependencies(tmp_path, monkeypatch):
     from weather_lab import forecast, models
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
     from weather_lab_app.results import load_run
 
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": load_run(EXAMPLE)})
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": load_run(EXAMPLE)})
     a0 = app.initial_applied("arome-issued-v2")
     # The test group combines two existing inputs; its construction remains in the shared pipeline.
     class RegisteredGroup(feats.FeatureGroup):
@@ -688,14 +694,14 @@ def test_exports_keep_the_applied_overlays_without_overwriting_earlier_downloads
     from pathlib import Path
 
     app, _, _, a0 = app_env
-    monkeypatch.setattr(app, "ROOT", tmp_path)
-    first = Path(app.render(a0)[6])
+    monkeypatch.setattr(view, "ROOT", tmp_path)
+    first = Path(view.render(a0)[6])
     original = first.read_bytes()
     a1 = {**a0, "view": {**a0["view"], "shown": [a0["primary"]]}}
-    second = Path(app.render(a1)[6])
+    second = Path(view.render(a1)[6])
     assert second != first and first.read_bytes() == original
     assert set(pd.read_csv(second)["model"]) == {a0["primary"]}
-    assert Path(app.render(a0)[6]) == first
+    assert Path(view.render(a0)[6]) == first
     assert first.parent == tmp_path / ".tmp" / "codex" / "forecast-exports"
 
 
