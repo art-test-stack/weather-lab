@@ -1,4 +1,8 @@
 """Full-suite development execution with synthetic data and no model weights."""
+
+from weather_lab_app import benchmark as bench
+from weather_lab_app import labels
+from weather_lab_app import results
 import numpy as np
 import pandas as pd
 import pytest
@@ -39,15 +43,15 @@ def source(tmp_path):
 
 
 def render_development(out, monkeypatch):
-    from weather_lab_app import benchmark as bench, main as app
+    from weather_lab_app import benchmark as bench, forecast_state as app
     from weather_lab_app.results import load_run
 
     run = load_run(out)
-    monkeypatch.setitem(app.RUNS, "fixture", run)
-    monkeypatch.setitem(app.EXPERIMENTS, "fixture", {"headline": run.models, "default_systems": run.models,
+    monkeypatch.setitem(results.RUNS, "fixture", run)
+    monkeypatch.setitem(labels.EXPERIMENTS, "fixture", {"headline": run.models, "default_systems": run.models,
                         "band": run.models[-1], "reference": "persistence", "sample": "synthetic test"})
     d = {"suite": "fixture", "variable": "t", "metric": "rmse", "lead": "all", "split": "validation",
-         "station": "ALL", "season": "ALL", "statuses": app.STATUSES, "size": "28M", "conditioning": "none",
+         "station": "ALL", "season": "ALL", "statuses": bench.STATUSES, "size": "28M", "conditioning": "none",
          "lead_mode": "at"}
     cfg = ForecastConfig.make(run.run["forecast_config"]["model"], context_days=7, horizon_h=6, targets=("t",))
     outputs = bench.render({"draft": d, "config": cfg, "path": str(out), "kind": "development"})
@@ -120,7 +124,7 @@ def test_missing_selected_inputs_are_unavailable_without_loading_a_model(source,
 def test_t0_benchmark_execution_configuration_and_saved_replay(source, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from weather_lab.t0_adapter import T0
-    from weather_lab_app import benchmark as bench, main as app
+    from weather_lab_app import benchmark as bench, forecast_state as app
     from weather_lab_app.labels import model_name, model_style
     from weather_lab_app.results import training_status
 
@@ -148,7 +152,7 @@ def test_t0_benchmark_execution_configuration_and_saved_replay(source, tmp_path,
     controls = bench.on_saved(str(out), "fixture")
     assert controls[0] == "t0-gamma"
     d = dict(zip(bench.KEYS[1:11], controls)) | {"suite": "fixture"}
-    monkeypatch.setitem(app.RUNS, "fixture", SimpleNamespace(step_hours=3, manifest={"protocol": {"variables": ["t"]}}))
+    monkeypatch.setitem(results.RUNS, "fixture", SimpleNamespace(step_hours=3, manifest={"protocol": {"variables": ["t"]}}))
     assert bench.configuration(d).model == "t0-gamma"
 
 
