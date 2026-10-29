@@ -8,9 +8,8 @@ import pandas as pd
 import pytest
 
 from weather_lab.common import ROOT
-from weather_lab.forecast_config import ForecastConfig, check
+from weather_lab.forecast_config import ForecastConfig, build_adapter, check
 from weather_lab.rag import config
-from weather_lab.rag_adapters import foundation
 from weather_lab.rag_archive import ingest
 from weather_lab.rag_arome_error import ErrorIndex, build, make_batch
 from weather_lab.rag_index import load_index
@@ -63,7 +62,10 @@ def test_error_payload_and_native_arome_conditioning_for_both_families(error_cas
     assert isinstance(load_index(index.path), ErrorIndex)
     assert store.list("indexes") == [(f"AROME errors · {index.ident[:12]}", index.ident)]
     for name in ("Timestral-209M", "t0-gamma"):
-        model = foundation(name, index, "shape", 2, arome="archived")
+        request = ForecastConfig.make(name, 'archived', context_days=1, targets=('t', 'pmer'), step_hours=1,
+                                      retrieval_method='shape', retrieval_index=index.ident)
+        model = build_adapter(request, f'{name.lower()}-rag-shape', index=index, batch_size=8,
+                              arome_fields=['t', 'pmer'])
         native = model.build_inputs(batch)
         np.testing.assert_array_equal(native[0][:, :2], batch.history)
         np.testing.assert_allclose(native[1][:, 4:6, -27:], batch.arome)
@@ -116,7 +118,9 @@ def test_unverified_case_missing_arome_and_wrong_station_are_refused(error_cases
 def test_t0_residual_identity_includes_baseline_without_conditioning(error_cases):
     cfg, obs, issued, store, archive, index = error_cases
     batch = query(cfg, obs, issued)
-    model = foundation("t0-gamma", index, prediction_target="arome_error")
+    request = ForecastConfig.make('t0-gamma', context_days=1, targets=('t', 'pmer'), step_hours=1,
+                                  prediction_target='arome_error')
+    model = build_adapter(request, 't0-gamma', batch_size=8)
     changed = batch.arome.copy() + 1
     other = replace(batch, arome=changed, arome_inputs=replace(batch.arome_inputs, future=changed))
     original_native, other_native = model.build_inputs(batch), model.build_inputs(other)
