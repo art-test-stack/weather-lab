@@ -66,6 +66,13 @@ def test_discovery_filters_and_saved_only_routing(catalog, monkeypatch):
     assert applied["provenance"]["Windows per model call (recorded)"].tolist() == ["[1]", "[8]"]
     figure = panel.render(applied)[1]
     assert len(figure.data) == 3 and "AROME" in figure.data[-1].name
+    table = panel.render(applied)[2]
+    for trace in figure.data:
+        expected = table[table.model.eq(trace.name)].spread
+        np.testing.assert_allclose(trace.error_y.array, expected, equal_nan=True)
+        assert trace.error_y.symmetric and "population SD" in trace.hovertemplate
+    assert applied["leaderboard"].mae.tolist() == [1., 1., 2.]
+    assert applied["leaderboard"].n.tolist() == [1, 1, 1]
     monkeypatch.setattr(results, "verified_run", lambda *_: pytest.fail("Presentation reused points must not reload runs"))
     changed = {**d, "lead_mode": "through", "spread": True, "calendar_clock": "origin", "calendar_lead": "1",
                "calendar_spread": True}
@@ -74,8 +81,12 @@ def test_discovery_filters_and_saved_only_routing(catalog, monkeypatch):
     assert len(panel.render(reused)[1].data) == 3  # no cumulative spread band
     note, daily, monthly, hourly, detail = panel.render_calendar(reused)
     assert "forecast origin in UTC" in note and "lead 1 h only" in note
+    for trace in hourly.data:
+        expected = detail[(detail.model.eq(trace.name)) & detail.period.eq("hour")].spread
+        np.testing.assert_allclose(trace.error_y.array, expected, equal_nan=True)
+    assert all(trace.error_y.array is None for trace in panel.render(reused)[1].data)
     assert monthly["Observed pairs"].tolist() == [1, 1, 1]
-    assert "not confidence intervals" in note and len(hourly.data) == 6
+    assert "not confidence intervals" in note and len(hourly.data) == 3
     invalid, message = panel.read_saved({"draft": {**d, "selected": ["not-saved"]}, "previous": None}, catalog)
     assert invalid is None and "Select configurations" in message
 
@@ -102,6 +113,22 @@ def test_saved_event_graph_edits_never_read_or_apply(catalog, monkeypatch):
     controls = dict(zip(panel.KEYS, handles["draft"]))
     assert controls["calendar_clock"].value == "valid_time" and controls["calendar_lead"].value == "all"
     assert handles["submission"].value["busy"] and not handles["run"].interactive
+    assert controls["spread"].value and not controls["calendar_spread"].value
+    headings = [c["props"].get("value") for c in demo.config["components"] if c["type"] == "markdown"]
+    assert [v for v in headings if v and v.startswith("### ")] == [
+        "### 2026 temperature leaderboard", "### Error versus forecast horizon", "### Hour-of-day MAE",
+        "### Error over the calendar", "### Inspect one saved forecast"]
+    columns = {c["props"].get("elem_id"): c["id"] for c in demo.config["components"] if c["type"] == "column"}
+    def subtree(node):
+        return {node["id"]} | set().union(*(subtree(c) for c in node.get("children", [])))
+    def find(node, id):
+        if node["id"] == id:
+            return node
+        return next((found for c in node.get("children", []) if (found := find(c, id))), None)
+    sidebar = subtree(find(demo.config["layout"], columns["benchmark-config"]))
+    results_ids = subtree(find(demo.config["layout"], columns["benchmark-results"]))
+    assert {c._id for c in handles["draft"]} <= sidebar
+    assert {c._id for c in handles["render"]} <= results_ids
     protected = {handles["applied"]._id} | {o._id for o in handles["render"]}
     def root(fn):
         while fn.trigger_after is not None:
@@ -152,9 +179,10 @@ def test_missing_targets_stay_empty_across_all_views(catalog):
     assert applied is not None, message
     assert applied["support"]["observed_pairs"] == 0
     output = panel.render(applied)
-    assert len(output) == 13
+    assert len(output) == 16
     assert "0 matched observed pairs" in output[8]
     assert output[10].empty
+    assert output[15]["Observed pairs"].tolist() == [1, 1, 1]  # leaderboard stays temperature
 
 
 def test_saved_comparison_rejects_different_source_cases_and_stale_discovery(catalog, monkeypatch):
