@@ -109,6 +109,28 @@ def horizon(rows: pd.DataFrame, cumulative: bool = False) -> pd.DataFrame:
     return table
 
 
+def arome_window_mae(predictions, targets, cases, variable, station="ALL", split=None):
+    """One full 48-lead MAE per saved station/origin, using AROME's own observed support.
+
+    Partial windows retain their pair count but never receive a full-window score.
+    """
+    rows, support = matched({"arome-raw": predictions}, targets, cases, variable, station, split)
+    windows = cases[cases.eligible].copy()
+    if station != "ALL":
+        windows = windows[windows.station.eq(station)]
+    if split is not None:
+        windows = windows[windows.split.eq(split)]
+    windows["origin"] = pd.to_datetime(windows.origin, utc=True)
+    scores = rows.groupby("case_id").agg(mae=("abs_err", "mean"), n=("lead_h", "nunique"))
+    table = windows[["case_id", "station", "origin"]].join(scores, on="case_id")
+    table["n"] = table.n.fillna(0).astype(int)
+    table["complete"] = table.n.eq(48)
+    table.loc[~table.complete, "mae"] = np.nan
+    support["complete_windows"] = int(table.complete.sum())
+    support["incomplete_windows"] = int((~table.complete).sum())
+    return table.sort_values(["origin", "station"]), support
+
+
 def one_forecast(predictions, targets, cases, case_id, variable, reference=None):
     """Full saved curves with gaps, but errors only on identical observed pairs.
 
