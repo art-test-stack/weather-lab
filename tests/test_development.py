@@ -79,6 +79,8 @@ def test_full_suite_saves_matched_scores_failures_and_provenance_without_modifyi
     out = development.run(source, cfg, root=tmp_path / "results")
     assert calls == ["c0", "c1", "c2"]
     rec = read_json(out / "run.json")
+    for name in ("forecast_config.py", "arome_inputs.py"):
+        assert rec["code_sha256"][name] == sha256_file(development.ROOT / "src/weather_lab" / name)
     assert rec["development"] and rec["source_suite"] == "fixture" and rec["n_eligible"] == 3
     assert rec["forecast_config"] == cfg.as_dict()
     assert rec["checkpoint"]["revision"] == development.models.CHECKPOINTS[cfg.model].revision
