@@ -10,7 +10,7 @@ import gradio as gr
 import pandas as pd
 
 from weather_lab.common import sha256_file
-from weather_lab.saved_results import calendar, horizon, matched, one_forecast
+from weather_lab.saved_results import annual_temperature, calendar, horizon, matched, one_forecast
 from weather_lab_app import plots, results
 from weather_lab_app.labels import model_style
 from weather_lab_app.results import station_label
@@ -57,7 +57,7 @@ def defaults(catalog, split):
                 for name in wanted if any(r["summary"].get("configuration_id") == name for r in catalog.values())]
     return dict(cohort="arome", model="ALL", target="ALL", conditioning="ALL", features="ALL", rag="ALL",
                 selected=selected or list(catalog)[:4], variable="t", station="ALL", split=split,
-                lead_mode="at", spread=False, inspect_station="07149", origin="",
+                lead_mode="at", spread=True, inspect_station="07149", origin="",
                 calendar_clock="valid_time", calendar_lead="all", calendar_spread=False)
 
 
@@ -138,7 +138,13 @@ def _read_horizon(request, catalog):
             styles["arome-raw"] = model_style("arome-raw")
         targets, cases = source.targets(), source.cases()
         rows, support = matched(frames, targets, cases, d["variable"], d["station"], d["split"])
+        temperature = frames if d["variable"] == "t" else {
+            path: run.point_predictions(run.models[-1], "t") for path, run in zip(d["selected"], runs)}
+        if d["variable"] != "t" and reference is not None:
+            temperature["arome-raw"] = reference.point_predictions("arome-raw", "t")
+        leaderboard, annual_support = annual_temperature(temperature, targets, cases, d["station"], d["split"])
         return {"draft": d, "rows": rows, "support": support, "names": names, "styles": styles,
+                "leaderboard": leaderboard, "annual_support": annual_support,
                 "frames": frames, "targets": targets, "cases": cases,
                 "reference_path": reference.path if reference else None,
                 "provenance": pd.DataFrame(provenance)}, "Read saved predictions and targets; no inference, downloads or frozen-score writes."
@@ -212,7 +218,7 @@ def support_text(applied):
 
 def render(applied, changed=True):
     if not changed or applied is None:
-        return tuple(gr.skip() for _ in range(13))
+        return tuple(gr.skip() for _ in range(16))
     d = applied["draft"]
     table = horizon(applied["rows"], cumulative=d["lead_mode"] == "through")
     fig = plots.metric_by_lead(table, "mae", d["variable"], list(applied["names"]),
@@ -223,7 +229,25 @@ def render(applied, changed=True):
     exclusions["model"] = exclusions.model.map(applied["names"])
     table["model"] = table.model.map(applied["names"])
     return (support_text(applied), fig, table.drop(columns=["ci95_low", "ci95_high", "n_blocks"]), exclusions,
-            applied["provenance"], *render_inspection(applied), *render_calendar(applied))
+            applied["provenance"], *render_inspection(applied), *render_calendar(applied), *render_leaderboard(applied))
+
+
+def render_leaderboard(applied):
+    table, s = applied["leaderboard"].copy(), applied["annual_support"]
+    cohort = "AROME-supported" if applied["draft"]["cohort"] == "arome" else "broader weather-only"
+    note = (f"**Temperature MAE · 2026 forecast origins (UTC) · {cohort}.** "
+            "Selected configurations, equal weight per matched (window, lead) pair over leads 1–48 h. "
+            f"Matched origins: {s['origin_start']} – {s['origin_end']}; valid times: {s['valid_start']} – {s['valid_end']}. "
+            f"Stations: {', '.join(station_label(st) for st in s['stations']) or 'none'}. "
+            f"**{s['windows']:,} windows · {s['observed_pairs']:,} identical observed pairs** per system. "
+            f"{s['excluded_pairs']:,} excluded / {s['candidate_pairs']:,} candidate pairs "
+            f"({s['missing_target_pairs']:,} missing targets). "
+            "Available saved coverage only; this is not a complete-year or held-out validation score.")
+    fig = plots.comparison_bars(table, "mae", "t", "arome-raw", names=applied["names"], styles=applied["styles"])
+    table["model"] = table.model.map(applied["names"])
+    table = table.rename(columns={"model": "Configuration", "mae": "Temperature MAE (°C)",
+                                  "n": "Observed pairs", "n_cases": "Windows"})
+    return note, fig, table.round(4)
 
 
 def render_inspection(applied):
@@ -286,7 +310,7 @@ def render_calendar(applied):
     daily = plots.calendar_errors(tables["day"], d["variable"], "day", d["calendar_clock"],
                                    d["calendar_spread"], applied["names"], applied["styles"])
     hourly = plots.calendar_errors(tables["hour"], d["variable"], "hour", d["calendar_clock"],
-                                    d["calendar_spread"], applied["names"], applied["styles"])
+                                    True, applied["names"], applied["styles"])
     for table in tables.values():
         table["model"] = table.model.map(applied["names"])
     detail = pd.concat([table.assign(period=period) for period, table in tables.items()], ignore_index=True)
@@ -315,50 +339,55 @@ def build(suite, run, demo):
             d0["origin"] = supported[-1]
     applied, guard = gr.State(None), gr.State({"busy": True})
     request, pending, changed = gr.State(None), gr.State(None), gr.State(True)
-    with gr.Row():
-        cohort = gr.Radio([("AROME-supported", "arome"), ("Broader weather-only", "weather")], value=d0["cohort"], label="Coverage cohort")
-        variable = gr.Radio([("Temperature · °C", "t"), ("Pressure · hPa", "pmer")], value="t", label="Prediction variable")
-    with gr.Accordion("Filter saved configurations", open=False):
-        with gr.Row():
-            model = gr.Dropdown(["ALL"] + sorted({r["config"]["model"] for r in catalog.values()}), value="ALL", label="Model")
-            target = gr.Dropdown([("All", "ALL"), ("Direct weather", "weather"), ("AROME residual", "arome_error")], value="ALL", label="Prediction target")
-            conditioning = gr.Dropdown(["ALL"] + sorted({r["config"]["conditioning"] for r in catalog.values()}), value="ALL", label="AROME conditioning")
-            features = gr.Dropdown(["ALL", "none", "calendar"] + sorted({f["name"] for r in catalog.values() for f in r["config"]["features"]}), value="ALL", label="Feature / calendar inputs")
-            rag = gr.Dropdown(["ALL"] + sorted({r["config"].get("retrieval_method", "none") for r in catalog.values()}), value="ALL", label="RAG")
-    selected = gr.Dropdown(matching(catalog, d0), value=d0["selected"], multiselect=True, label="Saved configurations to compare")
-    with gr.Row():
-        station = gr.Dropdown([("All stations", "ALL")] + [(station_label(s["id"]), s["id"]) for s in run.stations()], value="ALL", label="Station")
-        split = gr.Dropdown(run.splits, value=d0["split"], label="Saved split", visible=len(run.splits) > 1)
-        lead_mode = gr.Radio([("At lead", "at"), ("Through lead", "through")], value="at", label="Horizon aggregation")
-        spread = gr.Checkbox(False, label="±1 SD spread (At lead only)")
-    with gr.Row():
-        inspect_station = gr.Dropdown([(station_label(s["id"]), s["id"]) for s in run.stations()], value=d0["inspect_station"], label="Inspect station")
-        origin = gr.Dropdown(origins, value=d0["origin"], label="Forecast origin to inspect (UTC)")
-    with gr.Row():
-        calendar_clock = gr.Radio([("Target valid time", "valid_time"), ("Forecast origin", "origin")], value="valid_time", label="Calendar grouping (UTC)")
-        calendar_lead = gr.Dropdown([("All 48 leads", "all")] + [(f"Lead {h} h", str(h)) for h in range(1, 49)], value="all", label="Calendar lead selection")
-        calendar_spread = gr.Checkbox(False, label="Calendar ±1 SD of absolute errors")
-    status = gr.Markdown()
-    button = gr.Button("Run saved comparison", variant="primary", interactive=False)
-    message, scope, figure = gr.Markdown(), gr.Markdown(), gr.Plot(show_label=False)
-    with gr.Accordion("Matched support, saved configuration and provenance", open=False):
-        table = gr.Dataframe(interactive=False, label="Horizon MAE and descriptive spread")
-        exclusions = gr.Dataframe(interactive=False, label="Exclusions (overlapping counts)")
-        provenance = gr.Dataframe(interactive=False, label="Original saved provenance")
-    gr.Markdown("### Inspect one saved forecast")
-    inspection_note, inspection_plot = gr.Markdown(), gr.Plot(show_label=False)
-    with gr.Accordion("Saved forecast values, signed errors and availability", open=False):
-        inspection_table = gr.Dataframe(interactive=False)
-    gr.Markdown("### Error over the calendar")
-    calendar_note, daily_plot = gr.Markdown(), gr.Plot(show_label=False)
-    monthly_table = gr.Dataframe(interactive=False, label="Monthly MAE and population SD (same units as the selected variable)")
-    hourly_plot = gr.Plot(show_label=False)
-    with gr.Accordion("Calendar pairs, window counts and spread", open=False):
-        calendar_table = gr.Dataframe(interactive=False)
+    with gr.Row(equal_height=False):
+        with gr.Column(scale=1, min_width=290, elem_id="benchmark-config"):
+            cohort = gr.Radio([("AROME-supported", "arome"), ("Broader weather-only", "weather")], value=d0["cohort"], label="Coverage cohort")
+            variable = gr.Radio([("Temperature · °C", "t"), ("Pressure · hPa", "pmer")], value="t", label="Prediction variable")
+            with gr.Accordion("Filter saved configurations", open=False):
+                model = gr.Dropdown(["ALL"] + sorted({r["config"]["model"] for r in catalog.values()}), value="ALL", label="Model")
+                target = gr.Dropdown([("All", "ALL"), ("Direct weather", "weather"), ("AROME residual", "arome_error")], value="ALL", label="Prediction target")
+                conditioning = gr.Dropdown(["ALL"] + sorted({r["config"]["conditioning"] for r in catalog.values()}), value="ALL", label="AROME conditioning")
+                features = gr.Dropdown(["ALL", "none", "calendar"] + sorted({f["name"] for r in catalog.values() for f in r["config"]["features"]}), value="ALL", label="Feature / calendar inputs")
+                rag = gr.Dropdown(["ALL"] + sorted({r["config"].get("retrieval_method", "none") for r in catalog.values()}), value="ALL", label="RAG")
+            selected = gr.Dropdown(matching(catalog, d0), value=d0["selected"], multiselect=True, label="Saved configurations to compare")
+            station = gr.Dropdown([("All stations", "ALL")] + [(station_label(s["id"]), s["id"]) for s in run.stations()], value="ALL", label="Station")
+            split = gr.Dropdown(run.splits, value=d0["split"], label="Saved split", visible=len(run.splits) > 1)
+            lead_mode = gr.Radio([("At lead", "at"), ("Through lead", "through")], value="at", label="Horizon aggregation")
+            spread = gr.Checkbox(True, label="±1 SD bars (At lead only)")
+            inspect_station = gr.Dropdown([(station_label(s["id"]), s["id"]) for s in run.stations()], value=d0["inspect_station"], label="Inspect station")
+            origin = gr.Dropdown(origins, value=d0["origin"], label="Forecast origin to inspect (UTC)")
+            calendar_clock = gr.Radio([("Target valid time", "valid_time"), ("Forecast origin", "origin")], value="valid_time", label="Calendar grouping (UTC)")
+            calendar_lead = gr.Dropdown([("All 48 leads", "all")] + [(f"Lead {h} h", str(h)) for h in range(1, 49)], value="all", label="Calendar lead selection")
+            calendar_spread = gr.Checkbox(False, label="Daily ±1 SD bars")
+            status = gr.Markdown()
+            button = gr.Button("Run saved comparison", variant="primary", interactive=False)
+        with gr.Column(scale=3, min_width=500, elem_id="benchmark-results"):
+            message = gr.Markdown()
+            gr.Markdown("### 2026 temperature leaderboard")
+            leaderboard_note, leaderboard_plot = gr.Markdown(), gr.Plot(show_label=False)
+            leaderboard_table = gr.Dataframe(interactive=False, label="Selected configurations · matched temperature pairs")
+            gr.Markdown("### Error versus forecast horizon")
+            scope, figure = gr.Markdown(), gr.Plot(show_label=False)
+            with gr.Accordion("Matched support, saved configuration and provenance", open=False):
+                table = gr.Dataframe(interactive=False, label="Horizon MAE and descriptive spread")
+                exclusions = gr.Dataframe(interactive=False, label="Exclusions (overlapping counts)")
+                provenance = gr.Dataframe(interactive=False, label="Original saved provenance")
+            gr.Markdown("### Hour-of-day MAE")
+            calendar_note, hourly_plot = gr.Markdown(), gr.Plot(show_label=False)
+            gr.Markdown("### Error over the calendar")
+            daily_plot = gr.Plot(show_label=False)
+            monthly_table = gr.Dataframe(interactive=False, label="Monthly MAE and population SD (same units as the selected variable)")
+            with gr.Accordion("Calendar pairs, window counts and spread", open=False):
+                calendar_table = gr.Dataframe(interactive=False)
+            gr.Markdown("### Inspect one saved forecast")
+            inspection_note, inspection_plot = gr.Markdown(), gr.Plot(show_label=False)
+            with gr.Accordion("Saved forecast values, signed errors and availability", open=False):
+                inspection_table = gr.Dataframe(interactive=False)
     controls = [cohort, model, target, conditioning, features, rag, selected, variable, station, split, lead_mode, spread,
                 inspect_station, origin, calendar_clock, calendar_lead, calendar_spread]
     outputs = [scope, figure, table, exclusions, provenance, inspection_note, inspection_plot, inspection_table,
-               calendar_note, daily_plot, monthly_table, hourly_plot, calendar_table]
+               calendar_note, daily_plot, monthly_table, hourly_plot, calendar_table,
+               leaderboard_note, leaderboard_plot, leaderboard_table]
 
     def edit(*values):
         *vals, current, busy = values
