@@ -282,6 +282,25 @@ def calendar_errors(table: pd.DataFrame, variable: str, period: str, clock: str,
     return fig
 
 
+def arome_windows(table: pd.DataFrame, variable: str) -> go.Figure:
+    """A dot per complete station/origin window; never average stations or downsample."""
+    complete = table[table.complete]
+    if complete.empty:
+        return _empty("No complete saved AROME 48-hour windows with all 48 observed pairs")
+    fig = go.Figure()
+    for number, (station, group) in enumerate(complete.groupby("station", sort=True)):
+        fig.add_trace(go.Scatter(x=group.origin, y=group.mae, mode="markers", name=station_label(station),
+            marker={"color": model_style("arome-raw")[0], "size": 5, "opacity": 0.65,
+                    "symbol": ["circle", "square", "diamond", "cross", "x"][number % 5]},
+            customdata=list(zip(group.case_id, group.n)),
+            hovertemplate="Origin %{x}<br>48-hour MAE %{y:.3f} " + unit(variable)
+                + "<br>%{customdata[1]} hourly pairs · leads 1–48"
+                + "<br>%{customdata[0]}<extra>" + station_label(station) + "</extra>"))
+    fig.update_xaxes(title="Forecast origin (UTC)")
+    fig.update_yaxes(title=f"48-hour MAE ({unit(variable)})", rangemode="tozero")
+    return _layout(fig, title="AROME · MAE for each complete 48-hour forecast window", height=440)
+
+
 def station_map(stations: list[dict], selected: str | None) -> go.Figure:
     fig = go.Figure()
     for s in stations:
