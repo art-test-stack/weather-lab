@@ -10,7 +10,7 @@ import gradio as gr
 import pandas as pd
 
 from weather_lab.common import sha256_file
-from weather_lab.saved_results import annual_temperature, calendar, horizon, matched, one_forecast
+from weather_lab.saved_results import annual_temperature, arome_window_mae, calendar, horizon, matched, one_forecast
 from weather_lab_app import plots, results
 from weather_lab_app.labels import model_style
 from weather_lab_app.results import station_label
@@ -143,13 +143,34 @@ def _read_horizon(request, catalog):
         if d["variable"] != "t" and reference is not None:
             temperature["arome-raw"] = reference.point_predictions("arome-raw", "t")
         leaderboard, annual_support = annual_temperature(temperature, targets, cases, d["station"], d["split"])
+        window_result = read_arome_windows(reference, source, catalog, d, frames, targets, cases)
         return {"draft": d, "rows": rows, "support": support, "names": names, "styles": styles,
                 "leaderboard": leaderboard, "annual_support": annual_support,
+                "arome_windows": window_result,
                 "frames": frames, "targets": targets, "cases": cases,
                 "reference_path": reference.path if reference else None,
                 "provenance": pd.DataFrame(provenance)}, "Read saved predictions and targets; no inference, downloads or frozen-score writes."
     except Exception as exc:
         return None, f"Saved comparison unavailable: {type(exc).__name__}: {exc}. Displayed results are unchanged."
+
+
+def read_arome_windows(reference, source, catalog, d, frames, targets, cases):
+    """Read the AROME-only diagnostic without restricting it to selected-model coverage."""
+    try:
+        if reference is None:
+            path = next((p for p, r in catalog.items() if not weather_only(r["config"])), None)
+            if path is None:
+                raise ValueError("No saved AROME reference is installed")
+            reference = results.verified_run(Path(path))
+        if _source(reference) != _source(source):
+            raise ValueError("Saved AROME reference belongs to different source cases/targets")
+        predictions = frames.get("arome-raw")
+        if predictions is None:
+            predictions = reference.point_predictions("arome-raw", d["variable"])
+        table, support = arome_window_mae(predictions, targets, cases, d["variable"], d["station"], d["split"])
+        return {"table": table, "support": support, "run_id": reference.run["run_id"]}
+    except Exception as exc:
+        return {"error": f"AROME window diagnostic unavailable: {type(exc).__name__}: {exc}"}
 
 
 def read_saved(request, catalog):
@@ -218,7 +239,7 @@ def support_text(applied):
 
 def render(applied, changed=True):
     if not changed or applied is None:
-        return tuple(gr.skip() for _ in range(16))
+        return tuple(gr.skip() for _ in range(19))
     d = applied["draft"]
     table = horizon(applied["rows"], cumulative=d["lead_mode"] == "through")
     fig = plots.metric_by_lead(table, "mae", d["variable"], list(applied["names"]),
@@ -229,7 +250,31 @@ def render(applied, changed=True):
     exclusions["model"] = exclusions.model.map(applied["names"])
     table["model"] = table.model.map(applied["names"])
     return (support_text(applied), fig, table.drop(columns=["ci95_low", "ci95_high", "n_blocks"]), exclusions,
-            applied["provenance"], *render_inspection(applied), *render_calendar(applied), *render_leaderboard(applied))
+            applied["provenance"], *render_inspection(applied), *render_calendar(applied), *render_leaderboard(applied),
+            *render_arome_windows(applied))
+
+
+def render_arome_windows(applied):
+    saved = applied["arome_windows"]
+    if "error" in saved:
+        return saved["error"], plots._empty(saved["error"]), pd.DataFrame()
+    table, s = saved["table"], saved["support"]
+    complete = table[table.complete]
+    note = (f"**AROME only · {s['complete_windows']:,} points = complete station/origin windows · "
+            f"{s['complete_windows'] * 48:,} observed pairs.** "
+            "Each point is the mean of 48 absolute errors at leads 1–48 h from one saved forecast origin. "
+            "Stations remain separate; consecutive hourly origins remain separate even when they share an issued AROME run. "
+            f"{s['incomplete_windows']:,} incomplete eligible windows have no MAE; "
+            f"{s['scheduled_windows'] - s['eligible_windows']:,} ineligible windows are excluded. "
+            f"Plotted origins: {complete.origin.min()} – {complete.origin.max()} UTC. "
+            f"Stations: {', '.join(station_label(st) for st in complete.station.unique()) or 'none'}. "
+            "This diagnostic uses AROME's own observed support and the applied station, split and variable; "
+            "selected Timestral coverage and calendar lead/grouping controls do not restrict it. "
+            "Incomplete windows remain in the table with available-pair counts. Overlapping windows are dependent; "
+            f"no confidence intervals. Fixed saved issued runs, no later forecast updates. Reference: `{saved['run_id']}`.")
+    detail = table.rename(columns={"case_id": "Saved window", "station": "Station", "origin": "Origin (UTC)",
+                                   "mae": "48-hour MAE", "n": "Available pairs / 48", "complete": "Complete"})
+    return note, plots.arome_windows(table, applied["draft"]["variable"]), detail
 
 
 def render_leaderboard(applied):
@@ -379,6 +424,10 @@ def build(suite, run, demo):
             monthly_table = gr.Dataframe(interactive=False, label="Monthly MAE and population SD (same units as the selected variable)")
             with gr.Accordion("Calendar pairs, window counts and spread", open=False):
                 calendar_table = gr.Dataframe(interactive=False)
+            gr.Markdown("### AROME error per 48-hour forecast window")
+            window_note, window_plot = gr.Markdown(), gr.Plot(show_label=False)
+            with gr.Accordion("AROME windows and incomplete coverage", open=False):
+                window_table = gr.Dataframe(interactive=False)
             gr.Markdown("### Inspect one saved forecast")
             inspection_note, inspection_plot = gr.Markdown(), gr.Plot(show_label=False)
             with gr.Accordion("Saved forecast values, signed errors and availability", open=False):
@@ -387,7 +436,7 @@ def build(suite, run, demo):
                 inspect_station, origin, calendar_clock, calendar_lead, calendar_spread]
     outputs = [scope, figure, table, exclusions, provenance, inspection_note, inspection_plot, inspection_table,
                calendar_note, daily_plot, monthly_table, hourly_plot, calendar_table,
-               leaderboard_note, leaderboard_plot, leaderboard_table]
+               leaderboard_note, leaderboard_plot, leaderboard_table, window_note, window_plot, window_table]
 
     def edit(*values):
         *vals, current, busy = values
