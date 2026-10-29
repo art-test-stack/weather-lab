@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab import predcache
-from weather_lab.forecast import CaseBatch, QUANTILE_LEVELS
+from weather_lab.forecast import QUANTILE_LEVELS, hourly_inputs
 from weather_lab.forecast_config import check
 from weather_lab.models import prefetch, resolve
 from weather_lab.rag_adapters import foundation
@@ -27,19 +27,12 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
         raise ValueError("The selected index does not match the 30-day hourly temperature/pressure protocol")
     archive = store.get("archives", index.meta["archive_id"])
     source = pd.read_parquet(archive / "observations.parquet")
-    source = source[source.station.eq(case["station"])].set_index("time").sort_index()
+    source = source[source.station.eq(case["station"])].sort_values("time")
     origin = pd.Timestamp(case["origin"])
-    end = origin - pd.Timedelta(hours=3)
-    times = pd.date_range(end=end, periods=720, freq="h")
-    history = source.reindex(times)[list(cfg.targets)].to_numpy(np.float32).T
-    if (np.isfinite(history).mean(axis=-1) < 0.8).any() or not np.isfinite(history[:, -1]).all():
-        raise ValueError("Hourly archive unavailable: insufficient causal observation context for this station/time")
     horizon = cfg.horizon_h + 3
-    future = pd.date_range(end + pd.Timedelta(hours=1), periods=horizon, freq="h")
     cases = pd.DataFrame([{"case_id": case.name, "station": case["station"], "origin": origin}])
-    batch = CaseBatch(cases, list(cfg.targets), history[None],
-                     np.array([end.tz_localize(None)], dtype="datetime64[ns]"),
-                     future.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None], 1)
+    batch = hourly_inputs(source, cases, list(cfg.targets), 720, cfg.horizon_h, 3,
+                          missing_error="Hourly archive unavailable: insufficient causal observation context for this station/time")
     provenance, product = {}, None
     correction = cfg.prediction_target == "arome_error"
     if cfg.conditioning != "none" or correction:
