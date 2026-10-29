@@ -10,7 +10,7 @@ import gradio as gr
 import pandas as pd
 
 from weather_lab.common import sha256_file
-from weather_lab.saved_results import annual_temperature, arome_window_mae, calendar, horizon, matched, one_forecast
+from weather_lab.saved_results import annual_temperature, arome_window_mae, calendar, horizon, matched, matrix_overview, one_forecast
 from weather_lab_app import plots, results
 from weather_lab_app.labels import model_style
 from weather_lab_app.results import station_label
@@ -364,6 +364,47 @@ def render_calendar(applied):
     return note, daily, monthly.round(4), hourly, detail
 
 
+def overview(suite, catalog, run):
+    """Prepare the fixed matrix selector from verified frozen aggregates, once at build time."""
+    saved = results.saved_matrix(suite, catalog)
+    if saved is None:
+        raise ValueError("No frozen all-configuration comparison is installed locally or on the mounted bucket")
+    configurations = saved["provenance"]["configurations"]
+    models = [*configurations, "arome-raw", "persistence"]
+    cases = run.cases()
+    table, support = matrix_overview(saved["scores"], saved["support"], cases, models, run.splits[-1])
+    scheduled = cases[cases.split.eq(run.splits[-1])]
+    names = {m: m.replace("/", " · ").replace("-prediction", " prediction") for m in configurations}
+    names.update({"arome-raw": "AROME · reference", "persistence": "Persistence · reference"})
+    table["model"] = table.model.map(names)
+    table = table.rename(columns={"model": "Configuration", "t_mae": "Temperature MAE (°C)",
+                                  "pmer_mae": "Pressure MAE (hPa)", "t_pairs": "Temperature pairs", "pmer_pairs": "Pressure pairs"})
+    table = table[["Configuration", "Temperature MAE (°C)", "Pressure MAE (hPa)", "Temperature pairs", "Pressure pairs"]]
+    routes = {names[m]: path for m, path in saved["paths"].items()}
+    note = (f"**{len(configurations)} saved configurations + AROME and persistence · frozen 2026 matrix · "
+            f"split `{run.splits[-1]}` · all stations · leads 1–48 h.** "
+            "Temperature and pressure are separate comparisons, each on identical observed pairs across every matrix system. "
+            "These fixed scores do not change with the plot filters. Selected-subset plots below may have broader support.\n\n")
+    for variable, label in (("t", "Temperature"), ("pmer", "Pressure")):
+        s = support[variable]
+        note += (f"{label}: **{s['pairs']:,} pairs · {s['windows']:,} windows**; "
+                 f"origins {s['origin_start']} – {s['origin_end']}; valid times {s['valid_start']} – {s['valid_end']} UTC; "
+                 f"stations {', '.join(station_label(st) for st in s['stations'])}; "
+                 f"{len(scheduled) * 48 - s['pairs']:,} scheduled pairs outside frozen common support.\n\n")
+    note += ("Click a configuration row to add/remove it from the pending plot selection, then **Run saved comparison**. "
+             "AROME is required in the AROME-supported cohort; persistence is a table-only reference. "
+             "Older standalone replays remain in the sidebar selector. Development replay; overlapping windows are dependent, no held-out validation claim.")
+    return {"table": table, "routes": routes, "note": note}
+
+
+def overview_selection(matrix, d):
+    if matrix is None:
+        return gr.skip()
+    table = matrix["table"].copy()
+    table.insert(0, "Plot", table.Configuration.map(matrix["routes"]).isin(d["selected"]))
+    return table.style.format({"Temperature MAE (°C)": "{:.4f}", "Pressure MAE (hPa)": "{:.4f}"}, na_rep="Unavailable")
+
+
 def build(suite, run, demo):
     catalog = results.saved_configurations(suite)
     gr.Markdown("## Compare saved configurations\nSaved predictions and targets only. Change settings, then click **Run saved comparison**.")
@@ -382,6 +423,17 @@ def build(suite, run, demo):
         supported = [value for _, value in origins if value in available]
         if supported:
             d0["origin"] = supported[-1]
+    gr.Markdown("### All saved matrix configurations · temperature and pressure")
+    try:
+        matrix = overview(suite, catalog, run)
+        gr.Markdown(matrix["note"])
+    except Exception as exc:
+        matrix = None
+        gr.Markdown(f"All-configuration table unavailable: {exc}. Saved subset comparisons remain available below.")
+    matrix_table = gr.Dataframe(overview_selection(matrix, d0) if matrix else pd.DataFrame(), interactive=False,
+        visible=matrix is not None, label="Click rows to choose configurations for the plots below", elem_id="matrix-selector",
+        datatype=["bool", "str", "number", "number", "number", "number"], max_height=500, wrap=True, show_search="filter")
+    status = gr.Markdown()
     applied, guard = gr.State(None), gr.State({"busy": True})
     request, pending, changed = gr.State(None), gr.State(None), gr.State(True)
     with gr.Row(equal_height=False):
@@ -404,7 +456,6 @@ def build(suite, run, demo):
             calendar_clock = gr.Radio([("Target valid time", "valid_time"), ("Forecast origin", "origin")], value="valid_time", label="Calendar grouping (UTC)")
             calendar_lead = gr.Dropdown([("All 48 leads", "all")] + [(f"Lead {h} h", str(h)) for h in range(1, 49)], value="all", label="Calendar lead selection")
             calendar_spread = gr.Checkbox(False, label="Daily ±1 SD bars")
-            status = gr.Markdown()
             button = gr.Button("Run saved comparison", variant="primary", interactive=False)
         with gr.Column(scale=3, min_width=500, elem_id="benchmark-results"):
             message = gr.Markdown()
@@ -446,7 +497,22 @@ def build(suite, run, demo):
         origins = origin_choices(cases, d["inspect_station"])
         if d["origin"] not in {v for _, v in origins}:
             d["origin"] = origins[max(0, len(origins) - 49)][1] if origins else ""
-        return gr.update(choices=choices, value=d["selected"]), gr.update(choices=origins, value=d["origin"]), *feedback(d, current, busy)
+        return (gr.update(choices=choices, value=d["selected"]), gr.update(choices=origins, value=d["origin"]),
+                *feedback(d, current, busy), overview_selection(matrix, d))
+
+    def choose(evt: gr.SelectData, *values):
+        *vals, current, busy = values
+        d = draft(*vals)
+        # Route by the row's stable label, including after client-side filtering or sorting.
+        name = evt.row_value[1] if evt.row_value and len(evt.row_value) > 1 else None
+        path = matrix["routes"].get(name)
+        allowed = {p for _, p in matching(catalog, d)}
+        if path is None or path not in allowed:
+            reason = ("This reference or unavailable run cannot be selected here." if path is None else
+                      "This configuration is excluded by the current cohort or saved-configuration filters. Adjust those first.")
+            return gr.skip(), gr.skip(), reason + " " + feedback(d, current, busy)[0], feedback(d, current, busy)[1], overview_selection(matrix, d)
+        d["selected"] = [p for p in d["selected"] if p != path] if path in d["selected"] else [*d["selected"], path]
+        return edit(*[d[k] for k in KEYS], current, busy)
 
     def worker(captured):
         return read_saved(captured, catalog)
@@ -458,7 +524,10 @@ def build(suite, run, demo):
         return feedback(draft(*vals), current, busy)
 
     for control in controls:
-        control.input(edit, controls + [applied, guard], [selected, origin, status, button], queue=False, show_progress="hidden")
+        control.input(edit, controls + [applied, guard], [selected, origin, status, button, matrix_table], queue=False, show_progress="hidden")
+    if matrix:
+        matrix_table.select(choose, controls + [applied, guard], [selected, origin, status, button, matrix_table],
+                            queue=False, show_progress="hidden")
     (button.click(begin, controls + [applied, guard], [request, button, message], trigger_mode="once", queue=False)
      .success(worker, request, [pending, message], concurrency_limit=1)
      .then(apply, [pending] + controls + [applied, message], [applied, message, changed])
@@ -469,4 +538,4 @@ def build(suite, run, demo):
      .then(render, [applied, changed], outputs)
      .then(finish, controls + [applied, guard], [status, button], queue=False))
     return {"draft": controls, "applied": applied, "run": button, "render": outputs, "submission": guard,
-            "captured_request": request, "catalog": catalog}
+            "captured_request": request, "catalog": catalog, "matrix": matrix_table, "matrix_data": matrix}
