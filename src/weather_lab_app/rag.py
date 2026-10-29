@@ -19,11 +19,11 @@ _LOCK = threading.Lock()
 
 @zerogpu.gpu(duration=60)
 def predict_on_device(adapter, batches):
-    from weather_lab.rag_evaluate import predict_cpu
+    from weather_lab.development import predict_cases
 
     adapter.device = zerogpu.inference_device()
     try:
-        return predict_cpu(adapter, batches)
+        return predict_cases(adapter, batches)
     finally:
         if zerogpu.on_zerogpu():
             models.MODELS.release("cuda")
@@ -69,8 +69,8 @@ def action(kind, archive=None, index=None, horizon=24, progress=gr.Progress()):
             # Retrieval-only methods stay on CPU. Foundation-model chunks request ZeroGPU explicitly.
             def predict(adapter, batches):
                 if not hasattr(adapter, "checkpoint"):
-                    from weather_lab.rag_evaluate import predict_cpu
-                    return predict_cpu(adapter, batches)
+                    from weather_lab.development import predict_cases
+                    return predict_cases(adapter, batches)
                 return predict_on_device(adapter, batches)
             selected = Index(store.get("indexes", index))
             if archive and selected.meta["archive_id"] != archive:
