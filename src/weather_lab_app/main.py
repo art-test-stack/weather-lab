@@ -9,7 +9,7 @@ from pathlib import Path
 import gradio as gr
 from weather_lab_app.labels import DEFAULT_EXPERIMENT
 from weather_lab_app.results import available_runs, calendar_value, calendar_info, hourly_exploration
-from weather_lab import features as FEATS
+from weather_lab import development, features as FEATS
 from weather_lab.forecast_config import PREDICTION_TARGETS
 
 
@@ -237,9 +237,8 @@ def build() -> gr.Blocks:
             with gr.Tab("Benchmark", id="benchmark"):
                 benchmark_suite = "hourly-2026-v3" if "hourly-2026-v3" in results.RUNS else next(
                     (s for s, r in results.RUNS.items() if not r.run.get("exploration")), DEFAULT_SUITE)
-                from weather_lab_app import saved_benchmark
 
-                saved_panel = saved_benchmark.build(benchmark_suite, results.RUNS[benchmark_suite], demo)
+                saved_panel = bench.build(benchmark_suite, results.RUNS[benchmark_suite], demo)
 
         # ---------------- wiring
         # Draft controls, in DRAFT_KEYS order. Their edits only reach `draft_feedback` (never `applied`).
@@ -312,7 +311,7 @@ def main() -> None:
         theme=gr.themes.Soft(primary_hue="blue", neutral_hue="stone", font=plots.FONT.split(", ")),
         css=CSS,
         allowed_paths=[str(r.path) for r in results.RUNS.values() if r.run.get("hourly_benchmark")]
-                      + [str(bench.development.location())])
+                      + [str(development.location())])
 
 
 if __name__ == "__main__":
