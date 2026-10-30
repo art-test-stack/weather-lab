@@ -23,12 +23,12 @@ The refactor branch is based on `ea742e3` and retains the accepted batching and 
 
 ## Sizes
 
-Python files and lines, before at the approved base `ea742e3`, after all production steps through step 10, before this documentation-only change. Counts include blank lines and comments.
+Python files and lines, before at the approved base `ea742e3`, after the merged refactor and AROME comparison correction. Counts include blank lines and comments.
 
 | Area | Before | After |
 |---|---:|---:|
-| Scientific production | 48 files / 9,666 lines | 49 / 9694 |
-| App production | 11 / 4,095 | 12 / 3386 |
+| Scientific production | 48 files / 9,666 lines | 49 / 9,694 |
+| App production | 11 / 4,095 | 12 / 3,385 |
 | Tests | 46 / 6,324 | 47 / 6,392 |
 | Tracked experiments | 16 / 2,285 | 16 / 2,286 |
 
@@ -39,10 +39,14 @@ Tests grew to keep executable contracts independent of optional downloaded examp
 - Full fast offline suite: `PYTHONPATH=src WEATHER_LAB_OFFLINE=1 HF_HUB_OFFLINE=1 python -m pytest -q` — **294 passed, 5 opt-in real-model tests deselected**. Existing pandas day-of-year deprecation warnings remain.
 - Independent rescoring of a temporary view of a saved run: CLI reports **byte-for-byte** identity across point, probabilistic, N/A, availability, paired, warm-tail, case and matched-pair score files. Original artifacts were only linked/read; rescoring wrote only to its temporary output.
 - Synthetic input and provenance comparisons for frozen, hourly and native/retrieval adapter paths are recorded in `.tmp/codex/repository-refactor/step-02/` through `step-09/`; parity was exact and targets remained separate.
-- `weather-lab-app build-space --out .tmp/codex/step-11/space` succeeded: 119 files, no data or weights.
+- `weather-lab-app build-space --out .tmp/codex/step-11/space` succeeded: 120 files, no data or weights.
 - The populated 39-configuration saved Benchmark was rendered and inspected earlier in the refactor. Final AROME comparison inspection at the reported hourly origin verified two distinct point-only systems, default selection, rendered chart/error traces, fixed issued-run provenance and retained missing values. No new tests were added for this final correction.
 - No full-year inference matrix, real-model download, MPS/CUDA/ZeroGPU hardware run, remote Space build, upload, deployment or publication was performed. The remote Space was not deployed.
 
 ## Final AROME comparison correction
 
 The first attempted fix put comparison rows in the TSFM cache, whose return path relabelled every row as the primary system. That attempt was superseded. `forecast.arome_comparisons` now uses the existing raw and seven-day, shrinkage-five bias-corrected adapters, separate from TSFM inputs and prediction caches. App state holds each system under its own identifier; the presentation layer excludes superseded saved rows, retains deterministic outputs and exports the actual applied curves. Native and retrieval forecasts retain their own archive and observation-delay policies. Comparisons use one origin-available issued run; missing leads remain missing. No scientific benchmark artifacts or archived cache entries were rewritten.
+
+The final merged checkout at `76c29ed` passed the same complete offline suite: 294 passed, 5 opt-in real-model tests deselected. All eight independently rescored tables remained byte-for-byte identical. CLI startup, dependency boundaries and the generated 120-file Space content passed. No tests were added during final correction or integration.
+
+Merged Gradio startup and its localhost HTTP configuration were verified: Forecast and Benchmark tabs, broader TSFM introduction, and the registered event graph are served successfully.
