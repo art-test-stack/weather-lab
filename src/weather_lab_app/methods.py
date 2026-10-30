@@ -72,7 +72,7 @@ def cache_md() -> str:
     ck = "\n".join(f"| {r['checkpoint']} | `{r['repo']}@{r['revision']}` | {'on disk' if r['on_disk'] else 'absent'} "
                    f"| {r['mb']} MB |" for r in st["checkpoints"])
     loaded = ", ".join(f"{r['repo'].split('/')[-1]} on {r['device']} (~{r['approx_mb']} MB)" for r in st["loaded"]) \
-        or "none (models load only for explicit forecast inference or new development benchmark runs)"
+        or "none (models load only for explicit forecast inference)"
     runs = "\n".join(f"| {EXPERIMENTS.get(s, {}).get('name', s)} | `{r.run['run_id'][:60]}` | {len(r.models)} | "
                      f"{r.source} |" for s, r in results.RUNS.items() if not r.run.get("exploration"))
     pc = st["prediction_cache"]
