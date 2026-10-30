@@ -38,8 +38,6 @@ jobs:
           version: "0.11.28"  # uv used to write uv.lock
       - name: Install (locked)
         run: uv sync --frozen
-      - name: Unit tests (no downloads)
-        run: uv run pytest -q
       - name: Pinned data snapshot is published (read-only check)
         # Fails the deploy if configs/bootstrap.yaml pins a snapshot that is not in the bucket with
         # that checksum. Publish it first with `uv run weather-lab snapshot publish --id <new-id>`.

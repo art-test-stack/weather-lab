@@ -4,7 +4,7 @@ This is a small, reproducible benchmark for **short-range probabilistic weather 
 
 **Research question.** Can Timestral improve station-level probabilistic forecasts on its own, and when it is conditioned on issued AROME predictions?
 
-> **Status (2026-10-25).** The 28M / 209M × AROME-input matrix is complete on the AROME suite ([results](docs/experiments/conditioning_matrix.md)). Initialization is complete. A context-length experiment has been validated on 2023 and its choice frozen; the full 2024 test has not been run. The smoke and AROME results are integration checks under stated assumptions, not performance claims.
+> **Status (2026-10-25).** The 28M / 209M × AROME-input matrix is complete on the AROME suite . Initialization is complete. A context-length experiment has been validated on 2023 and its choice frozen; the full 2024 test has not been run. The smoke and AROME results are integration checks under stated assumptions, not performance claims.
 
 ## Quick start
 
@@ -14,8 +14,6 @@ The repository contains code, configuration and documentation only. Data, saved 
 uv sync
 uv run weather-lab bootstrap                 # idempotent: fetch + verify + prepare; reuses the cache
 uv run weather-lab-app                       # app on http://127.0.0.1:7860 (runs the same bootstrap at startup)
-uv run pytest                                # unit tests, no downloads
-uv run pytest -m real_model                  # opt-in: real Timestral-5M inference (~21 MB)
 ```
 
 `bootstrap` has two modes, selected with `--mode` or by `configs/bootstrap.yaml`:
@@ -145,7 +143,7 @@ uv run weather-lab-app build-space --out dist/space       # code + generated REA
 - The front matter comes from `src/weather_lab_app/space.yaml`. The launcher only adds `src/` to the path and calls `weather_lab_app.main:main`.
 - No data or weights are uploaded. The generated front matter asks Spaces to **preload** Timestral-28M and -209M at build time (`preload_from_hub`, pinned full revisions, inference files only) into the default Hub cache, where the loader looks. At startup the app runs `bootstrap`, which fetches the snapshot and verifies the 28M weights. Exploratory forecasts are cached on the attached bucket (`/data/cache/predictions`; public bucket, so publicly readable). What survives restarts and rebuilds: [docs/caching.md](docs/caching.md).
 - Snapshot fallback: if the pinned snapshot cannot be fetched or fails its checksum, `bootstrap` tries `bootstrap.snapshot.fallbacks` in `configs/bootstrap.yaml` in order. These are earlier immutable snapshots, each pinned by SHA-256. `data/bootstrap_state.json` records the snapshot that was used (`snapshot.id`, `snapshot.fallback`, `snapshot.primary_error`), and the app shows a one-line notice under the question. The "Retry setup" screen appears only when no candidate can be installed and there are no saved runs.
-- `.github/workflows/deploy-space.yml` automates the build and upload. It runs on manual dispatch or a `space-v*` tag, uses the GitHub environment `huggingface-space` (secret `HF_TOKEN`, variable `HF_SPACE_ID`), runs the unit tests, builds `dist/space`, and uploads it with `hf upload --repo-type space --delete "*"`. That makes the Space an exact copy of the build; `.gitattributes` is kept.
+- `.github/workflows/deploy-space.yml` automates the build and upload. It runs on manual dispatch or a `space-v*` tag, uses the GitHub environment `huggingface-space` (secret `HF_TOKEN`, variable `HF_SPACE_ID`), builds `dist/space`, and uploads it with `hf upload --repo-type space --delete "*"`. That makes the Space an exact copy of the build; `.gitattributes` is kept.
 
 **Current deployment** ([ai-testack/weather-lab](https://huggingface.co/spaces/ai-testack/weather-lab)):
 
@@ -311,10 +309,9 @@ src/weather_lab_app/        app and deployment only (no benchmark logic)
   cli.py                    `weather-lab-app [serve|build-space]`
 .github/workflows/          deploy-space.yml (manual / tag-triggered Space deployment)
 docs/                       methods, sources, availability evidence, diagnostics, experiments, roadmap
-tests/                      unit tests; test_real_timestral.py is opt-in
 ```
 
-**Adding a model.** See [docs/adding_a_model.md](docs/adding_a_model.md) (contracts, capabilities and the existing Timestral/t0 integration points). In short: subclass `Adapter`, return a `ForecastBatch` on the benchmark quantile grid, register its `kind` in `evaluate.ADAPTERS` and its capabilities and pinned checkpoint in `weather_lab.models`. Scoring, storage, caching and the app pick it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`); `tests/test_app_packaging.py::test_labels_cover_every_configured_system` enforces this.
+**Adding a model.** See [docs/adding_a_model.md](docs/adding_a_model.md) (contracts, capabilities and the existing Timestral/t0 integration points). In short: subclass `Adapter`, return a `ForecastBatch` on the benchmark quantile grid, register its `kind` in `evaluate.ADAPTERS` and its capabilities and pinned checkpoint in `weather_lab.models`. Scoring, storage, caching and the app pick it up unchanged. For the UI, add a readable name, description and colour for its identifier in `src/weather_lab_app/labels.py` (`MODELS` and `STYLE`).
 
 
 ## Weather RAG research (2026 pilot)
@@ -518,26 +515,3 @@ use a fresh output directory. A local run now stops when an entire inference bat
 an all-failed setup completed. The recent-error feature also supports the hourly source's named AROME history;
 its v1 shared-lead row is refused if selected fields have different forecast leads.
 
-
-### Prompt for the later combined RAG + features experiment
-
-```text
-After the precision-corrected 39-run benchmark finishes, verify saved predictions and case availability
-before analyzing accuracy. Preserve its matrix plan, artifacts, precision policy and existing scores.
-Prepare a separate, versioned experiment combining RAG with solar elevation, temperature/pressure
-tendencies and recent AROME-error history, including AROME + predicted-error forecasting.
-Keep Timestral-28M, Timestral-209M and t0-gamma; Timestral-123M remains deferred.
-Reuse the pinned hourly Orly/Blagnac archive and causal indexes. Retain the 30-day context, 48-hour horizon,
-three-hour observation delay, explicit unavailable cases and no-future-label rules. Never interpolate
-missing issued forecasts. Forward every selected feature and its parameters through both model adapters;
-record definitions, actual inputs, precision and retrieval audits in provenance/cache identities.
-First propose matched ablations (no RAG, RAG alone, individual features, combined features, direct versus
-residual prediction) and wait for my choice under AGENTS.md. Compare on identical case/lead supports,
-separately by variable. Treat additive improvement as a hypothesis, not a guarantee.
-If a run is still active, do not modify its checkout; wait or obtain approval for an isolated worktree.
-Use focused tests plus a small real-device preflight. Do not start the full experiment or publish its
-results until I request it. Commit each changed file separately.
-```
-
-
-The current ownership map, consolidation ledger and verification limits are in [docs/refactor.md](docs/refactor.md).

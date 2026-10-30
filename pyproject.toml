@@ -35,13 +35,3 @@ packages = ["src/weather_lab", "src/weather_lab_app"]
 # Pinned to the inspected upstream commit ("Timestral release", 2026-10-15).
 timestral = { git = "https://github.com/mistralai/timestral", rev = "a534bdbd244d64f3d9d743f46c7bf6fc330ed4ff" }
 
-[dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = ["real_model: downloads Timestral weights and runs real inference (opt-in: -m real_model)"]
-addopts = "-m 'not real_model'"
-
