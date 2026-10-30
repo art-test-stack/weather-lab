@@ -72,21 +72,3 @@ def by_lead(rows: pd.DataFrame, metric: str, cumulative: bool = False, intervals
                         "n": len(sel), "n_cases": sel["case_id"].nunique(), "ci95_low": lo, "ci95_high": hi,
                         "n_blocks": nb})
     return pd.DataFrame(out)
-
-
-def lead_ranges(table: pd.DataFrame, metric: str, model: str, reference: str) -> list[tuple[int, int]]:
-    """Contiguous lead ranges where `model` scores better than `reference` (descriptive, no test)."""
-    piv = table.pivot(index="lead_h", columns="model", values=metric)
-    if model not in piv or reference not in piv:
-        return []
-    better = (piv[model] - 0.8).abs() < (piv[reference] - 0.8).abs() if metric.startswith("coverage") \
-        else piv[model] < piv[reference]
-    ranges, start = [], None
-    leads = list(piv.index)
-    for i, lead in enumerate(leads):
-        if better.loc[lead] and start is None:
-            start = lead
-        if start is not None and (not better.loc[lead] or i == len(leads) - 1):
-            ranges.append((start, lead if better.loc[lead] else leads[i - 1]))
-            start = None
-    return ranges
