@@ -376,7 +376,7 @@ def _explore_inputs(d: dict, cfg: ForecastConfig):
     _, _, case = case_forecast(run, d["case"], "t")
     obs = run.full_observations()
     needs = {dep for name in cfg.feature_names for dep in FEATS.GROUPS[name].needs}
-    needs_arome = bool(cfg.arome_mode) or "arome_history" in needs or cfg.prediction_target == "arome_error" or cfg.retrieval_method == "none"
+    needs_arome = bool(cfg.arome_mode) or "arome_history" in needs or cfg.prediction_target == "arome_error"
     station_obs = obs[obs["station"] == case["station"]]
     coords = run.station_coords()
     if run.run.get("exploration"):
@@ -509,7 +509,16 @@ def run_forecast(*vals):
         return None, f"⚠️ {e}.{keep}"
     except Exception as e:  # noqa: BLE001 - e.g. ZeroGPU quota/queue errors raised from the GPU worker
         return None, f"⚠️ Run forecast failed: {type(e).__name__}: {e}.{keep}"
-    new = present(make_applied(d, cfg, "exploratory", frame["model"].iloc[0], applied, frame, info), d, applied)
+    new = make_applied(d, cfg, "exploratory", frame["model"].iloc[0], applied, frame, info)
+    from weather_lab.forecast import arome_comparisons
+
+    if cfg.retrieval_method == "none":
+        comparisons = arome_comparisons(obs, case, list(cfg.targets), cfg.horizon_h,
+                                        step, results.RUNS[d["suite"]].arome_extract())
+    else:
+        comparisons = info.get("comparisons", {})
+    new["exploratory"].update(comparisons)
+    new = present(new, d, applied)
     how = ("Applied the cached exploratory forecast (no model run)." if info["cache_hit"] else
            f"Computed {settings_text(new['settings'])} and cached it ({predcache.location()[1]}; key {info['key']}).")
     return {"draft": d, "applied": new}, how
@@ -636,7 +645,7 @@ def feature_note(d: dict) -> str:
 def _view_systems(a: dict, variable: str) -> tuple[list[str], list[str], list[str]]:
     """(choices, defaults, probabilistic) for the applied result's view."""
     run, e = results.RUNS[a["suite"]], experiment_view(a["suite"], a["size"], a["setup"] or e_main(a["suite"]))
-    saved = _saved_models(run, variable)
+    saved = [m for m in _saved_models(run, variable) if m not in a.get("exploratory", {})]
     exploratory = [m for m, frame in a.get("exploratory", {}).items() if variable in set(frame["variable"])]
     defaults = [m for m in e["default_systems"] if m in saved]
     if a["source"] == "saved" and a["primary"] in saved and a["primary"] not in defaults:
@@ -647,7 +656,7 @@ def _view_systems(a: dict, variable: str) -> tuple[list[str], list[str], list[st
     if a["config"].prediction_target == "arome_error":
         defaults += [m for m in ("arome-raw", a.get("comparison")) if m in saved + exploratory and m not in defaults]
     preds = run.predictions()
-    prob = {m for m in saved if (preds.loc[preds["model"] == m, "output_type"] == "quantiles").any()} | set(exploratory)
+    prob = {m for m in saved if (preds.loc[preds["model"] == m, "output_type"] == "quantiles").any()} | (set(exploratory) - {"arome-raw", "arome-biascorr"})
     return saved + exploratory, defaults, [m for m in saved + exploratory if m in prob]
 
 
