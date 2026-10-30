@@ -44,7 +44,7 @@ uv run weather-lab --offline evaluate --config …   # no Hub access at all
   (default 4096; float32 parameter bytes). The least recently used model is evicted. Nothing loads at
   startup.
 - **Request state.** Context, covariates, masks and normalization statistics are built per call
-  (`Timestral.build_inputs`) and passed to `forecast()`. The cached object holds only weights. A per-model
+  (`Timestral.build_inputs` / `T0.build_inputs`) and passed to `forecast()`. The cached object holds only weights. A per-model
   lock serializes inference on the shared module.
 - **ZeroGPU.** The GPU is attached only during the `@spaces.GPU` function. The app loads the CUDA copy inside
   it and releases it afterwards (`MODELS.release("cuda")`); GPU-resident state is never assumed to survive
@@ -52,8 +52,8 @@ uv run weather-lab --offline evaluate --config …   # no Hub access at all
 
 ## Predictions
 
-- **Benchmark views read saved files only.** Opening Overview or Benchmark never loads weights
-  (`tests/test_app_packaging.py::test_benchmark_views_never_load_a_model`; also checked on real runs: the
+- **Benchmark views read saved files only.** Opening Forecast or Benchmark never loads weights
+  (`tests/test_app_packaging.py::test_saved_forecast_cards_and_help_never_load_a_model`; also checked on real runs: the
   model-load counter stayed at 0 while browsing).
 - **Exploratory cache key** (`weather_lab.predcache.make_key`): checkpoint repo + full revision, adapter
   version and preprocessing version, SHA-256 of the exact context and covariate arrays (values and NaN
