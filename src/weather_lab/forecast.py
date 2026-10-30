@@ -676,6 +676,14 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
                                aux_df=aux_df if "aux_history" in needs else None,
                                station_coords=station_coords, arome_history="arome_history" in needs,
                                arome_baseline=correction)
+    comparison_batch = None
+    if not correction and arome_mode is None and arome_df is not None and isinstance(case.get("arome_run"), str):
+        try:
+            comparison_batch = exploratory_inputs(obs, case, variables, context_days, arome_df=arome_df,
+                                                   horizon_steps=horizon_steps, step_hours=step_hours,
+                                                   station_coords=station_coords, arome_baseline=True)
+        except ValueError:
+            comparison_batch = None
     horizon_h = horizon_steps * step_hours
     flabel = "".join(" +" + n + ("*" if feats.non_default({n: p}) else "") for n, p in spec.items())
     method_label = " +AROME error correction" if correction else ""
@@ -709,6 +717,9 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
         payload["arome_history_runs"] = sorted({str(r) for r in np.ravel(batch.arome_history_run)
                                                 if not np.isnat(r)}) if "arome_history" in needs else None
     arrays = {"context": ctx, "known_covariates": known, **({"past_covariates": past} if spec else {})}
+    if comparison_batch is not None:
+        payload["arome_comparison"] = {"run": case.get("arome_run"), "bias_window_days": 7, "bias_shrink_k": 5}
+        arrays["arome_comparison"] = comparison_batch.arome
     error_history = {}
     if correction:
         payload.update(prediction_target=prediction_target, residual_version=1,
@@ -733,6 +744,14 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
         if correction:
             frame["arome_baseline"] = batch.arome.ravel()
             frame["predicted_error"] = frame["point"] - frame["arome_baseline"]
+        elif comparison_batch is not None:
+            raw = AromeRaw("arome-raw", variables, ["t", "pmer"]).predict(comparison_batch)
+            corrected_adapter = AromeBiasCorrected("arome-biascorr", variables, ["t", "pmer"])
+            corrected_adapter.attach_arome(arome_df)
+            corrected = corrected_adapter.predict(comparison_batch)
+            frame = pd.concat([frame, raw.to_frame(comparison_batch, "issued AROME"),
+                               corrected.to_frame(comparison_batch, "issued AROME + recent lead bias")],
+                              ignore_index=True)
         return frame
 
     settings = {"checkpoint": ck.name, "revision": ck.revision, "context_days": context_days,
