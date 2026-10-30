@@ -5,18 +5,20 @@ import copy
 import json
 import pickle
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.common import ROOT, read_json
+from weather_lab.common import ROOT, read_json, sha256_file
 from weather_lab.forecast import CaseBatch
 from weather_lab.rag import config
-from weather_lab.rag_adapters import Analog, foundation
+from weather_lab.forecast_config import ForecastConfig, build_adapter
+from weather_lab.rag_adapters import Analog
 from weather_lab.rag_archive import ingest, issued_forecasts
-from weather_lab.rag_evaluate import choose_arome, metrics, run
+from weather_lab.rag_evaluate import metrics, run
 from weather_lab.rag_index import Index, build
 from weather_lab.rag_store import Store
 
@@ -127,10 +129,12 @@ def test_retrieval_enters_both_native_generation_inputs(setup):
     rows, audit = index.retrieve(batch, "shape", 1)
     np.testing.assert_allclose(rows[:, :, 23], batch.history[:, :, -1], atol=1e-4)
     for name in ("Timestral-209M", "t0-gamma"):
-        plain = foundation(name, index)
-        no_calendar = foundation(name, index, calendar=False)
+        request = ForecastConfig.make(name, context_days=1, targets=('t', 'pmer'), step_hours=1)
+        plain = build_adapter(request, name.lower(), batch_size=8)
+        no_calendar = build_adapter(replace(request, calendar=False), name.lower(), batch_size=8)
         assert "calendar" not in no_calendar.inputs and no_calendar.build_inputs(batch)[1] is None
-        rag = foundation(name, index, "shape", 1)
+        request = replace(request, retrieval_method='shape', retrieval_index=index.ident)
+        rag = build_adapter(request, f'{name.lower()}-rag-shape', index=index, batch_size=8)
         native, augmented = plain.build_inputs(batch), rag.build_inputs(batch)
         np.testing.assert_array_equal(native[0], augmented[0])
         np.testing.assert_allclose(augmented[1][:, -2:], rows)
@@ -152,28 +156,6 @@ def test_gpu_worker_serialization_reopens_index_instead_of_copying_vectors(setup
     a, _ = index.retrieve(query(frame, index), "shape", 1)
     b, _ = restored.retrieve(query(frame, index), "shape", 1)
     np.testing.assert_array_equal(a, b)
-
-
-def test_issued_runs_cannot_be_stitched_or_mixed():
-    origin = pd.Timestamp("2026-06-01T06:00Z")
-    times = pd.date_range(origin + pd.Timedelta(hours=1), periods=2, freq="h")
-    rows = []
-    for var in ("t", "pmer"):
-        for i, valid in enumerate(times):
-            rows.append({"station": "07110", "run": origin - pd.Timedelta(hours=i + 3),
-                         "available_at": origin, "valid_time": valid, "variable": var, "value": 1.,
-                         "product": "meteofrance_arome_france", "availability_basis": "test_evidence",
-                         "source_kind": "issued_run"})
-    issued = issued_forecasts(pd.DataFrame(rows))
-    with pytest.raises(ValueError, match="single available issued run"):
-        choose_arome(issued, "07110", origin, times, ["t", "pmer"], "meteofrance_arome_france")
-    issued["source_kind"] = "stitched_historical_forecast"
-    with pytest.raises(ValueError, match="stitched"):
-        issued_forecasts(issued)
-    issued["source_kind"], issued["run"] = "issued_run", origin - pd.Timedelta(hours=3)
-    issued["available_at"] = origin + pd.Timedelta(hours=1)
-    with pytest.raises(ValueError, match="single available issued run"):
-        choose_arome(issued, "07110", origin, times, ["t", "pmer"], "meteofrance_arome_france")
 
 
 def test_replay_keeps_whole_year_and_explicit_forecast_gaps(setup):
@@ -226,6 +208,9 @@ def test_replay_scores_real_matched_rows_and_records_run_availability(setup, tmp
     archive = ingest(o, cfg, issued=p, store=store)
     index_path = build(archive.name, cfg, store)
     result = run(index_path.name, cfg, 24, store, log=lambda _: None)
+    record = read_json(result / "run.json")
+    for name in ("forecast_config.py", "forecast.py", "arome_inputs.py", "development.py"):
+        assert record["code_sha256"][name] == sha256_file(ROOT / "src/weather_lab" / name)
     scores = pd.read_csv(result / "metrics_point.csv")
     ar = scores[(scores.model == "arome-raw") & scores.lead_h.eq(0)]
     assert ar.n.eq(24).all() and ar.mae.eq(0).all()
@@ -310,29 +295,6 @@ def test_bucket_upload_is_verified_before_remote_commit_marker(tmp_path):
     assert len(store.list("archives")) == 1  # incomplete uploads are never selectable
 
 
-def test_research_panel_builds_without_loading_or_running_models(setup, monkeypatch):
-    import gradio as gr
-    from weather_lab import models
-    from weather_lab_app import rag
-
-    cfg, frame, store, archive, index = setup
-    def boom(*args, **kwargs):
-        raise AssertionError("model operation while browsing RAG controls")
-    monkeypatch.setattr(rag, "Store", lambda: store)
-    monkeypatch.setattr(models, "prefetch", boom)
-    monkeypatch.setattr(models.MODELS, "get", boom)
-    with gr.Blocks() as panel:
-        with gr.Tabs():
-            rag.build()
-    assert len(panel.config["dependencies"]) == 7
-    text = "\n".join(str(c.get("props", {}).get("value", "")) for c in panel.config["components"])
-    assert all(title in text for title in ("Available data and indexes", "Run or view evaluations"))
-    assert any(c.get("props", {}).get("label") == "Prepare data" and not c["props"]["open"]
-               for c in panel.config["components"])
-    assert all(event == "click" for d in panel.config["dependencies"] for _, event in d["targets"])
-    assert rag.show(None)[0] == "Select a saved RAG run."
-
-
 def test_hourly_index_slides_across_utc_hours_without_crossing_cutoff(setup):
     cfg, frame, store, archive, _ = setup
     hourly = copy.deepcopy(cfg)
@@ -341,3 +303,21 @@ def test_hourly_index_slides_across_utc_hours_without_crossing_cutoff(setup):
     assert set(index.windows.origin.dt.hour) == set(range(24))
     assert index.windows.origin.diff().dropna().eq(pd.Timedelta(hours=1)).all()
     assert index.windows.available_at.lt(pd.Timestamp('2026-01-01T00:00Z')).all()
+
+
+def test_rag_status_reads_metadata_without_model_operations(setup, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from weather_lab import models, rag
+
+    _, _, store, archive, index = setup
+    monkeypatch.setattr(rag, "Store", lambda root: store)
+    def no_model(*args, **kwargs):
+        pytest.fail("RAG status performed a model operation")
+    monkeypatch.setattr(models, "prefetch", no_model)
+    monkeypatch.setattr(models.MODELS, "get", no_model)
+    rag.command(SimpleNamespace(local_only=str(store.root), config=str(ROOT / "configs/rag_weather_v1.yaml"),
+                                rag_command="status"))
+    status = json.loads(capsys.readouterr().out)
+    assert status["root"] == str(store.root)
+    assert archive.name in {ident for _, ident in status["archives"]}
+    assert index.ident in {ident for _, ident in status["indexes"]}

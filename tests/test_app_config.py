@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from weather_lab_app import forecast_view as view
+from weather_lab_app import results
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -66,29 +69,29 @@ def test_bridge_starts_at_the_real_last_observation_when_the_origin_is_missing()
 
 
 def test_forecast_scores_report_not_yet_observable_without_truth():
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     rows = _rows("exploratory x", leads=range(3, 73, 3))
-    sc, n = app.forecast_scores(rows, _obs(future=False), ["exploratory x"])
-    assert n == 0 and "Not yet observable" in app.this_forecast_html(sc, n, "t")
-    sc, n = app.forecast_scores(pd.concat([rows, _rows("arome-raw", quantiles=False)]), _obs(),
+    sc, n = view.forecast_scores(rows, _obs(future=False), ["exploratory x"])
+    assert n == 0 and "Not yet observable" in view.this_forecast_html(sc, n, "t")
+    sc, n = view.forecast_scores(pd.concat([rows, _rows("arome-raw", quantiles=False)]), _obs(),
                                 ["exploratory x", "arome-raw"])
     assert n == 8 and int(sc.loc["exploratory x", "covers_h"]) == 72      # shared window only: 8 observed leads
 
 
 def test_mae_and_rmse_share_observed_leads_and_selected_metric_is_first():
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     first = _rows("first", leads=[3, 6, 9]).assign(point=[0.0, 4.0, 1000.0])
     second = _rows("second", leads=[3, 6]).assign(point=[2.0, 2.0])
     obs = pd.DataFrame({"time": first.valid_time, "observed": [0.0, 0.0, 0.0]})
-    scores, n = app.forecast_scores(pd.concat([first, second]), obs, ["first", "second"])
+    scores, n = view.forecast_scores(pd.concat([first, second]), obs, ["first", "second"])
     assert n == 2 and scores["n"].tolist() == [2, 2]
     assert scores["mae"].tolist() == [2.0, 2.0]
     assert scores.loc["first", "rmse"] == pytest.approx(np.sqrt(8))
     assert scores.loc["second", "rmse"] == 2.0
     for metric, headers in (("mae", "<th>MAE</th><th>RMSE</th>"), ("rmse", "<th>RMSE</th><th>MAE</th>")):
-        assert headers in app.this_forecast_html(scores, n, "t", metric)
+        assert headers in view.this_forecast_html(scores, n, "t", metric)
 
 
 def test_arome_coverage_never_pads():
@@ -121,10 +124,10 @@ class _Run:
 
 
 def test_defaults_are_paris_orly_and_the_largest_checkpoint(monkeypatch):
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     assert app.DEFAULT_SIZE == "209M" and app.DEFAULT_STATION == "07149"
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _Run(["arome-raw", "timestral-209m-mv-cal"])})
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": _Run(["arome-raw", "timestral-209m-mv-cal"])})
     assert app.default_station("arome-issued-v2") == "07149"
     assert app.default_context("arome-issued-v2", "209M", "archived") == 30   # from the run, not a slider default
 
@@ -148,38 +151,15 @@ def test_horizon_slice_equals_saved_scores_at_full_horizon_and_saved_predictions
         np.sqrt((x.point - x.observed).pow(2).mean()))
 
 
-@pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")
-def test_benchmark_rmse_uses_saved_scores_in_findings_plots_and_tables(monkeypatch):
-    from weather_lab import models
-    from weather_lab_app import main as app
-    from weather_lab_app.results import load_run
-
-    run = load_run(EXAMPLE)
-    monkeypatch.setattr(app, "RUNS", {run.suite: run})
-
-    def no_model(*args, **kwargs):
-        raise AssertionError("Selecting a metric must not load a model")
-
-    monkeypatch.setattr(models.ModelCache, "get", no_model)
-    finding, _, bars, lines, _, point, _ = app.benchmark(
-        run.suite, "t", "rmse", "all", run.splits[-1], "ALL", "ALL", app.STATUSES,
-        "209M", "archived", "cumulative")
-    saved = app._select(run.tables["metrics_point"], run.splits[-1], "t", "ALL", "ALL", "all")
-    assert "root mean squared error" in finding
-    assert "Root-mean-square error" in bars.layout.xaxis.title.text
-    assert "Root-mean-square error" in lines.layout.yaxis.title.text
-    np.testing.assert_allclose(bars.data[0].x, saved.rmse.sort_values(ascending=False))
-    assert list(point.columns[:3]) == ["System", "RMSE (°C)", "MAE (°C)"]
-    np.testing.assert_allclose(point["RMSE (°C)"], saved.rmse.sort_values().round(2))
 
 
 @pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")
 def test_horizon_limit_and_saved_resolution_on_the_real_example(monkeypatch):
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
     from weather_lab_app.results import load_run
 
     run = load_run(EXAMPLE)
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": run})
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": run})
     case = app.default_case("arome-issued-v2", "07149")
     assert app.horizon_limit("arome-issued-v2", case, "archived")[0] == 48       # AROME run ends there
     assert app.horizon_limit("arome-issued-v2", case, "none")[0] == app.EXPLORE_MAX_HOURS
@@ -192,3 +172,17 @@ def test_horizon_limit_and_saved_resolution_on_the_real_example(monkeypatch):
     assert app.saved_match(d, cfg45) is None                                     # different context: inference
     cfg72, issues = app.draft_config({**d, "horizon": 72})
     assert [i.kind for i in issues] == ["unavailable"] and "AROME" in issues[0].message
+
+
+def test_rmse_plots_preserve_values_and_physical_units():
+    from weather_lab_app import plots
+
+    table = pd.DataFrame({"model": ["a", "b"], "rmse": [2., 1.], "n": [4, 4],
+                          "lead_h": [3, 3], "n_cases": [4, 4], "ci95_low": [np.nan, np.nan],
+                          "ci95_high": [np.nan, np.nan]})
+    bars = plots.comparison_bars(table, "rmse", "t", None)
+    lines = plots.metric_by_lead(table, "rmse", "t", ["a", "b"])
+    assert "Root-mean-square error (°C)" in bars.layout.xaxis.title.text
+    assert "Root-mean-square error (°C)" in lines.layout.yaxis.title.text
+    np.testing.assert_allclose(bars.data[0].x, [2., 1.])
+    assert [list(trace.y) for trace in lines.data] == [[2.], [1.]]

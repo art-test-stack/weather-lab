@@ -16,8 +16,8 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-from weather_lab.common import unit_of
-from weather_lab.arome_inputs import AromeInputs
+from weather_lab.common import ts, unit_of
+from weather_lab.arome_inputs import AromeInputs, build_frozen_arome_inputs
 
 OutputType = Literal["point", "quantiles", "ensemble"]
 # Timestral's 21 levels; empirical-quantile climatology uses the same grid so pinball losses compare.
@@ -315,12 +315,6 @@ def load_timestral(checkpoint: str, revision: str, device: str = "cpu") -> tuple
     return item.forecaster, item.info
 
 
-def weights_cached(checkpoint: str, revision: str) -> bool:
-    from weather_lab.models import local_dir, resolve
-
-    return local_dir(resolve(checkpoint, revision)) is not None
-
-
 def ensure_checkpoint(size: str, allow_download: bool) -> bool:
     """Make the pinned checkpoint available locally (no GPU needed). Returns True if it was downloaded."""
     from weather_lab.models import CHECKPOINTS as REGISTRY, prefetch
@@ -575,6 +569,21 @@ def arome_coverage_steps(rows: np.ndarray) -> int:
 STATS = {"inputs_built": 0, "inference": 0}   # exploratory input constructions / model forward runs (process)
 
 
+def hourly_inputs(obs: pd.DataFrame, cases: pd.DataFrame, variables: list[str], context_hours: int,
+                  horizon_hours: int, delay: int, *,
+                  missing_error: str = "insufficient causal hourly observation context") -> CaseBatch:
+    """One station's delayed hourly inputs; preserve the caller's case metadata and never read targets."""
+    end = ts(cases.iloc[0].origin) - pd.Timedelta(hours=delay)
+    past = pd.date_range(end=end, periods=context_hours, freq="h")
+    future = pd.date_range(end + pd.Timedelta(hours=1), periods=horizon_hours + delay, freq="h")
+    history = obs.set_index("time").reindex(past)[variables].to_numpy(np.float32).T
+    if (np.isfinite(history).mean(axis=-1) < 0.8).any() or not np.isfinite(history[:, -1]).all():
+        raise ValueError(missing_error)
+    return CaseBatch(cases, variables, history[None],
+                     np.array([end.tz_localize(None)], dtype="datetime64[ns]"),
+                     future.tz_localize(None).to_numpy(dtype="datetime64[ns]")[None], 1)
+
+
 def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str], context_days: int,
                        arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
                        arome_fields: tuple[str, ...] = ("t", "pmer"), horizon_steps: int = 16,
@@ -582,7 +591,7 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
                        station_coords: dict | None = None, arome_history: bool = False,
                        arome_baseline: bool = False) -> CaseBatch:
     """A one-case batch from saved files: observations <= origin, and (optionally) issued + archived AROME
-    from the station extract with the same rules as the benchmark (`evaluate.arome_inputs`).
+    from the station extract with the same rules as the benchmark (`arome_inputs.build_frozen_arome_inputs`).
 
     `arome_history=True` adds the archived AROME history without the issued forecast (for features that
     need past AROME errors when AROME is not a conditioning input); it never falls back to observations.
@@ -604,9 +613,7 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
     if arome_mode or arome_baseline:
         if arome_df is None or not isinstance(case.get("arome_run"), str):
             raise ValueError("this forecast has no saved AROME run, so AROME conditioning is unavailable")
-        from weather_lab.evaluate import arome_inputs
-
-        arome_arr, hist_args = arome_inputs(arome_df, cases, origins, variables, list(arome_fields), horizon_steps,
+        arome_arr, hist_args = build_frozen_arome_inputs(arome_df, cases, origins, variables, list(arome_fields), horizon_steps,
                                             step_hours, t_ctx)
         rows = arome_arr[0, [variables.index(f) for f in arome_fields if f in variables]]
         covered = arome_coverage_steps(rows)
@@ -632,6 +639,47 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
         aux_args = {"aux_history": a.to_numpy(dtype=np.float32).T[None], "aux_variables": list(AUX_VARIABLES)}
     return CaseBatch(cases, variables, hist.to_numpy(dtype=np.float32).T[None], origins, future, step_hours,
                      arome_arr, **hist_args, **aux_args, station_coords=station_coords)
+
+
+def arome_comparisons(obs: pd.DataFrame, case: pd.Series, variables: list[str],
+                      horizon_h: int, step_hours: int, archive: pd.DataFrame | None,
+                      observation_delay_h: int = 0) -> dict[str, pd.DataFrame]:
+    """Deterministic exploratory references from one issued run, never model inputs or cached predictions."""
+    from weather_lab.arome_inputs import build_arome_inputs
+
+    fields = [v for v in variables if v in ("t", "pmer")]
+    if archive is None or not fields or not isinstance(case.get("arome_run"), str):
+        return {}
+    station = obs[obs.station.eq(case["station"])] if "station" in obs else obs
+    origin = pd.Timestamp(case["origin"])
+    cases = pd.DataFrame([{"case_id": case.name, "station": case["station"], "origin": origin,
+                           "arome_run": case["arome_run"]}])
+    # Missing observations can limit the correction, but must not hide an available raw forecast.
+    end = origin - pd.Timedelta(hours=observation_delay_h)
+    history_times = pd.date_range(end=end, periods=7 * 24 // step_hours, freq=f"{step_hours}h")
+    history = station.set_index("time").reindex(history_times)[fields].to_numpy(np.float32).T[None]
+    anchors = np.array([end.to_datetime64()], dtype="datetime64[ns]")
+    future = anchors[:, None] + np.arange(1, (horizon_h + observation_delay_h) // step_hours + 1)[None] * np.timedelta64(step_hours, "h")
+    batch = CaseBatch(cases, fields, history, anchors, future, step_hours)
+    named = build_arome_inputs(archive, batch.cases, batch.origins, batch.history_times(),
+                               batch.future_times, fields)
+    batch.arome = named.future
+    if not np.isfinite(batch.arome).any():
+        return {}
+    raw = AromeRaw("arome-raw", fields, fields)
+    corrected = AromeBiasCorrected("arome-biascorr", fields, fields)
+    corrected.attach_arome(archive)
+    out = {}
+    for adapter in (raw, corrected):
+        result = adapter.predict(batch)
+        result.validate(batch)
+        frame = result.to_frame(batch, "exploratory comparison (outside frozen benchmark)")
+        frame = frame[frame.lead_h.gt(0) & frame.lead_h.le(horizon_h)].copy()
+        frame["arome_run"] = case["arome_run"]
+        selected = archive[archive.station.eq(case["station"]) & archive.run.eq(pd.Timestamp(case["arome_run"])) & archive.available_at.le(origin)]
+        frame["arome_available_at"] = selected.available_at.max()
+        out[adapter.id] = frame
+    return out
 
 
 def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str], size: str, context_days: int,

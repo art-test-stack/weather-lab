@@ -112,18 +112,19 @@ def test_factory_rejects_unknown_model():
         build_adapter(cfg, "factory-unknown")
 
 
-@pytest.mark.parametrize(
-    ("conditioning", "prediction_target"),
-    [("substobs", "weather"), ("none", "arome_error")],
-)
-def test_factory_rejects_t0_substitution_and_residual_requests(conditioning, prediction_target):
-    cfg = ForecastConfig.make(
-        "t0-gamma", conditioning, calendar=False, context_days=30, horizon_h=48, targets=("t",),
-        prediction_target=prediction_target,
-    )
-
-    with pytest.raises(ValueError):
+def test_factory_rejects_t0_substitution():
+    cfg = ForecastConfig.make("t0-gamma", "substobs", targets=("t",))
+    with pytest.raises(ValueError, match="substitution is unsupported"):
         build_adapter(cfg, "factory-unsupported")
+
+
+@pytest.mark.parametrize("model", ["Timestral-209M", "t0-gamma"])
+def test_factory_supports_residual_prediction_without_additional_arome_covariates(model):
+    cfg = ForecastConfig.make(model, calendar=False, targets=("t",), prediction_target="arome_error")
+    adapter = build_adapter(cfg, "residual-without-conditioning")
+    assert adapter.prediction_target == "arome_error" and adapter.arome_mode is None
+    assert "arome" in adapter.inputs
+    assert adapter.params["residual_version"] == 1 and adapter.params["forecast_lead_input"]
 
 
 def test_factory_preserves_legacy_observations_arome_mode_override():
@@ -145,3 +146,43 @@ def test_factory_rejects_conflicting_runtime_arome_mode():
 
     with pytest.raises(ValueError):
         build_adapter(cfg, "factory-conflicting-mode", arome="archived")
+
+
+@pytest.mark.parametrize("model", ["Timestral-209M", "t0-gamma"])
+@pytest.mark.parametrize("method", ["level", "shape"])
+@pytest.mark.parametrize("kind", ["weather", "arome_error"])
+def test_retrieved_factory_preserves_native_options_and_retrieval_provenance(model, method, kind):
+    from types import SimpleNamespace
+    from weather_lab.rag_adapters import RetrievedTimestral, RetrievedT0
+
+    index = SimpleNamespace(ident="a" * 64, meta={"variables": ["t", "pmer"], "context_hours": 720,
+        "retrieval": {"k": 2}, "kind": kind, "payload": "synthetic errors", "product": "synthetic product"})
+    cfg = ForecastConfig.make(model, "archived", calendar=False, targets=("t", "pmer"), step_hours=1,
+        prediction_target="arome_error", precision="bf16", retrieval_method=method, retrieval_index=index.ident)
+    runtime = {"arome_fields": ["t", "pmer"], "batch_size": 8, "device": "cpu"}
+    ck = models.resolve(model)
+    constructor = RetrievedTimestral if ck.family == "timestral" else RetrievedT0
+    expected = constructor("retrieved", variables=list(cfg.targets), targets=list(cfg.targets),
+        checkpoint=ck.repo, revision=ck.revision, context_days=30, calendar=False, arome="archived",
+        prediction_target="arome_error", precision="bf16", index=index, method=method, k=2, **runtime)
+    actual = build_adapter(cfg, "retrieved", index=index, **runtime)
+    _assert_same_native_configuration(actual, expected)
+    assert actual.index is index and actual.method == method and actual.k == 2
+
+
+@pytest.mark.parametrize("mismatch", ["identity", "variables", "context"])
+def test_factory_rejects_an_index_from_another_forecast_configuration(mismatch):
+    from types import SimpleNamespace
+
+    index = SimpleNamespace(ident="a" * 64, meta={"variables": ["t", "pmer"], "context_hours": 720,
+                                                "retrieval": {"k": 2}})
+    cfg = ForecastConfig.make("Timestral-209M", targets=("t", "pmer"), retrieval_method="shape",
+                              retrieval_index=index.ident)
+    if mismatch == "identity":
+        index.ident = "b" * 64
+    elif mismatch == "variables":
+        index.meta["variables"] = ["pmer", "t"]
+    else:
+        index.meta["context_hours"] = 24
+    with pytest.raises(ValueError, match="index identity, variables or context"):
+        build_adapter(cfg, "wrong-index", index=index)

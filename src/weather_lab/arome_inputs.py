@@ -1,4 +1,4 @@
-"""Named AROME inputs, independent of the variables an adapter predicts."""
+"""AROME input construction: frozen common-run history and named per-field hourly vintages."""
 
 from __future__ import annotations
 
@@ -6,6 +6,27 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+
+def choose_arome(frame, station, origin, times, variables, product):
+    if frame is None:
+        raise ValueError("no issued-run archive; stitched historical series are not a forecast substitute")
+    valid = frame[(frame.station == station) & (frame["product"] == product)
+                  & (frame.available_at <= origin) & (frame.run <= origin)]
+    # Reject incomplete issues before pivoting each one for thousands of shifted hourly queries.
+    required = valid[valid.variable.isin(variables) & valid.valid_time.isin(times) & valid.value.notna()]
+    counts = required.groupby("run").size()
+    candidates = counts[counts >= len(variables) * len(times)].index
+    # Never stitch several runs to construct a complete forecast horizon.
+    for run in sorted(candidates, reverse=True):
+        selected = valid[valid.run == run]
+        table = selected.pivot(index="variable", columns="valid_time", values="value").reindex(
+            index=variables, columns=times)
+        if np.isfinite(table.to_numpy(dtype=float)).all():
+            return table.to_numpy(np.float32), {"run": str(run),
+                    "available_at": str(selected.available_at.max()),
+                    "availability_basis": sorted(selected.availability_basis.unique())}
+    raise ValueError("no single available issued run covers every requested variable and lead")
 
 
 @dataclass
@@ -89,3 +110,30 @@ def build_arome_inputs(frame: pd.DataFrame, cases: pd.DataFrame, origins: np.nda
     decisions = cases["origin"].to_numpy(dtype="datetime64[ns]") if "origin" in cases else origins
     inputs.validate(origins, history_times, future_times, decisions)
     return inputs
+
+
+def build_frozen_arome_inputs(arome_df: pd.DataFrame, cases: pd.DataFrame, origins: np.ndarray, variables: list[str],
+                 fields: list[str], h: int, step_hours: int, history_steps: int) -> tuple[np.ndarray, dict]:
+    """Issued AROME over the horizon (run named per case, available at its origin) and the archived
+    AROME history with provenance, as `CaseBatch` fields. Shared by the benchmark and exploratory runs."""
+    from weather_lab import arome as arome_mod
+
+    n, step = len(cases), pd.Timedelta(hours=step_hours)
+    arome_arr = np.full((n, len(variables), h), np.nan, dtype=np.float32)
+    a = arome_df.set_index(["run", "station", "variable", "valid_time"])["value"]
+    avail = arome_df.groupby("run")["available_at"].max()
+    for i, c in enumerate(cases.itertuples()):
+        run = pd.Timestamp(c.arome_run)
+        if avail[run] > c.origin:
+            raise ValueError(f"{c.case_id}: AROME run {run} not available at origin")
+        for j, var in enumerate(variables):
+            if var not in fields:
+                continue
+            for k in range(h):
+                valid = pd.Timestamp(origins[i], tz="UTC") + (k + 1) * step
+                arome_arr[i, j, k] = a.get((run, c.station, var, valid), np.nan)
+    hist_times = origins[:, None] + (np.arange(-(history_steps - 1), 1) * np.timedelta64(step_hours, "h"))[None]
+    decisions = cases["origin"].to_numpy(dtype="datetime64[ns]")
+    vals, runs, leads = arome_mod.archived_history(arome_df, cases["station"].to_numpy(), decisions, hist_times,
+                                                   variables)
+    return arome_arr, {"arome_history": vals, "arome_history_run": runs, "arome_history_lead_h": leads}

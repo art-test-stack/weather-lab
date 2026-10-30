@@ -54,20 +54,3 @@ class RetrievedTimestral(Retrieved, Timestral):
 
 class RetrievedT0(Retrieved, T0):
     pass
-
-
-def foundation(name, index, method=None, k=5, device="cpu", calendar=True, arome=None, prediction_target="weather", precision="native"):
-    from weather_lab.models import CHECKPOINTS
-
-    ck = CHECKPOINTS[name]
-    classes = {("timestral", False): Timestral, ("timestral", True): RetrievedTimestral,
-               ("t0", False): T0, ("t0", True): RetrievedT0}
-    kind = classes[(ck.family, method is not None)]
-    ident = f"{name.lower()}-rag-{method}" if method else name.lower()
-    kwargs = {"index": index, "method": method, "k": k} if method else {}
-    if precision != "native":
-        kwargs["precision"] = precision
-    return kind(ident, variables=index.meta["variables"], targets=index.meta["variables"], checkpoint=ck.repo,
-                revision=ck.revision, context_days=index.meta["context_hours"] // 24,
-                calendar=calendar, device=device, batch_size=8, arome=arome,
-                arome_fields=index.meta["variables"] if arome else [], prediction_target=prediction_target, **kwargs)

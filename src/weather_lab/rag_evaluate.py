@@ -10,9 +10,12 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 
+from weather_lab.arome_inputs import choose_arome
 from weather_lab.common import git_revision, now_utc, sha256_file, sha256_text, ts, write_json
+from weather_lab.development import predict_cases
 from weather_lab.forecast import CaseBatch, ForecastBatch
-from weather_lab.rag_adapters import Analog, foundation
+from weather_lab.forecast_config import ForecastConfig, build_adapter
+from weather_lab.rag_adapters import Analog
 from weather_lab.rag_archive import issued_forecasts, observations
 from weather_lab.rag_index import Index
 from weather_lab.rag_store import Store
@@ -44,41 +47,8 @@ def metrics(predictions: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def choose_arome(frame, station, origin, times, variables, product):
-    if frame is None:
-        raise ValueError("no issued-run archive; stitched historical series are not a forecast substitute")
-    valid = frame[(frame.station == station) & (frame["product"] == product)
-                  & (frame.available_at <= origin) & (frame.run <= origin)]
-    # Reject incomplete issues before pivoting each one for thousands of shifted hourly queries.
-    required = valid[valid.variable.isin(variables) & valid.valid_time.isin(times) & valid.value.notna()]
-    counts = required.groupby("run").size()
-    candidates = counts[counts >= len(variables) * len(times)].index
-    # Never stitch several runs to construct a complete forecast horizon.
-    for run in sorted(candidates, reverse=True):
-        selected = valid[valid.run == run]
-        table = selected.pivot(index="variable", columns="valid_time", values="value").reindex(
-            index=variables, columns=times)
-        if np.isfinite(table.to_numpy(dtype=float)).all():
-            return table.to_numpy(np.float32), {"run": str(run),
-                    "available_at": str(selected.available_at.max()),
-                    "availability_basis": sorted(selected.availability_basis.unique())}
-    raise ValueError("no single available issued run covers every requested variable and lead")
-
-
-def predict_cpu(adapter, batches):
-    results = []
-    for batch in batches:
-        try:
-            result = adapter.predict(batch)
-            result.validate(batch)
-            results.append((result, ""))
-        except Exception as exc:
-            results.append((None, f"{type(exc).__name__}: {exc}"))
-    return results
-
-
 def run(index_id: str, cfg: dict, horizon_h: int, store: Store | None = None,
-        predict=predict_cpu, progress=None, log=print) -> Path:
+        predict=predict_cases, progress=None, log=print) -> Path:
     store = store or Store()
     if horizon_h not in cfg["horizons_hours"]:
         raise ValueError("horizon must be predeclared in the RAG protocol")
@@ -100,7 +70,13 @@ def run(index_id: str, cfg: dict, horizon_h: int, store: Store | None = None,
     methods, k = cfg["retrieval"]["methods"], cfg["retrieval"]["k"]
     adapters = [Analog(f"analogue-{m}", index, m, k) for m in methods]
     for name in cfg["foundation_models"]:
-        adapters.extend([foundation(name, index)] + [foundation(name, index, m, k) for m in methods])
+        for method in [None, *methods]:
+            request = ForecastConfig.make(name, context_days=index.meta["context_hours"] // 24,
+                horizon_h=horizon_h, step_hours=1, targets=tuple(index.meta["variables"]),
+                retrieval_method=method or "none", retrieval_index=index.ident if method else "")
+            ident = f"{name.lower()}-rag-{method}" if method else name.lower()
+            adapters.append(build_adapter(request, ident, index=index if method else None,
+                                          batch_size=8, arome_fields=[]))
     model_ids = ["persistence", "arome-raw"] + [a.id for a in adapters]
     origins = pd.date_range(start if cfg["evaluation"].get("stride_hours") == 1 else start + pd.Timedelta(hours=cfg["origin_hour_utc"]),
                             end, freq="h" if cfg["evaluation"].get("stride_hours") == 1 else "D", inclusive="left")
@@ -224,7 +200,8 @@ def run(index_id: str, cfg: dict, horizon_h: int, store: Store | None = None,
                    "wall_s": time.perf_counter() - started, "requested_cases": len(cases),
                    "cases_with_context": len(batches), "observation_availability": cfg["observation_availability"],
                    "runtime_versions": versions,
-                   "code_sha256": {p.name: sha256_file(p) for p in Path(__file__).parent.glob("rag*.py")},
+                   "code_sha256": {p.name: sha256_file(p) for p in [*Path(__file__).parent.glob("rag*.py"),
+                       *(Path(__file__).with_name(n) for n in ("forecast_config.py", "forecast.py", "arome_inputs.py", "development.py"))]},
                    "observation_delay_hours": delay, "selection": "predeclared pilot; no tuning on 2026 outcomes",
                    "comparison": "rank only all_systems_common; paired_vs_arome supports can differ",
                    "data_sha256": {p.name: sha256_file(p) for p in archive.glob("*.parquet")}})

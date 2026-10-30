@@ -81,3 +81,28 @@ def test_incompatible_inputs_are_not_combined_and_batch_size_is_validated():
         development._combine_cases(batches)
     with pytest.raises(ValueError, match='positive'):
         development.predict_cases(adapter, batches, batch_size=0)
+
+
+@pytest.mark.parametrize("failure", ["prediction", "validation"])
+def test_single_case_execution_preserves_metadata_and_isolates_failures(failure):
+    class FailingEcho(Echo):
+        def predict(self, batch):
+            result = super().predict(batch)
+            if batch.cases.case_id.tolist() == ['c1']:
+                if failure == "prediction":
+                    raise RuntimeError("synthetic prediction failure")
+                return replace(result, point=result.point[..., :1])
+            return result
+
+    adapter = FailingEcho()
+    results = development.predict_cases(adapter, cases(3))
+    assert adapter.calls == [['c0'], ['c1'], ['c2']]
+    expected = ("RuntimeError: synthetic prediction failure" if failure == "prediction" else
+                "ValueError: echo: point shape (1, 1, 1) != (1, 1, 2)")
+    assert results[1] == (None, expected)
+    for i in (0, 2):
+        result, reason = results[i]
+        assert reason == ''
+        assert result.info == {'n_cases': 1, 'retrieval': [{'case_id': f'c{i}'}],
+                               'residual_observed_steps': [[4]]}
+        np.testing.assert_array_equal(result.point, np.full((1, 1, 2), 10 + i, np.float32))

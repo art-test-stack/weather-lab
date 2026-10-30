@@ -37,14 +37,6 @@ def configurations(config):
     return result
 
 
-def verify_run(path):
-    rec = read_json(path / "run.json")
-    for name, digest in rec["files_sha256"].items():
-        if Path(name).name != name or sha256_file(path / name) != digest:
-            raise ValueError(f"saved run failed verification: {path / name}")
-    return rec
-
-
 def completed(out, config, configs):
     found = {}
     for path in sorted((out / "runs").glob("*/run.json")):
@@ -53,7 +45,7 @@ def completed(out, config, configs):
             raise ValueError("output contains results from another source suite; choose a new output directory")
         for name, cfg in configs:
             if rec["forecast_config"] == cfg.as_dict():
-                verify_run(path.parent)
+                development.verify_run(path.parent)
                 found[name] = path.parent
                 break
     return found
@@ -62,7 +54,7 @@ def completed(out, config, configs):
 def plan(config, device):
     files = ("local_benchmark.py", "development.py", "forecast.py", "forecast_config.py", "hourly_benchmark.py",
              "features.py", "t0_adapter.py", "rag_adapters.py", "rag_index.py", "rag_arome_error.py", "rag_evaluate.py",
-             "arome_inputs.py", "precision.py", "models.py", "suite.py", "common.py", "evaluate.py")
+             "arome_inputs.py", "precision.py", "models.py", "suite.py", "common.py", "evaluate.py", "scoring.py")
     runtime = environment()
     return {"matrix": config["matrix"], "suite": config["suite"], "source_artifact": config["source_artifact"],
             "device": device, "inference_batch_size": BATCH_SIZE,
@@ -142,7 +134,7 @@ def _primary(path):
 
 def compare(config, out, log=print):
     """Stream the common support first, then score each configuration on exactly those same pairs."""
-    from weather_lab.evaluate import _add_skill, _cube, _row_scores
+    from weather_lab.scoring import _add_skill, _cube, _row_scores
 
     configs = configurations(config)
     found = completed(Path(out), config, configs)

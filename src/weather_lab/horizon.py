@@ -1,6 +1,6 @@
 """Error through the forecast window, recomputed from saved predictions (no model calls).
 
-Uses the scorer's own row losses (`evaluate._row_scores`) and common valid set (`evaluate.common`), so
+Uses the scorer's own row losses (`scoring._row_scores`) and common valid set (`scoring.common`), so
 "at lead H" values equal the saved per-lead score tables. Two views:
 
 - **at lead H**: mean over the matched (case) pairs at that lead only;
@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from weather_lab.evaluate import MIN_BLOCKS_FOR_CI, _row_scores, common
+from weather_lab.scoring import MIN_BLOCKS_FOR_CI, _row_scores, common
 
 METRIC_COLS = {"mae": "abs_err", "rmse": "sq_err", "bias": "err", "pinball": "pinball", "coverage80": "in80",
                "coverage90": "in90", "width80": "width80", "width90": "width90"}
@@ -72,21 +72,3 @@ def by_lead(rows: pd.DataFrame, metric: str, cumulative: bool = False, intervals
                         "n": len(sel), "n_cases": sel["case_id"].nunique(), "ci95_low": lo, "ci95_high": hi,
                         "n_blocks": nb})
     return pd.DataFrame(out)
-
-
-def lead_ranges(table: pd.DataFrame, metric: str, model: str, reference: str) -> list[tuple[int, int]]:
-    """Contiguous lead ranges where `model` scores better than `reference` (descriptive, no test)."""
-    piv = table.pivot(index="lead_h", columns="model", values=metric)
-    if model not in piv or reference not in piv:
-        return []
-    better = (piv[model] - 0.8).abs() < (piv[reference] - 0.8).abs() if metric.startswith("coverage") \
-        else piv[model] < piv[reference]
-    ranges, start = [], None
-    leads = list(piv.index)
-    for i, lead in enumerate(leads):
-        if better.loc[lead] and start is None:
-            start = lead
-        if start is not None and (not better.loc[lead] or i == len(leads) - 1):
-            ranges.append((start, lead if better.loc[lead] else leads[i - 1]))
-            start = None
-    return ranges

@@ -13,7 +13,8 @@ import pandas as pd
 import yaml
 
 from weather_lab.common import ROOT, environment, now_utc, read_json, sha256_file, write_json
-from weather_lab.evaluate import INTERVALS, score, score_run
+from weather_lab.evaluate import score_run
+from weather_lab.scoring import INTERVALS, score
 from weather_lab.forecast import QUANTILE_LEVELS, qcol
 from weather_lab.suite import cases_from_manifest
 
@@ -203,7 +204,7 @@ def independent_rescore(out: Path) -> dict:
                     assert delta <= 1e-10, (model, metric, delta)
                     checked += 1
     return {"passed": True, "numeric_tolerance": 1e-10, "max_absolute_difference": max_difference,
-            "independently_checked_values": checked, "method": "weather_lab.evaluate.score on persisted predictions, targets and period cases"}
+            "independently_checked_values": checked, "method": "weather_lab.scoring.score on persisted predictions, targets and period cases"}
 
 
 def save_outputs(out: Path, predictions: pd.DataFrame, targets: pd.DataFrame, cases: pd.DataFrame,

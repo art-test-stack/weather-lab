@@ -20,7 +20,8 @@ import yaml
 from error_wrapper import ResidualT0
 from weather_lab import features, models
 from weather_lab.common import ROOT, environment, load_config, read_json, sha256_file, write_json
-from weather_lab.evaluate import make_batch, score
+from weather_lab.evaluate import make_batch
+from weather_lab.scoring import score
 from weather_lab.forecast import Timestral
 from weather_lab.practical import matched_rows, period_cases, summaries
 from weather_lab.suite import cases_from_manifest

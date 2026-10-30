@@ -1,4 +1,6 @@
 """Full-suite development execution with synthetic data and no model weights."""
+
+from weather_lab_app import results
 import numpy as np
 import pandas as pd
 import pytest
@@ -38,24 +40,12 @@ def source(tmp_path):
     return p
 
 
-def render_development(out, monkeypatch):
-    from weather_lab_app import benchmark as bench, main as app
-    from weather_lab_app.results import load_run
-
-    run = load_run(out)
-    monkeypatch.setitem(app.RUNS, "fixture", run)
-    monkeypatch.setitem(app.EXPERIMENTS, "fixture", {"headline": run.models, "default_systems": run.models,
-                        "band": run.models[-1], "reference": "persistence", "sample": "synthetic test"})
-    d = {"suite": "fixture", "variable": "t", "metric": "rmse", "lead": "all", "split": "validation",
-         "station": "ALL", "season": "ALL", "statuses": app.STATUSES, "size": "28M", "conditioning": "none",
-         "lead_mode": "at"}
-    cfg = ForecastConfig.make(run.run["forecast_config"]["model"], context_days=7, horizon_h=6, targets=("t",))
-    outputs = bench.render({"draft": d, "config": cfg, "path": str(out), "kind": "development"})
-    assert len(outputs) == 19 and "Development benchmark" in outputs[0]
-    assert outputs[15] == str(out / "predictions.parquet")
-    assert outputs[17] == str(out / "run.json")
-    assert outputs[18] == str(out / "case_availability.csv")
-    return outputs
+def assert_saved_roundtrip(out):
+    run = results.verified_run(out)
+    pd.testing.assert_frame_equal(run.predictions(), pd.read_parquet(out / "predictions.parquet"))
+    assert run.run["forecast_config"] == read_json(out / "run.json")["forecast_config"]
+    pd.testing.assert_frame_equal(run.tables["availability"], pd.read_csv(out / "availability.csv"))
+    return run
 
 
 def test_full_suite_saves_matched_scores_failures_and_provenance_without_modifying_source(source, tmp_path,
@@ -79,6 +69,8 @@ def test_full_suite_saves_matched_scores_failures_and_provenance_without_modifyi
     out = development.run(source, cfg, root=tmp_path / "results")
     assert calls == ["c0", "c1", "c2"]
     rec = read_json(out / "run.json")
+    for name in ("forecast_config.py", "arome_inputs.py", "scoring.py"):
+        assert rec["code_sha256"][name] == sha256_file(development.ROOT / "src/weather_lab" / name)
     assert rec["development"] and rec["source_suite"] == "fixture" and rec["n_eligible"] == 3
     assert rec["forecast_config"] == cfg.as_dict()
     assert rec["checkpoint"]["revision"] == development.models.CHECKPOINTS[cfg.model].revision
@@ -98,8 +90,7 @@ def test_full_suite_saves_matched_scores_failures_and_provenance_without_modifyi
     assert {p.name: sha256_file(p) for p in source.iterdir()} == before
     monkeypatch.setattr(development, "location", lambda: tmp_path / "results")
     assert development.saved_runs("fixture")[0][1] == str(out)
-    outputs = render_development(out, monkeypatch)
-    assert list(outputs[6].columns[:3]) == ["System", "RMSE (°C)", "MAE (°C)"]
+    assert_saved_roundtrip(out)
 
 
 def test_missing_selected_inputs_are_unavailable_without_loading_a_model(source, tmp_path, monkeypatch):
@@ -111,14 +102,11 @@ def test_missing_selected_inputs_are_unavailable_without_loading_a_model(source,
     assert availability.reason.str.contains("auxiliary").all()
     assert pd.read_csv(out / "metrics_point.csv").empty
     assert pd.read_csv(out / "availability.csv").query('model.str.startswith("timestral-dev")').failed_predictions.iloc[0] == 6
-    outputs = render_development(out, monkeypatch)
-    assert outputs[6].empty and "No matched" in outputs[5]
+    assert_saved_roundtrip(out)
 
 
 def test_t0_benchmark_execution_configuration_and_saved_replay(source, tmp_path, monkeypatch):
-    from types import SimpleNamespace
     from weather_lab.t0_adapter import T0
-    from weather_lab_app import benchmark as bench, main as app
     from weather_lab_app.labels import model_name, model_style
     from weather_lab_app.results import training_status
 
@@ -141,13 +129,9 @@ def test_t0_benchmark_execution_configuration_and_saved_replay(source, tmp_path,
     assert training_status(primary["id"]) == "pretrained, no local fine-tuning"
     assert "t0_adapter.py" in rec["code_sha256"]
     assert rec["forecast_config"]["model"] == "t0-gamma"
-    render_development(out, monkeypatch)
-    monkeypatch.setattr(development, "saved_runs", lambda suite: [("T0 fixture", str(out))])
-    controls = bench.on_saved(str(out), "fixture")
-    assert controls[0] == "t0-gamma"
-    d = dict(zip(bench.KEYS[1:11], controls)) | {"suite": "fixture"}
-    monkeypatch.setitem(app.RUNS, "fixture", SimpleNamespace(step_hours=3, manifest={"protocol": {"variables": ["t"]}}))
-    assert bench.configuration(d).model == "t0-gamma"
+    run = assert_saved_roundtrip(out)
+    assert run.run["forecast_config"] == cfg.as_dict()
+    assert primary["id"] in run.models
 
 
 @pytest.mark.parametrize("model", ["Timestral-28M", "t0-gamma"])
@@ -191,3 +175,11 @@ def test_error_correction_saves_physical_predictions_and_missing_archives_withou
     assert len(corrected) == 4
     assert corrected.arome_baseline.eq(12).all() and corrected.predicted_error.eq(-1).all()
     assert corrected.point.eq(11).all()
+
+
+@pytest.mark.parametrize("name", ["../predictions.parquet", "/tmp/predictions.parquet", "nested/predictions.parquet"])
+def test_saved_run_inventory_rejects_nonlocal_payloads_before_reading(tmp_path, monkeypatch, name):
+    write_json(tmp_path / "run.json", {"files_sha256": {name: "synthetic digest"}})
+    monkeypatch.setattr(development, "sha256_file", lambda *a: pytest.fail("unsafe inventory was read"))
+    with pytest.raises(ValueError, match="saved run failed verification"):
+        development.verify_run(tmp_path)

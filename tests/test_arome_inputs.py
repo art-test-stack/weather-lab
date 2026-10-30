@@ -6,8 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from weather_lab.arome_inputs import build_arome_inputs
+from weather_lab.arome_inputs import build_arome_inputs, choose_arome
 from weather_lab.forecast import CaseBatch
+from weather_lab.rag_archive import issued_forecasts
 
 
 def _inputs():
@@ -63,3 +64,25 @@ def test_empty_or_duplicate_named_selections_are_rejected(fields):
     _, cases, origin, history, future = _inputs()
     with pytest.raises(ValueError):
         build_arome_inputs(pd.DataFrame(), cases, origin, history, future, fields)
+
+
+def test_issued_runs_cannot_be_stitched_or_mixed():
+    origin = pd.Timestamp("2026-06-01T06:00Z")
+    times = pd.date_range(origin + pd.Timedelta(hours=1), periods=2, freq="h")
+    rows = []
+    for var in ("t", "pmer"):
+        for i, valid in enumerate(times):
+            rows.append({"station": "07110", "run": origin - pd.Timedelta(hours=i + 3),
+                         "available_at": origin, "valid_time": valid, "variable": var, "value": 1.,
+                         "product": "meteofrance_arome_france", "availability_basis": "test_evidence",
+                         "source_kind": "issued_run"})
+    issued = issued_forecasts(pd.DataFrame(rows))
+    with pytest.raises(ValueError, match="single available issued run"):
+        choose_arome(issued, "07110", origin, times, ["t", "pmer"], "meteofrance_arome_france")
+    issued["source_kind"] = "stitched_historical_forecast"
+    with pytest.raises(ValueError, match="stitched"):
+        issued_forecasts(issued)
+    issued["source_kind"], issued["run"] = "issued_run", origin - pd.Timedelta(hours=3)
+    issued["available_at"] = origin + pd.Timedelta(hours=1)
+    with pytest.raises(ValueError, match="single available issued run"):
+        choose_arome(issued, "07110", origin, times, ["t", "pmer"], "meteofrance_arome_france")

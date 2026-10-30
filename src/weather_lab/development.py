@@ -16,7 +16,7 @@ import pandas as pd
 
 from weather_lab import features, models
 from weather_lab.common import ROOT, environment, git_revision, now_utc, read_json, sha256_file, sha256_text, write_json
-from weather_lab.evaluate import score
+from weather_lab.scoring import score
 from weather_lab.forecast import QUANTILE_LEVELS, exploratory_inputs, qcol
 from weather_lab.forecast_config import ForecastConfig, build_adapter, check
 from weather_lab.predcache import make_key
@@ -32,6 +32,14 @@ def location() -> Path:
     if mount and Path(mount).is_dir() and os.access(mount, os.W_OK):
         return Path(mount) / "development-runs"
     return ROOT / "data/evidence/development-runs"
+
+
+def verify_run(path):
+    rec = read_json(path / "run.json")
+    for name, digest in rec["files_sha256"].items():
+        if Path(name).name != name or sha256_file(path / name) != digest:
+            raise ValueError(f"saved run failed verification: {path / name}")
+    return rec
 
 
 def saved_runs(suite: str) -> list[tuple[str, str]]:
@@ -170,7 +178,9 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
     coords = {s["id"]: (s["lat"], s["lon"]) for s in manifest["dataset"]["stations"]}
     ck = models.CHECKPOINTS[cfg.model]
     code_files = [Path(__file__), Path(__file__).with_name("forecast.py"),
-                  Path(__file__).with_name("features.py"), Path(__file__).with_name("evaluate.py")]
+                  Path(__file__).with_name("features.py"), Path(__file__).with_name("evaluate.py"),
+                  Path(__file__).with_name("forecast_config.py"), Path(__file__).with_name("arome_inputs.py"),
+                  Path(__file__).with_name("scoring.py")]
     if cfg.precision != "native":
         code_files.append(Path(__file__).with_name("precision.py"))
     if ck.family == "t0":
@@ -178,7 +188,6 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
     model_id = f"{ck.family}-dev {cfg.model} {cfg.prediction_target} {cfg.conditioning} " + sha256_text(
         json.dumps(cfg.as_dict(), sort_keys=True))[:8]
     if cfg.retrieval_method != "none":
-        from weather_lab.rag_adapters import foundation
         from weather_lab.rag_index import load_index
         from weather_lab.rag_store import Store
 
@@ -192,9 +201,8 @@ def run(source: Path, cfg: ForecastConfig, predict=predict_cases, progress=None,
             raise ValueError("The retrieval index must belong to the benchmark's pinned archive")
         if index.meta.get("kind") == "arome_error" and cfg.conditioning != "archived":
             raise ValueError("The error index requires archived AROME conditioning")
-        adapter = foundation(cfg.model, index, cfg.retrieval_method, k=index.meta["retrieval"]["k"],
-                             calendar=cfg.calendar, arome=cfg.arome_mode, prediction_target=cfg.prediction_target, precision=cfg.precision)
-        adapter.id = model_id
+        adapter = build_adapter(cfg, model_id, index=index, batch_size=8,
+                                arome_fields=list(cfg.targets) if cfg.arome_mode else [])
         code_files.extend(Path(__file__).with_name(n) for n in ("rag_adapters.py", "rag_index.py", "rag_arome_error.py"))
     else:
         adapter = build_adapter(cfg, model_id, arome_fields=[v for v in ("t", "pmer") if v in cfg.targets])

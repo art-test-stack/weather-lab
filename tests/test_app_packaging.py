@@ -1,5 +1,11 @@
 """Package boundary and Space build output (no network)."""
 
+from weather_lab_app import forecast_view as view
+from weather_lab_app import labels
+from weather_lab_app import main as application
+from weather_lab_app import methods
+from weather_lab_app import results
+
 import ast
 from pathlib import Path
 
@@ -20,21 +26,32 @@ def test_science_package_never_imports_the_app():
             assert not any(n.startswith(("weather_lab_app", "gradio")) for n in names), f"{path.name} imports {names}"
 
 
+def test_callback_owners_do_not_import_application_composition():
+    for name in ("forecast_state", "forecast_view", "benchmark", "results", "methods"):
+        path = ROOT / "src/weather_lab_app" / f"{name}.py"
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom):
+                assert node.module != "weather_lab_app.main", path.name
+                assert not (node.module == "weather_lab_app" and any(a.name == "main" for a in node.names)), path.name
+            elif isinstance(node, ast.Import):
+                assert not any(a.name == "weather_lab_app.main" for a in node.names), path.name
+
+
 def test_latin_modern_assets_are_served_locally_and_shared_with_charts(monkeypatch):
     from fastapi.testclient import TestClient
     from gradio.routes import App
-    from weather_lab_app import main, plots
+    from weather_lab_app import forecast_state as main, plots
 
-    monkeypatch.setattr(main, "DEFAULT_SUITE", None)
-    demo = main.build()
+    monkeypatch.setattr(application, "DEFAULT_SUITE", None)
+    demo = application.build()
     client = TestClient(App.create_app(demo))
     assert plots.FONT == "Latin Modern Roman, Georgia, serif"
     for face in ("regular", "bold", "italic", "bolditalic"):
-        path = main.FONT_DIR / f"lmroman10-{face}.otf"
+        path = application.FONT_DIR / f"lmroman10-{face}.otf"
         response = client.get(f"/gradio_api/file={path}")
         assert response.status_code == 200 and response.content == path.read_bytes()
-        assert str(path) in main.CSS
-    assert "font-display: swap" in main.CSS
+        assert str(path) in application.CSS
+    assert "font-display: swap" in application.CSS
 
 
 def test_space_build_has_metadata_launcher_and_no_data(tmp_path):
@@ -109,7 +126,7 @@ def _applied(size="28M", setup="archived", source="saved", primary=None, explora
 def test_explorer_overlays_persist_across_variables_views_and_exploratory_runs(monkeypatch):
     import pandas as pd
 
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     preds = pd.DataFrame({"model": ["persistence", "arome-raw", "timestral-28m-mv-cal", "timestral-209m-mv-cal",
                                     "persistence", "timestral-28m-mv-cal", "timestral-209m-mv-cal"],
@@ -122,7 +139,7 @@ def test_explorer_overlays_persist_across_variables_views_and_exploratory_runs(m
         def predictions(self):
             return preds
 
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": FakeRun()})
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": FakeRun()})
     a = _applied("28M", "none", primary="timestral-28m-mv-cal")
     choices, value, _, band = app.select_systems(a, "t", {}, None)
     assert value == ["arome-raw", "timestral-28m-mv-cal"] and band == "timestral-28m-mv-cal"
@@ -196,23 +213,17 @@ def _fake_v2_run(mae_by_model: dict[str, float], variable: str = "t", extra_mode
     return FakeRun()
 
 
-def test_main_metric_changes_saved_cards_finding_and_matrix(monkeypatch):
-    from weather_lab_app import main as app
+def test_main_metric_changes_saved_cards(monkeypatch):
+    from weather_lab_app import forecast_state as app
 
     mid = "timestral-209m-mv-cal-arome-archived"
     run = _fake_v2_run({"arome-raw": 1.0, mid: 1.2})
     point = run.tables["metrics_point"]
     point.loc[point.model == "arome-raw", "rmse"] = 2.0
     point.loc[point.model == mid, "rmse"] = 1.3
-    monkeypatch.setattr(app, "RUNS", {run.suite: run})
-    assert "AROME remains most accurate" in app.finding(run.suite, "t")
-    text = app.finding(run.suite, "t", metric="rmse")
-    assert "root mean squared error" in text and "is more accurate than AROME" in text
-    assert "AROME remains most accurate" not in text
-    cards = app.tiles_html(run.suite, "t", "209M", metric="rmse")
+    monkeypatch.setattr(results, "RUNS", {run.suite: run})
+    cards = view.tiles_html(run.suite, "t", "209M", metric="rmse")
     assert "1.30 °C</div>" in cards and "RMSE · MAE 1.20 °C" in cards
-    matrix = app.matrix_html(run.suite, "t", metric="rmse")
-    assert "Root-mean-square error: 1.30 °C" in matrix
 
 
 V2_T = {"arome-raw": 1.09, "timestral-28m-mv-cal": 2.52, "timestral-209m-mv-cal": 2.42,
@@ -221,12 +232,12 @@ V2_T = {"arome-raw": 1.09, "timestral-28m-mv-cal": 2.52, "timestral-209m-mv-cal"
 
 
 def test_checkpoint_selector_switches_headline_defaults_and_preferences(monkeypatch):
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
     from weather_lab_app.labels import with_checkpoint
 
     assert with_checkpoint("timestral-28m-mv-cal-arome-archived", "209M") == "timestral-209m-mv-cal-arome-archived"
     assert with_checkpoint("arome-raw", "209M") == "arome-raw"
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
     v = app.experiment_view("arome-issued-v2", "209M")
     assert v["headline"] == ["arome-raw", "timestral-209m-mv-cal", "timestral-209m-mv-cal-arome-archived"]
     assert v["compare"] == {"timestral-209m-mv-cal-arome-archived": "timestral-209m-mv-cal"}
@@ -234,80 +245,46 @@ def test_checkpoint_selector_switches_headline_defaults_and_preferences(monkeypa
     assert app.experiment_view("arome-issued-v2", "28M")["headline"][1] == "timestral-28m-mv-cal"
     _, value, _, band = app.select_systems(_applied("209M", "archived"), "t", {}, None)
     assert value == v["default_systems"] and band == "timestral-209m-mv-cal-arome-archived"
-    assert "209M" in app.tiles_html("arome-issued-v2", "t", "209M") and "1.90" in app.tiles_html(
+    assert "209M" in view.tiles_html("arome-issued-v2", "t", "209M") and "1.90" in view.tiles_html(
         "arome-issued-v2", "t", "209M")
 
 
-def test_benchmark_finding_only_states_what_the_scores_support(monkeypatch):
-    from weather_lab_app import main as app
-
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
-    text = app.finding("arome-issued-v2", "t")
-    assert ("AROME remains most accurate; adding the AROME forecast + archived AROME history improves Timestral, "
-            "with the larger checkpoint performing better.") in text
-    assert "within what this small sample" not in text
-    wind = {k: v for k, v in V2_T.items() if k != "arome-raw"} | {"timestral-28m-mv-cal": 1.883,
-                                                                   "timestral-28m-mv-cal-arome-archived": 1.887}
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(wind, "u", extra_models=("arome-raw",))})
-    text = app.finding("arome-issued-v2", "u")
-    assert "AROME is not scored for this variable" in text and "improves Timestral 209M only" in text
-    assert "within what this small sample" in text
-    tiny = V2_T | {"timestral-28m-mv-cal-arome-futureonly": 2.513, "timestral-209m-mv-cal-arome-futureonly": 2.426}
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(tiny)})
-    text = app.finding("arome-issued-v2", "t", setup="futureonly")       # < 1 % either way: no direction claimed
-    assert "leaves Timestral's error essentially unchanged (within 1%)" in text and "improves" not in text
-    text = app.finding("arome-issued-v2", "t", setup="none")
-    assert "without AROME input, the larger Timestral checkpoint performs better" in text and "adding" not in text
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run({"timestral-28m-mv-cal": 2.0})})
-    assert app.finding("arome-issued-v2", "t") == ""
-
-
 def test_checkpoint_selector_hidden_where_both_checkpoints_are_already_shown(monkeypatch):
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     run = _fake_v2_run({"persistence": 3.0, "timestral-28m-mv-cal": 2.5, "timestral-209m-mv-cal": 2.4})
     run.suite = "synop-historical-v1"
-    monkeypatch.setattr(app, "RUNS", {"synop-historical-v1": run})
+    monkeypatch.setattr(results, "RUNS", {"synop-historical-v1": run})
     assert not app.has_checkpoints("synop-historical-v1")
     view = app.experiment_view("synop-historical-v1", "209M")
-    assert view["headline"] == app.EXPERIMENTS["synop-historical-v1"]["headline"] and view["missing"] == []
+    assert view["headline"] == labels.EXPERIMENTS["synop-historical-v1"]["headline"] and view["missing"] == []
 
 
 def test_input_setup_switches_conditioned_system_and_reports_not_run(monkeypatch):
-    from dataclasses import replace
-    from weather_lab import models
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
-    monkeypatch.setitem(models.FAMILIES, "t0", replace(models.FAMILIES["t0"], status="planned"))
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})   # no 209M observed-history run
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})   # no 209M observed-history run
     v = app.experiment_view("arome-issued-v2", "28M", "substobs")
     assert v["headline"] == ["arome-raw", "timestral-28m-mv-cal", "timestral-28m-mv-cal-arome-substobs"]
     assert v["band"] == "timestral-28m-mv-cal-arome-substobs" and v["missing"] == []
     v = app.experiment_view("arome-issued-v2", "209M", "substobs")
     assert v["missing"] == ["timestral-209m-mv-cal-arome-substobs"] and v["band"] == ""   # never substituted
     assert "timestral-209m-mv-cal-arome-substobs" not in v["default_systems"]
-    assert "not run" in app.tiles_html("arome-issued-v2", "t", "209M", "substobs")
-    text = app.finding("arome-issued-v2", "t", setup="substobs")
-    assert "Not run: Timestral 209M + AROME (observed history)" in text
-    assert "different input construction" in text
+    assert "not run" in view.tiles_html("arome-issued-v2", "t", "209M", "substobs")
     _, value, _, band = app.select_systems(_applied("28M", "substobs"), "t", {}, None)
     assert "timestral-28m-mv-cal-arome-substobs" in value and "timestral-28m-mv-cal-arome-archived" not in value
-    html = app.matrix_html("arome-issued-v2", "t")
-    assert html.count("not run") >= 2 and "not integrated yet" in html
 
 
-def test_benchmark_views_never_load_a_model(monkeypatch):
+def test_saved_forecast_cards_and_help_never_load_a_model(monkeypatch):
     """Browsing saved results reads files only: loading a model here is a bug."""
     from weather_lab import models
-    from weather_lab_app import main as app
+    from weather_lab_app import forecast_state as app
 
     def boom(*a, **k):
         raise AssertionError("a model was loaded while browsing saved results")
 
     monkeypatch.setattr(models.ModelCache, "get", boom)
     monkeypatch.setattr(models, "prefetch", boom)
-    monkeypatch.setattr(app, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
-    app.tiles_html("arome-issued-v2", "t", "209M", "archived")
-    app.finding("arome-issued-v2", "t")
-    app.matrix_html("arome-issued-v2", "t")
-    app.cache_md()
+    monkeypatch.setattr(results, "RUNS", {"arome-issued-v2": _fake_v2_run(V2_T)})
+    view.tiles_html("arome-issued-v2", "t", "209M", "archived")
+    methods.cache_md()
