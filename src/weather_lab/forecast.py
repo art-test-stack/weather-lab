@@ -641,6 +641,47 @@ def exploratory_inputs(obs: pd.DataFrame, case: pd.Series, variables: list[str],
                      arome_arr, **hist_args, **aux_args, station_coords=station_coords)
 
 
+def arome_comparisons(obs: pd.DataFrame, case: pd.Series, variables: list[str],
+                      horizon_h: int, step_hours: int, archive: pd.DataFrame | None,
+                      observation_delay_h: int = 0) -> dict[str, pd.DataFrame]:
+    """Deterministic exploratory references from one issued run, never model inputs or cached predictions."""
+    from weather_lab.arome_inputs import build_arome_inputs
+
+    fields = [v for v in variables if v in ("t", "pmer")]
+    if archive is None or not fields or not isinstance(case.get("arome_run"), str):
+        return {}
+    station = obs[obs.station.eq(case["station"])] if "station" in obs else obs
+    origin = pd.Timestamp(case["origin"])
+    cases = pd.DataFrame([{"case_id": case.name, "station": case["station"], "origin": origin,
+                           "arome_run": case["arome_run"]}])
+    # Missing observations can limit the correction, but must not hide an available raw forecast.
+    end = origin - pd.Timedelta(hours=observation_delay_h)
+    history_times = pd.date_range(end=end, periods=7 * 24 // step_hours, freq=f"{step_hours}h")
+    history = station.set_index("time").reindex(history_times)[fields].to_numpy(np.float32).T[None]
+    anchors = np.array([end.to_datetime64()], dtype="datetime64[ns]")
+    future = anchors[:, None] + np.arange(1, (horizon_h + observation_delay_h) // step_hours + 1)[None] * np.timedelta64(step_hours, "h")
+    batch = CaseBatch(cases, fields, history, anchors, future, step_hours)
+    named = build_arome_inputs(archive, batch.cases, batch.origins, batch.history_times(),
+                               batch.future_times, fields)
+    batch.arome = named.future
+    if not np.isfinite(batch.arome).any():
+        return {}
+    raw = AromeRaw("arome-raw", fields, fields)
+    corrected = AromeBiasCorrected("arome-biascorr", fields, fields)
+    corrected.attach_arome(archive)
+    out = {}
+    for adapter in (raw, corrected):
+        result = adapter.predict(batch)
+        result.validate(batch)
+        frame = result.to_frame(batch, "exploratory comparison (outside frozen benchmark)")
+        frame = frame[frame.lead_h.gt(0) & frame.lead_h.le(horizon_h)].copy()
+        frame["arome_run"] = case["arome_run"]
+        selected = archive[archive.station.eq(case["station"]) & archive.run.eq(pd.Timestamp(case["arome_run"])) & archive.available_at.le(origin)]
+        frame["arome_available_at"] = selected.available_at.max()
+        out[adapter.id] = frame
+    return out
+
+
 def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str], size: str, context_days: int,
                          calendar: bool, arome_mode: str | None = None, arome_df: pd.DataFrame | None = None,
                          horizon_steps: int = 16, step_hours: int = 3, allow_download: bool = False,
@@ -676,14 +717,6 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
                                aux_df=aux_df if "aux_history" in needs else None,
                                station_coords=station_coords, arome_history="arome_history" in needs,
                                arome_baseline=correction)
-    comparison_batch = None
-    if not correction and arome_mode is None and arome_df is not None and isinstance(case.get("arome_run"), str):
-        try:
-            comparison_batch = exploratory_inputs(obs, case, variables, context_days, arome_df=arome_df,
-                                                   horizon_steps=horizon_steps, step_hours=step_hours,
-                                                   station_coords=station_coords, arome_baseline=True)
-        except ValueError:
-            comparison_batch = None
     horizon_h = horizon_steps * step_hours
     flabel = "".join(" +" + n + ("*" if feats.non_default({n: p}) else "") for n, p in spec.items())
     method_label = " +AROME error correction" if correction else ""
@@ -717,9 +750,6 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
         payload["arome_history_runs"] = sorted({str(r) for r in np.ravel(batch.arome_history_run)
                                                 if not np.isnat(r)}) if "arome_history" in needs else None
     arrays = {"context": ctx, "known_covariates": known, **({"past_covariates": past} if spec else {})}
-    if comparison_batch is not None:
-        payload["arome_comparison"] = {"run": case.get("arome_run"), "bias_window_days": 7, "bias_shrink_k": 5}
-        arrays["arome_comparison"] = comparison_batch.arome
     error_history = {}
     if correction:
         payload.update(prediction_target=prediction_target, residual_version=1,
@@ -744,14 +774,6 @@ def exploratory_forecast(obs: pd.DataFrame, case: pd.Series, variables: list[str
         if correction:
             frame["arome_baseline"] = batch.arome.ravel()
             frame["predicted_error"] = frame["point"] - frame["arome_baseline"]
-        elif comparison_batch is not None:
-            raw = AromeRaw("arome-raw", variables, ["t", "pmer"]).predict(comparison_batch)
-            corrected_adapter = AromeBiasCorrected("arome-biascorr", variables, ["t", "pmer"])
-            corrected_adapter.attach_arome(arome_df)
-            corrected = corrected_adapter.predict(comparison_batch)
-            frame = pd.concat([frame, raw.to_frame(comparison_batch, "issued AROME"),
-                               corrected.to_frame(comparison_batch, "issued AROME + recent lead bias")],
-                              ignore_index=True)
         return frame
 
     settings = {"checkpoint": ck.name, "revision": ck.revision, "context_days": context_days,
