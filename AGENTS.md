@@ -24,7 +24,7 @@ uv run weather-lab evaluate --config configs/<cfg>.yaml --reuse runs/<suite>/<ru
 uv run weather-lab bootstrap       # idempotent setup (official or snapshot mode)
 uv run weather-lab models prefetch|status          # pinned checkpoint files; cache status (add --offline: no Hub)
 uv run weather-lab features list|select            # context-enrichment groups; apply the pre-declared selection rule
-uv run weather-lab-app            # app: Overview / Benchmark / Methods (weather-lab-app build-space: Space content)
+uv run weather-lab-app            # app: Forecast / saved Benchmark (weather-lab-app build-space: Space content)
 ```
 
 ## Conventions
