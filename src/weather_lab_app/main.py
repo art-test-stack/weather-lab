@@ -51,10 +51,11 @@ def startup_bootstrap() -> dict | None:
 BOOT: dict | None = None
 RUNS: dict = {}
 DEFAULT_SUITE: str | None = None
-INTRO = ("Météo-France's **AROME**, the pretrained **Timestral** model (inference only) and Timestral given "
-         "AROME's forecast, at French stations. Hourly exploration covers 2022 through the latest recorded observations.")
-QUESTION = ("How do Timestral forecasts compare with AROME's at French stations, 3–48 h ahead, and does giving "
-            "Timestral AROME's forecast change its error?")
+INTRO = ("Météo-France's **AROME** and pretrained time-series foundational models (TSFMs; inference only), "
+         "including forecasts conditioned on AROME, at French stations. Hourly exploration covers 2022 "
+         "through the latest recorded observations.")
+QUESTION = ("How do pretrained TSFM forecasts compare with AROME's at French stations, 3–48 h ahead, "
+            "and does giving a TSFM AROME's forecast change its error?")
 STATUSES = ["pretrained, no local fine-tuning", "fitted on fitting period", "external NWP (issued run)",
             "post-processing of AROME (recent errors)", "no fitting"]
 DEFAULT_STATION = "07149"            # Paris-Orly, by stable station id
