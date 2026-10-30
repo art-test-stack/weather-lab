@@ -1,0 +1,67 @@
+protocol: hourly-replay-v1
+version: 1
+approved: '2026-10-26'
+status: availability_policy_and_historical_dates_frozen
+dataset_protocol: benchmarks/protocols/hourly-archive-v1.yaml
+scope: Hourly historical replay; separate products and variables, no automatic forecasts.
+availability:
+  policy: declared_replay_not_certified_operational_availability
+  timezone: UTC
+  observation_delay_hours: 1
+  observation_rule: A value at valid time v can enter inputs only when v + 1 hour <= origin.
+  issued_run_delay_hours: 3
+  issued_run_rule: A run initialized at r can enter inputs only when r + 3 hours <= origin.
+  boundary: Inclusive availability cutoff; never use an observation valid after the origin.
+  observation_revisions: Final quality-controlled archive values; original publication and revision timestamps are unknown.
+  run_publication: Initialization is known; the three-hour delay is assumed, not an observed dissemination timestamp.
+  missing: Preserve missing values and unavailable cases; never replace issued forecasts with observations or a different product.
+input_alignment:
+  forecast_config: {observation_delay_hours: 1}
+  history_end: Decision origin minus one hour, including auxiliary observations; retain the full requested context length.
+  model_axis: Shift back one hour, independently of missing observations; never move to the last finite value.
+  generation_steps: {requested_24_hours: 25, requested_48_hours: 49}
+  bridge: Generate the value at the decision origin, then discard it from scores and prediction exports.
+  verification: Requested lead h always verifies at decision origin plus h hours.
+  issued_availability_cutoff: Actual decision origin, not the shifted model axis.
+issued_forecasts:
+  endpoint: https://single-runs-api.open-meteo.com/v1/forecast
+  source_kind: individual_issued_run_under_declared_replay
+  products: [meteofrance_arome_france, meteofrance_arome_france_hd]
+  product_isolation: Never combine products under the same station/run/valid-time key.
+  request_coordinates: Actual hourly observation station coordinates from the dataset protocol.
+  cell_selection: nearest
+  elevation: nan
+  run_cadence_hours: 3
+  valid_step_hours: 1
+  native_run_leads_hours: {first: 0, last: 51}
+  origin_selection: Latest initialized run satisfying the declared availability cutoff.
+  full_48h_anchors: With a three-hour delay, hourly origins four or five hours after initialization lack the final one or two anchors; retain them as unavailable under the shared full-horizon rule.
+  stitched_series: Historical Forecast series is not a replacement for a complete issued run.
+  fifteen_minute: Separate benchmark; not represented by this hourly policy.
+selection:
+  date_choice: Approved without consulting new forecast errors; local prior-use manifest audit saved separately.
+  history_window: {start: '2026-04-03T00:00:00Z', end_exclusive: '2026-07-02T00:00:00Z', days: 90}
+  validation_origins: {start: '2026-07-02T00:00:00Z', end_exclusive: '2026-08-01T00:00:00Z', days: 30}
+  purge_origins: {start: '2026-08-01T00:00:00Z', end_exclusive: '2026-08-03T00:00:00Z', days: 2}
+  confirmation_origins: {start: '2026-08-03T00:00:00Z', end_exclusive: '2026-10-02T00:00:00Z', days: 60}
+  origin_stride_hours: 1
+  native_horizons_hours: [24, 48]
+  context_windows_days: [30, 90]
+  shared_input_support: At least 80 percent observations and issued residual history in both context windows, and every selected-run anchor through 48 hours.
+  purge_rule: Last validation origin is July 31 at 23 UTC; its 48-hour label is August 2 at 23 UTC, before the first confirmation origin.
+  confirmation_last_label: '2026-10-03T23:00:00Z'
+  calendar_2026: Retain all dates in the availability inventory; unavailable early-year issued forecasts and future observations cannot become scored annual coverage.
+  calibration: None reserved; any fitted comparator uses strictly earlier available labels and a recorded fit identity.
+  prior_results: Existing scored suites and prospective protocol remain unchanged.
+  case_eligibility: Freeze input-only shared eligibility before computing errors; never use future observed values to select cases.
+  confirmation: Freeze one validation choice before scoring; no candidate ranking on confirmation.
+  local_prior_use_audit: data/evidence/hourly-replay-v1/prior-use-audit.json
+  prior_use_limit: No saved evaluation origins overlap the new windows; experiments outside this checkout are not certified.
+provenance:
+  required: [source_response_sha256, product, requested_coordinates, returned_grid_coordinates, initialization, valid_time, source_units, replay_policy_identity]
+  cache: New policy identity and actual input cutoff must enter new prediction identities; preserve frozen cache schemas.
+budget:
+  global_cpu_cap_minutes: 60
+  paid_resources: false
+  model_inference_jobs_in_this_step: 0
+  bulk_collection: Estimate transfer size and respect free endpoint quotas before a main download batch.

@@ -1,0 +1,14 @@
+# Hugging Face Spaces metadata: written only into the Space build output (`weather-lab-app build-space`).
+title: Weather-lab
+emoji: 🌦️
+colorFrom: blue
+colorTo: gray
+sdk: gradio
+sdk_version: 6.30.0
+python_version: '3.12.12'  # a ZeroGPU-supported Python
+app_file: app.py
+# ZeroGPU: torch pinned to 2.13.0; explicit Forecast and development Benchmark inference request a GPU.
+suggested_hardware: zero-a10g
+pinned: false
+license: apache-2.0
+short_description: Probabilistic weather forecasting at French stations

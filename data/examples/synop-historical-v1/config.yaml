@@ -1,0 +1,56 @@
+# Initialization smoke run of the historical observation suite.
+# Scores from this config are INTEGRATION CHECKS, not benchmark evidence:
+# baselines are fitted on 2022 only and only semi-monthly origins at two stations are scored.
+suite: synop-historical-v1
+variant: smoke
+label: "integration check (smoke)"
+manifest: benchmarks/manifests/synop-historical-v1.smoke.json
+
+paths:
+  raw: data/raw
+  processed: data/processed
+  runs: runs
+
+data:
+  years: [2022, 2023, 2024]
+  # Toulouse-Blagnac and Paris-Orly. Station IDs are WMO strings; keep leading zeros.
+  stations: ["07630", "07149"]
+
+splits:
+  fit: ["2022-01-01T00:00Z", "2022-12-31T21:00Z"]
+  validation: ["2023-01-01T00:00Z", "2023-12-31T21:00Z"]
+  test: ["2024-01-01T00:00Z", "2024-12-31T21:00Z"]
+
+origins:
+  rule: semi_monthly        # days 1 and 15 of each month
+  hour_utc: 0
+  splits: [validation, test]
+
+forecast:
+  step_hours: 3
+  horizon_steps: 16         # 48 h
+  context_days: 30
+  highlight_leads_h: [6, 24, 48]
+
+eligibility:                # fixed before any scoring
+  variable: t
+  min_context_observed_fraction: 0.8
+  require_observation_within_hours: 24
+
+variables: [t, pmer, u, v]
+
+models:
+  - {id: persistence, kind: persistence}
+  - {id: seasonal-naive-24h, kind: seasonal_naive}
+  - {id: climatology, kind: climatology, window_days: 15, min_samples: 20}
+  - {id: timestral-28m-t, kind: timestral, targets: [t]}
+  - {id: timestral-28m-mv, kind: timestral, targets: [t, pmer, u, v]}
+  - {id: timestral-28m-mv-cal, kind: timestral, targets: [t, pmer, u, v], calendar: true}
+  - {id: timestral-209m-mv-cal, kind: timestral, targets: [t, pmer, u, v], calendar: true,
+     checkpoint: mistralai/Timestral-209M, revision: 9874d252ab0aae16f7f7c999f98f98d6ad7d8365}
+
+timestral:
+  checkpoint: mistralai/Timestral-28M
+  revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+  batch_size: 32
+  max_concurrent: 1

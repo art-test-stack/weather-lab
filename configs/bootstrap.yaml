@@ -1,0 +1,44 @@
+# Setup configuration for `weather-lab bootstrap` (local use and app startup).
+bootstrap:
+  # Suites whose saved results the app needs. Each has a committed spec in benchmarks/specs/.
+  suites: [configs/smoke.yaml, configs/arome_v2_matrix.yaml, configs/arome_smoke.yaml]
+  # auto = snapshot when snapshot.url is set (or WEATHER_LAB_SNAPSHOT_URL), else official sources.
+  mode: auto
+  snapshot:
+    id: wl-snapshot-v6-20261025
+    # Public Hugging Face Storage Bucket. Buckets are mutable and unversioned, so integrity rests on
+    # the pinned SHA-256: never overwrite a snapshot file; publish a new id instead
+    # (`weather-lab snapshot publish` does this and rewrites this block).
+    url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v6-20261025.tar.gz
+    sha256: ea6d855410e693539122a5937164193b6aae7496e8f88ff4cd9bfeacfbc00b76
+    # Where the bucket is attached as a volume (the Space mounts it at /data). Used when present,
+    # otherwise the file is downloaded through the Hub API. Both paths are checksum-verified.
+    mounts:
+      ai-testack/weather-lab-storage: /data
+    # Earlier immutable snapshots, tried in order only when the pinned one above cannot be fetched or
+    # fails its checksum (the app then shows which snapshot it is using). Each entry is pinned by its
+    # SHA-256, so a fallback can only ever install a known snapshot. Mounts above apply to them too.
+    fallbacks:
+      - id: wl-snapshot-v5-20261025
+        url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v5-20261025.tar.gz
+        sha256: 341b357bc1e631ce32867913e8ba2c2801a72ae91097647e91016889da00dba7
+      - id: wl-snapshot-v4-20261025
+        url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v4-20261025.tar.gz
+        sha256: 1cdab235538322509da5e8d77cddfc836c7a79fbe2b3067713301865d80f24fc
+      - id: wl-snapshot-v2-20261024
+        url: hf://buckets/ai-testack/weather-lab-storage/wl-snapshot-v2-20261024.tar.gz
+        sha256: aa9b45ee76326508885962045fea7a273e34202cfd5ee854f59e56434faa378b
+  # Exploratory forecast cache (never benchmark scores). Used when the bucket is attached at its mount path
+  # and writable (the Space: read-write at /data); otherwise data/cache/predictions on local disk.
+  # NOTE: the bucket is public, so cached exploratory forecasts are publicly readable there.
+  # Override with WEATHER_LAB_PREDICTION_CACHE=<path> or =off.
+  caches:
+    predictions: {bucket: ai-testack/weather-lab-storage, subdir: cache/predictions}
+  # Checkpoints the Space build preloads into the default Hub cache (README `preload_from_hub`, pinned
+  # revisions from weather_lab.models.CHECKPOINTS). Local bootstrap fetches only `weights` below.
+  space_preload: [Timestral-28M, Timestral-209M]
+  weights:
+    - repo: mistralai/Timestral-28M
+      revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+      sha256: dfc83c6220937ce5fc6687b35a4df94cd25e28a2cfe6fb92a23dad6301b2015d
+      bytes: 111296464

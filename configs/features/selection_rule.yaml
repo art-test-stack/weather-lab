@@ -1,0 +1,19 @@
+# Pre-declared feature-selection rule (written 2026-10-25, BEFORE the 2023 validation run).
+# Applied mechanically by `weather-lab features select`; the result is frozen in
+# configs/features/frozen_selection.yaml before the untouched 2025 test is run once.
+base: timestral-209m-mv-cal-ctx30          # 209M, 30-day context, calendar inputs, no features
+candidates:                                # one group added at a time; checkpoint/context/preprocessing fixed
+  atmos: timestral-209m-mv-cal-ctx30-f-atmos
+  solar: timestral-209m-mv-cal-ctx30-f-solar
+  tend: timestral-209m-mv-cal-ctx30-f-tend
+not_testable_on_validation:
+  resid: "needs issued AROME history; none exists for 2023 (development pilot only, October suite)"
+primary: {variable: t, loss: abs_err}      # paired difference vs base, all leads, 2-day block bootstrap
+keep_if:
+  ci95_high_below: 0.0                     # temperature MAE improvement whose 95 % interval excludes 0
+  max_pmer_mae_increase: 0.02              # and pressure MAE no more than 2 % worse
+  max_t_pinball_increase: 0.0              # and temperature pinball not worse
+combination: >-
+  If two or more groups are kept, their union is run as one more validation system; it is selected
+  if its temperature MAE is at most the best kept single group's, otherwise the best single group
+  (lowest temperature MAE) is selected. If no group is kept, the selection is "no features".

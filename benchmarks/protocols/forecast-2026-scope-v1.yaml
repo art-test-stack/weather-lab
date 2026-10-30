@@ -1,0 +1,73 @@
+protocol: forecast-2026-scope-v1
+version: 1
+status: approved_scope_availability_and_split_pending
+approved: '2026-10-26'
+purpose: Record the requested historical coverage; not an executable suite or a frozen validation/test split.
+calendar:
+  timezone: UTC
+  requested_evaluation_year: 2026
+  requested_start: '2026-01-01T00:00:00Z'
+  requested_end_exclusive: '2027-01-01T00:00:00Z'
+  context_collection_start: '2025-10-01T00:00:00Z'
+  context_rule: Collect late-2025 history so a 90-day context does not consume January evaluation coverage.
+  future_dates: Unavailable until actual verifying observations exist; never verify against another forecast.
+  missing_dates: Retain explicit gaps; never silently shorten the requested year or substitute observations for forecasts.
+benchmarks:
+  hourly:
+    sampling_minutes: 60
+    products: [AROME France, AROME France HD]
+    candidate_native_horizons_hours: [24, 48]
+    product_rule: Separate named comparators and provenance; no best_match or seamless substitution.
+  fifteen_minute:
+    sampling_minutes: 15
+    products: [AROME France 15 min, AROME France HD 15 min]
+    documented_product_horizon_hours: 6
+    status: Separate benchmark; observation and issued-archive availability not yet established.
+    horizon_rule: Never use these products as 24/48-hour baselines.
+cross_resolution_features: Possible later experiment, not enabled or selected by this scope.
+cases:
+  candidate_context_days: [30, 90]
+  eligibility: Shared cases use the largest context and horizon within their benchmark.
+  carried_forward_support_rule: At least 80 percent available observations and issued residual history in each candidate context.
+  verification: True station observations matched by station identity, coordinates and UTC valid time.
+  hourly_truth: Genuine hourly station measurements; never interpolate three-hourly SYNOP into verification labels.
+  fifteen_minute_truth: Genuine measurements at the required valid times; availability remains unverified.
+  validation_test_split: Pending coverage and prior-use audit; no new selection or test scoring authorized by this file.
+  prior_2025_results: Protected; late-2025 data serve as causal context, not new selection outcomes.
+  prior_october_suite: Previously inspected development cases remain development; never relabel them as untouched confirmation.
+  previous_protocol: Preserve arome-error-context-v1 unchanged; its prospective dates are not this historical scope.
+evaluation:
+  metrics: [MAE, RMSE]
+  pooling: Separate variables, products, resolutions and case sets.
+  selection: Validation only; native context/horizon combinations have separate candidate identities.
+availability_audit:
+  checked: '2026-10-26'
+  evidence: data/evidence/forecast-2026-scope-v1
+  installed_observations:
+    cadence_hours: 3
+    latest_valid_time: '2026-10-23T21:00:00Z'
+    limitation: Does not establish hourly or fifteen-minute target coverage.
+  single_runs:
+    documented_arome_start: '2026-04-02'
+    earlier_france_probes: Four runs in October/December 2025 and January/March 2026 returned HTTP 400 unavailable.
+    earlier_hd_probe: January 1 2026 run returned HTTP 400 unavailable.
+    continuous_coverage: Not established by sparse probes.
+    original_publication_times: Not established; initialization time alone is insufficient.
+  previous_runs:
+    probes: Paris-Orly on October 3 2025 and January 1 2026, AROME France temperature only.
+    day1: Both dates returned 24 nonmissing hourly values.
+    day2: Both dates returned zero nonmissing hourly values.
+    limitation: Fixed-offset series are not complete named-run forecast windows; broader coverage and causal semantics need validation.
+  alternative_archive: ASNR Planet documents run-organized AROME COGs, but coverage and access remain unverified.
+execution:
+  existing_global_cpu_cap_minutes: 60
+  inference_in_this_step: None
+  deployment: None
+  source_substitution: Forbidden without a separately approved, explicitly labelled design.
+sources:
+  - https://open-meteo.com/en/docs/meteofrance-api
+  - https://open-meteo.com/en/docs/single-runs-api
+  - https://open-meteo.com/en/docs/previous-runs-api
+  - https://open-meteo.com/en/docs/historical-forecast-api
+  - https://doc.irsn-planet.irsn.fr/donnees/previsions-meteorologiques/arome.html
+  - https://doc.irsn-planet.irsn.fr/services/s3.html

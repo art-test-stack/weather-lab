@@ -1,0 +1,23 @@
+matrix: hourly-matrix-2026-bf16-v2
+precision: bf16
+suite: hourly-2026-v3
+source_artifact: 0aac87538da2016cf7d4a8265088de1da1f6b0feb8c63dbeb74a49b45322399b
+weather_index: 565edece6482a03e4b96c0df3ac935105d83e9ab89dd702dbb04e8bc82776ec7
+error_index: 3301179cd892ec9b5cb87e9a58269cfd2a16595b399f185cc471dd80a194a5cb
+checkpoints: [Timestral-28M, Timestral-209M, t0-gamma]
+context_days: 30
+horizon_h: 48
+setups:
+  - {name: raw, calendar: false}
+  - {name: calendar, calendar: true}
+  - {name: solar, calendar: true, features: [solar]}
+  - {name: tendencies, calendar: true, features: [tend]}
+  - {name: archived-arome, calendar: true, conditioning: archived}
+  - {name: recent-arome-errors, calendar: true, conditioning: archived, features: [resid]}
+  - {name: residual-prediction, calendar: true, conditioning: archived, prediction_target: arome_error}
+  - {name: weather-rag-level, calendar: true, retrieval: level, index: weather_index}
+  - {name: weather-rag-shape, calendar: true, retrieval: shape, index: weather_index}
+  - {name: error-rag-level-direct, calendar: true, conditioning: archived, retrieval: level, index: error_index}
+  - {name: error-rag-shape-direct, calendar: true, conditioning: archived, retrieval: shape, index: error_index}
+  - {name: error-rag-level-residual, calendar: true, conditioning: archived, prediction_target: arome_error, retrieval: level, index: error_index}
+  - {name: error-rag-shape-residual, calendar: true, conditioning: archived, prediction_target: arome_error, retrieval: shape, index: error_index}

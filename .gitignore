@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.csv
+*.parquet
+*.json
+.env
+.tmp
+data/
+# Virtual environments
+.venv
+docs/
+experiments
+.DS_Store
+
+# Bulk data, caches, runs and weights (never committed)
+runs/
+.cache/
+*.safetensors
+.gradio/
+# Saved runs for offline replay: installed by `weather-lab bootstrap` (snapshot or official mode)
+data/examples/*/
+data/cache/
+data/evidence/
+experiments/*/runs/

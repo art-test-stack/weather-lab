@@ -1,0 +1,56 @@
+# Build the Hugging Face Space content from this repository and upload it.
+#
+# The GitHub repository is code-only and its README has no Spaces front matter, so the
+# Space is not a plain mirror: this job generates the Space README (front matter from
+# src/weather_lab_app/space.yaml) and the root app.py launcher, then uploads that folder.
+#
+# One-time setup (see README "Deployment"):
+#   - create the Space on huggingface.co (Gradio SDK);
+#   - GitHub > Settings > Environments > new environment "huggingface-space"
+#     (optionally with required reviewers), containing
+#       secret   HF_TOKEN     a fine-grained token with write access to that Space only
+#       variable HF_SPACE_ID  e.g. <user>/weather-lab
+name: Deploy Hugging Face Space
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["space-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-space
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Pinned: ubuntu-latest moves to 26.04 during Oct-Nov 2026; change deliberately.
+    runs-on: ubuntu-24.04
+    environment:
+      name: huggingface-space
+      url: https://huggingface.co/spaces/${{ vars.HF_SPACE_ID }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6 (node24)
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2 (node24)
+        with:
+          version: "0.11.28"  # uv used to write uv.lock
+      - name: Install (locked)
+        run: uv sync --frozen
+      - name: Pinned data snapshot is published (read-only check)
+        # Fails the deploy if configs/bootstrap.yaml pins a snapshot that is not in the bucket with
+        # that checksum. Publish it first with `uv run weather-lab snapshot publish --id <new-id>`.
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # not needed for a public bucket; lets the check read a private one
+        run: uv run weather-lab snapshot check
+      - name: Build Space content
+        run: uv run weather-lab-app build-space --out dist/space
+      - name: Upload to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: >
+          uv run hf upload "${{ vars.HF_SPACE_ID }}" dist/space .
+          --repo-type space
+          --delete "*"
+          --commit-message "Deploy ${{ github.repository }}@${{ github.sha }}"

@@ -1,0 +1,23 @@
+# Frozen by `weather-lab compare --freeze`. Change only by a new, documented selection.
+selected: ctx90
+context_days: 90
+context_steps: 720
+checkpoint: mistralai/Timestral-28M@49b26409ac87b5935539a5d8ffe7f397b720db47
+variant: multivariate (t, pmer, u, v) + calendar covariates
+rule: configs/context/selection_rule.yaml
+primary_validation_pinball_t:
+  ctx07: 0.73551
+  ctx30: 0.65989
+  ctx90: 0.64607
+tied:
+- ctx90
+decided_at: '2026-10-24T19:43:02Z'
+validation_runs:
+  ctx07: validation-ctx07-20261024T193746-42dbbbac
+  ctx30: validation-ctx30-20261024T193812-81b2aa34
+  ctx90: validation-ctx90-20261024T193916-7ccb46e0
+suite: synop-ctxval-2023-v1
+protocol_sha256: 618bfe111373b76a
+note: Chosen on 2023 validation only. 2024 smoke cases were inspected earlier and
+  are exploratory, not a pristine unseen test; the full 2024 test run has not been
+  executed.

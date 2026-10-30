@@ -1,0 +1,72 @@
+# UNTOUCHED final test for the feature experiment: daily 00 UTC origins in 2025, never loaded before
+# 2026-10-25. 2024 is deliberately NOT loaded (it is the reserved observation-only test of the context
+# experiment), so January 2025 cases without 30 days of observed context are ineligible (reported).
+# Systems: the base and the selection frozen in configs/features/frozen_selection.yaml. Run ONCE.
+suite: synop-features-test-2025-v1
+variant: test
+label: feature experiment final test (2025, run once)
+manifest: benchmarks/manifests/synop-features-test-2025-v1.json
+paths:
+  raw: data/raw
+  processed: data/processed
+  runs: runs
+data:
+  years:
+  - 2018
+  - 2019
+  - 2020
+  - 2021
+  - 2022
+  - 2023
+  - 2025
+  stations:
+  - '07630'
+  - 07149
+  - '07110'
+  - 07190
+  - 07690
+splits:
+  fit:
+  - 2018-01-01T00:00Z
+  - 2022-12-31T21:00Z
+  validation:
+  - 2023-01-01T00:00Z
+  - 2023-12-31T21:00Z
+  test:
+  - 2025-01-01T00:00Z
+  - 2025-12-31T21:00Z
+origins:
+  rule: daily
+  hour_utc: 0
+  splits:
+  - test
+forecast:
+  step_hours: 3
+  horizon_steps: 16
+  context_days: 30
+  highlight_leads_h:
+  - 6
+  - 24
+  - 48
+eligibility:
+  variable: t
+  min_context_observed_fraction: 0.8
+  require_observation_within_hours: 24
+  windows_days:
+  - 7
+  - 30
+variables:
+- t
+- pmer
+- u
+- v
+models:
+# Frozen selection (configs/features/frozen_selection.yaml): "no features", so the selected system IS the base.
+- {id: persistence, kind: persistence}
+- {id: timestral-209m-mv-cal-ctx30, kind: timestral, targets: [t, pmer, u, v], calendar: true, context_days: 30, checkpoint: mistralai/Timestral-209M, revision: 9874d252ab0aae16f7f7c999f98f98d6ad7d8365}
+timestral:
+  checkpoint: mistralai/Timestral-28M
+  revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+  batch_size: 32
+  max_concurrent: 1
+experiment: features-test-v1

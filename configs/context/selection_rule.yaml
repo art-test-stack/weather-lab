@@ -1,0 +1,24 @@
+# Pre-declared BEFORE any context-length run (written 2026-10-24T19:37:15Z).
+# Context-length selection for Timestral-28M on the 2023 VALIDATION split only.
+experiment: context-length-validation-2023
+suite: synop-ctxval-2023-v1
+candidates:            # identical except Timestral context length (3-hourly steps)
+  ctx07: {config: configs/context/ctx07.yaml, model: timestral-28m-mv-cal-ctx07, context_days: 7, steps: 56}
+  ctx30: {config: configs/context/ctx30.yaml, model: timestral-28m-mv-cal-ctx30, context_days: 30, steps: 240}
+  ctx90: {config: configs/context/ctx90.yaml, model: timestral-28m-mv-cal-ctx90, context_days: 90, steps: 720}
+primary:
+  metric: pinball      # mean pinball loss over Timestral's 21 levels, °C
+  variable: t
+  scope: all predefined validation cases and leads 3-48 h, common valid set across the three candidates
+  direction: minimize
+tie:
+  tolerance_abs: 0.005  # °C; candidates within this of the best are tied
+  break_by: shorter context
+secondary:              # reported, never combined with the primary across variables or units
+  - pinball for pmer (hPa), u and v (m/s)
+  - MAE, RMSE per variable and lead
+  - 80 % / 90 % coverage and width
+  - CPU latency and peak memory
+never:
+  - average physical-unit losses across variables
+  - run, inspect or tune on 2024 test cases

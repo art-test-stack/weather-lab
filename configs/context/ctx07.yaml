@@ -1,0 +1,81 @@
+# Derived from configs/benchmark.yaml: Timestral-28M with 7 days (56 steps) of history.
+# Validation 2023 only (origins.splits = [validation]); test 2024 is not loaded or scored.
+suite: synop-ctxval-2023-v1
+variant: validation
+label: context-length validation (2023 only)
+manifest: benchmarks/manifests/synop-ctxval-2023-v1.json
+paths:
+  raw: data/raw
+  processed: data/processed
+  runs: runs
+data:
+  years:
+  - 2018
+  - 2019
+  - 2020
+  - 2021
+  - 2022
+  - 2023
+  stations:
+  - '07630'
+  - 07149
+  - '07110'
+  - 07190
+  - 07690
+splits:
+  fit:
+  - 2018-01-01T00:00Z
+  - 2022-12-31T21:00Z
+  validation:
+  - 2023-01-01T00:00Z
+  - 2023-12-31T21:00Z
+origins:
+  rule: daily
+  hour_utc: 0
+  splits:
+  - validation
+forecast:
+  step_hours: 3
+  horizon_steps: 16
+  context_days: 90
+  highlight_leads_h:
+  - 6
+  - 24
+  - 48
+eligibility:
+  variable: t
+  min_context_observed_fraction: 0.8
+  require_observation_within_hours: 24
+  windows_days:
+  - 7
+  - 30
+  - 90
+variables:
+- t
+- pmer
+- u
+- v
+models:
+- id: persistence
+  kind: persistence
+- id: seasonal-naive-24h
+  kind: seasonal_naive
+- id: climatology
+  kind: climatology
+  window_days: 15
+  min_samples: 20
+- id: timestral-28m-mv-cal-ctx07
+  kind: timestral
+  targets:
+  - t
+  - pmer
+  - u
+  - v
+  calendar: true
+  context_days: 7
+timestral:
+  checkpoint: mistralai/Timestral-28M
+  revision: 49b26409ac87b5935539a5d8ffe7f397b720db47
+  batch_size: 32
+  max_concurrent: 1
+experiment: ctx07
