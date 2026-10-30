@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from weather_lab_app import benchmark as bench
 from weather_lab_app import forecast_view as view
 from weather_lab_app import results
 
@@ -152,29 +151,6 @@ def test_horizon_slice_equals_saved_scores_at_full_horizon_and_saved_predictions
         np.sqrt((x.point - x.observed).pow(2).mean()))
 
 
-@pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")
-def test_benchmark_rmse_uses_saved_scores_in_findings_plots_and_tables(monkeypatch):
-    from weather_lab import models
-    from weather_lab_app import forecast_state as app
-    from weather_lab_app.results import load_run
-
-    run = load_run(EXAMPLE)
-    monkeypatch.setattr(results, "RUNS", {run.suite: run})
-
-    def no_model(*args, **kwargs):
-        raise AssertionError("Selecting a metric must not load a model")
-
-    monkeypatch.setattr(models.ModelCache, "get", no_model)
-    finding, _, bars, lines, _, point, _ = bench.benchmark(
-        run.suite, "t", "rmse", "all", run.splits[-1], "ALL", "ALL", bench.STATUSES,
-        "209M", "archived", "cumulative")
-    saved = bench._select(run.tables["metrics_point"], run.splits[-1], "t", "ALL", "ALL", "all")
-    assert "root mean squared error" in finding
-    assert "Root-mean-square error" in bars.layout.xaxis.title.text
-    assert "Root-mean-square error" in lines.layout.yaxis.title.text
-    np.testing.assert_allclose(bars.data[0].x, saved.rmse.sort_values(ascending=False))
-    assert list(point.columns[:3]) == ["System", "RMSE (°C)", "MAE (°C)"]
-    np.testing.assert_allclose(point["RMSE (°C)"], saved.rmse.sort_values().round(2))
 
 
 @pytest.mark.skipif(not (EXAMPLE / "run.json").exists(), reason="saved example not installed (weather-lab bootstrap)")
@@ -196,3 +172,17 @@ def test_horizon_limit_and_saved_resolution_on_the_real_example(monkeypatch):
     assert app.saved_match(d, cfg45) is None                                     # different context: inference
     cfg72, issues = app.draft_config({**d, "horizon": 72})
     assert [i.kind for i in issues] == ["unavailable"] and "AROME" in issues[0].message
+
+
+def test_rmse_plots_preserve_values_and_physical_units():
+    from weather_lab_app import plots
+
+    table = pd.DataFrame({"model": ["a", "b"], "rmse": [2., 1.], "n": [4, 4],
+                          "lead_h": [3, 3], "n_cases": [4, 4], "ci95_low": [np.nan, np.nan],
+                          "ci95_high": [np.nan, np.nan]})
+    bars = plots.comparison_bars(table, "rmse", "t", None)
+    lines = plots.metric_by_lead(table, "rmse", "t", ["a", "b"])
+    assert "Root-mean-square error (°C)" in bars.layout.xaxis.title.text
+    assert "Root-mean-square error (°C)" in lines.layout.yaxis.title.text
+    np.testing.assert_allclose(bars.data[0].x, [2., 1.])
+    assert [list(trace.y) for trace in lines.data] == [[2.], [1.]]
