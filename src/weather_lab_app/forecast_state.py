@@ -376,7 +376,7 @@ def _explore_inputs(d: dict, cfg: ForecastConfig):
     _, _, case = case_forecast(run, d["case"], "t")
     obs = run.full_observations()
     needs = {dep for name in cfg.feature_names for dep in FEATS.GROUPS[name].needs}
-    needs_arome = bool(cfg.arome_mode) or "arome_history" in needs or cfg.prediction_target == "arome_error"
+    needs_arome = bool(cfg.arome_mode) or "arome_history" in needs or cfg.prediction_target == "arome_error" or cfg.retrieval_method == "none"
     station_obs = obs[obs["station"] == case["station"]]
     coords = run.station_coords()
     if run.run.get("exploration"):
@@ -643,6 +643,7 @@ def _view_systems(a: dict, variable: str) -> tuple[list[str], list[str], list[st
         defaults.append(a["primary"])
     if a["source"] == "exploratory":
         defaults.append(a["primary"])
+        defaults += [m for m in ("arome-raw", "arome-biascorr") if m in exploratory and m not in defaults]
     if a["config"].prediction_target == "arome_error":
         defaults += [m for m in ("arome-raw", a.get("comparison")) if m in saved + exploratory and m not in defaults]
     preds = run.predictions()
