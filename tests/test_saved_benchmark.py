@@ -11,7 +11,7 @@ from weather_lab import development
 from weather_lab.common import sha256_file
 from weather_lab.forecast_config import ForecastConfig
 from weather_lab.saved_results import matrix_overview
-from weather_lab_app import plots, results, saved_benchmark as panel
+from weather_lab_app import plots, results, benchmark as panel
 from weather_lab_app.labels import model_style
 
 
@@ -76,6 +76,12 @@ def matrix(catalog):
 
 
 def test_discovery_filters_and_saved_only_routing(catalog, monkeypatch):
+    from weather_lab import models
+
+    def no_model(*args, **kwargs):
+        pytest.fail("Saved Benchmark performed a model operation")
+    monkeypatch.setattr(models, "prefetch", no_model)
+    monkeypatch.setattr(models.MODELS, "get", no_model)
     assert len(catalog) == 2
     d = panel.defaults(catalog, "test")
     paths = d["selected"]
