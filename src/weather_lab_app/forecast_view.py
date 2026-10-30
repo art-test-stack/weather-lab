@@ -194,6 +194,7 @@ def cards_html(applied, variable) -> str:
                      "judge calibration</div></div>")
         cards.append(f"<div class='tile'><div class='v'>{width:.1f} {u}</div><div class='n'>mean 80% range width"
                      f"</div><div class='d'>over its {n_leads} lead(s)</div></div>")
+    rows = rows[~rows.model.isin(a.get("exploratory", {}))]
     all_rows = _utc(pd.concat([_utc(rows), *[_utc(df[df["variable"] == variable])
                                            for df in a["exploratory"].values()]], ignore_index=True))
     comparison = a.get("comparison") if a["config"].prediction_target == "arome_error" else \
@@ -208,7 +209,7 @@ def cards_html(applied, variable) -> str:
                      + (f"{val:.2f} {u}" if val is not None and pd.notna(val) else "Not yet observable")
                      + f"</div><div class='n'><span class='sw' style='background:{model_style(m)[0]}'></span>"
                      f"{model_name(m)}</div><div class='d'>{metric.upper()} · {other_score}"
-                     + ("previously applied forecast" if m == a.get("comparison") else "saved forecast")
+                     + ("previously applied forecast" if m == a.get("comparison") else "issued AROME comparison" if m in a["exploratory"] else "saved forecast")
                      + f", on the {n_shared} lead(s) both cover and "
                      "observed" + (f"; this forecast scores {sc.loc[mid, metric]:.2f} {u} {metric.upper()} there"
                                    if metric in sc and pd.notna(sc.loc[mid, metric]) else "") + "</div></div>")
@@ -233,6 +234,7 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
     run = results.RUNS[a["suite"]]
     rows, _, case = case_forecast(run, a["case"], variable)
     obs = _station_obs(run, case["station"], variable, a)
+    rows = rows[~rows.model.isin(a.get("exploratory", {}))]
     exploratory = [df[df["variable"] == variable] for df in a.get("exploratory", {}).values()]
     if exploratory:
         rows = _utc(pd.concat([_utc(rows), *map(_utc, exploratory)], ignore_index=True))
@@ -296,7 +298,7 @@ def overview(applied, variable, systems, band_model, error_mode="absolute"):
                     "coverage has not been established by this single forecast.")
     csv_rows = rows[rows["model"].isin(systems)]            # what is plotted, over the applied horizon
     out = forecast_csv(csv_rows, obs)
-    out.insert(0, "source", np.where(out["model"].astype(str).str.startswith("exploratory"),
+    out.insert(0, "source", np.where(out["model"].isin(a.get("exploratory", {})),
                                      "exploratory (outside the frozen benchmark, not scored)", "saved benchmark run"))
     out["applied_configuration"] = forecast.applied_text(a)
     out["main_metric"] = metric
