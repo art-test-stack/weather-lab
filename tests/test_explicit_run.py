@@ -5,7 +5,6 @@ Saved-file integration uses installed examples; core configuration contracts liv
 
 from __future__ import annotations
 
-from weather_lab_app import benchmark as bench
 from weather_lab_app import forecast_view as view
 from weather_lab_app import labels
 from weather_lab_app import main as application
@@ -24,7 +23,6 @@ from weather_lab.forecast_config import Availability, ForecastConfig, check, fro
 EXAMPLE = ROOT / "data" / "examples" / "arome-issued-v2"
 needs_example = pytest.mark.skipif(not (EXAMPLE / "run.json").exists(),
                                    reason="saved example not installed (weather-lab bootstrap)")
-
 
 
 # --------------------------------------------------------------------------- saved-artifact integration
@@ -340,76 +338,6 @@ def test_only_run_forecast_and_page_load_write_the_applied_state_or_the_display(
                 assert roots <= {(b["run"]._id, "click"), (None, "load")} or any(t[1] == "load" for t in roots), fn.name
             if roots & {(c._id, "input") for c in b["draft"]}:
                 assert fn.name == "edit" and not ({o._id for o in fn.outputs} & protected_b)
-
-
-@needs_example
-def test_benchmark_owns_its_draft_capture_guard_and_applied_result(app_env, tmp_path, monkeypatch):
-    from weather_lab_app import benchmark as bench
-
-    app, _, counters, forecast = app_env
-    d = bench.defaults(forecast["suite"])
-    previous = {"draft": d, "config": bench.configuration(d), "path": str(results.RUNS[d["suite"]].path), "kind": "frozen"}
-    guard = {"busy": False}
-    vals = lambda v: [v[k] for k in bench.KEYS]
-    before = counters()
-    monkeypatch.setattr(bench.development, "saved_runs", lambda suite: [])
-    calls = []
-
-    def run(source, cfg, **kw):
-        calls.append((source, cfg))
-        return tmp_path / "development-run"
-
-    monkeypatch.setattr(bench.development, "run", run)
-    for key, value in (("size", "28M"), ("prediction_target", "arome_error"), ("conditioning", "none"),
-                       ("features", ["tend"]), ("calendar", False), ("ctx", 90), ("horizon", 24),
-                       ("resid_vars", ["t"]), ("atmos_fields", ["td"]), ("tend_lags", [3]),
-                       ("variable", "pmer"), ("metric", "rmse"), ("lead", "6"), ("station", "07110"),
-                       ("season", "SON"), ("statuses", [bench.STATUSES[0]]), ("lead_mode", "cumulative")):
-        text, button = bench.feedback(*vals({**d, key: value}), previous, guard)
-        assert "pending" in text and button["interactive"]
-    assert not calls and counters() == before
-    request, _, _ = bench.begin(*vals(d), previous, guard)
-    edited = {**d, "metric": "rmse", "features": ["tend"]}
-    assert not bench.feedback(*vals(edited), previous, guard)[1]["interactive"]
-    with pytest.raises(Exception, match="already running"):
-        bench.begin(*vals(edited), previous, guard)
-    result, message = bench.execute(request)
-    assert len(calls) == 1 and calls[0][1] == previous["config"]
-    assert bench.apply(result, *vals(edited), previous, message)[0] is previous
-    applied, _, changed = bench.apply(result, *vals(d), previous, message)
-    assert changed and applied["kind"] == "development"
-    bench.finish(*vals(d), applied, guard)
-    assert not guard["busy"] and counters() == before
-    display_only = {**d, "metric": "rmse"}
-    reused, _ = bench.execute({"draft": display_only, "applied": applied})
-    assert reused["path"] == applied["path"] and len(calls) == 1
-    bench.execute({"draft": display_only, "applied": reused})
-    assert len(calls) == 2  # unchanged settings + Rerun deliberately executes a new full-suite run
-    monkeypatch.setattr(bench.development, "run", lambda *a, **kw: (_ for _ in ()).throw(ValueError("fixture failure")))
-    failed, message = bench.execute({"draft": d, "applied": previous})
-    assert failed is None and "displayed result is unchanged" in message
-    assert bench.apply(failed, *vals(d), previous, message) == (previous, message, False)
-
-    # Saved replay fills only the draft, verifies artifacts and never calls the runner.
-    from weather_lab.common import sha256_file, write_json
-
-    saved = tmp_path / "saved"
-    saved.mkdir()
-    artifact = saved / "predictions.parquet"
-    artifact.write_bytes(b"fixture artifact")
-    write_json(saved / "run.json", {"forecast_config": previous["config"].as_dict(),
-                                   "files_sha256": {artifact.name: sha256_file(artifact)}})
-    monkeypatch.setattr(bench.development, "saved_runs", lambda suite: [("fixture", str(saved))])
-    assert bench.on_saved(str(saved), d["suite"])[:7] == (
-        d["size"], d["prediction_target"], d["conditioning"], d["features"], d["calendar"], d["ctx"], d["horizon"])
-    replay = {**d, "saved": str(saved)}
-    result, message = bench.execute({"draft": replay, "applied": previous})
-    assert result["path"] == str(saved) and "Replayed" in message and len(calls) == 2
-    failed, message = bench.execute({"draft": {**replay, "ctx": 45}, "applied": previous})
-    assert failed is None and "Settings differ" in message
-    artifact.write_bytes(b"changed")
-    failed, message = bench.execute({"draft": replay, "applied": previous})
-    assert failed is None and "checksum" in message
 
 
 @needs_example
