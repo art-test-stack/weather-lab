@@ -295,29 +295,6 @@ def test_bucket_upload_is_verified_before_remote_commit_marker(tmp_path):
     assert len(store.list("archives")) == 1  # incomplete uploads are never selectable
 
 
-def test_research_panel_builds_without_loading_or_running_models(setup, monkeypatch):
-    import gradio as gr
-    from weather_lab import models
-    from weather_lab_app import rag
-
-    cfg, frame, store, archive, index = setup
-    def boom(*args, **kwargs):
-        raise AssertionError("model operation while browsing RAG controls")
-    monkeypatch.setattr(rag, "Store", lambda: store)
-    monkeypatch.setattr(models, "prefetch", boom)
-    monkeypatch.setattr(models.MODELS, "get", boom)
-    with gr.Blocks() as panel:
-        with gr.Tabs():
-            rag.build()
-    assert len(panel.config["dependencies"]) == 7
-    text = "\n".join(str(c.get("props", {}).get("value", "")) for c in panel.config["components"])
-    assert all(title in text for title in ("Available data and indexes", "Run or view evaluations"))
-    assert any(c.get("props", {}).get("label") == "Prepare data" and not c["props"]["open"]
-               for c in panel.config["components"])
-    assert all(event == "click" for d in panel.config["dependencies"] for _, event in d["targets"])
-    assert rag.show(None)[0] == "Select a saved RAG run."
-
-
 def test_hourly_index_slides_across_utc_hours_without_crossing_cutoff(setup):
     cfg, frame, store, archive, _ = setup
     hourly = copy.deepcopy(cfg)
@@ -326,3 +303,21 @@ def test_hourly_index_slides_across_utc_hours_without_crossing_cutoff(setup):
     assert set(index.windows.origin.dt.hour) == set(range(24))
     assert index.windows.origin.diff().dropna().eq(pd.Timedelta(hours=1)).all()
     assert index.windows.available_at.lt(pd.Timestamp('2026-01-01T00:00Z')).all()
+
+
+def test_rag_status_reads_metadata_without_model_operations(setup, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from weather_lab import models, rag
+
+    _, _, store, archive, index = setup
+    monkeypatch.setattr(rag, "Store", lambda root: store)
+    def no_model(*args, **kwargs):
+        pytest.fail("RAG status performed a model operation")
+    monkeypatch.setattr(models, "prefetch", no_model)
+    monkeypatch.setattr(models.MODELS, "get", no_model)
+    rag.command(SimpleNamespace(local_only=str(store.root), config=str(ROOT / "configs/rag_weather_v1.yaml"),
+                                rag_command="status"))
+    status = json.loads(capsys.readouterr().out)
+    assert status["root"] == str(store.root)
+    assert archive.name in {ident for _, ident in status["archives"]}
+    assert index.ident in {ident for _, ident in status["indexes"]}
