@@ -198,7 +198,7 @@ def cards_html(applied, variable) -> str:
                                            for df in a["exploratory"].values()]], ignore_index=True))
     comparison = a.get("comparison") if a["config"].prediction_target == "arome_error" else \
         forecast.primary_saved(a["suite"], a["size"], a["setup"])
-    others = [m for m in ("arome-raw", comparison) if m and m != mid and m in set(all_rows["model"])]
+    others = [m for m in ("arome-raw", "arome-biascorr", comparison) if m and m != mid and m in set(all_rows["model"])]
     sc, n_shared = forecast_scores(_window(all_rows, a["shown_h"]), obs, [mid] + others)
     for m in others:
         val = sc.loc[m, metric] if metric in sc and m in sc.index else None
