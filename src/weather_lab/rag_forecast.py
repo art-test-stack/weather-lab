@@ -108,4 +108,23 @@ def forecast(case, cfg, device="cpu", lookup_only=False, store=None):
     if correction:
         settings.update(prediction_target="arome_error", residual_version=1,
                         forecast_lead_input=True, error_history=error_history)
-    return frame, {"cache_hit": hit, "key": key[:16], "model": model.id, "settings": settings}
+    comparisons = {}
+    if frame is not None and (archive / "issued.parquet").is_file():
+        from weather_lab.forecast import arome_comparisons
+        from weather_lab.rag_archive import issued_forecasts
+        from weather_lab.arome_inputs import choose_arome
+
+        issued = issued_forecasts(pd.read_parquet(archive / "issued.parquet"))
+        times = pd.date_range(origin + pd.Timedelta(hours=1), periods=cfg.horizon_h, freq="h")
+        try:
+            _, reference = choose_arome(issued, case["station"], origin, times, list(cfg.targets),
+                                        index.meta.get("product") or "meteofrance_arome_france")
+        except ValueError:
+            reference = None
+        if reference:
+            reference_case = case.copy()
+            reference_case["arome_run"] = reference["run"]
+            comparisons = arome_comparisons(source, reference_case, list(cfg.targets),
+                                            cfg.horizon_h, 1, issued, observation_delay_h=3)
+    return frame, {"cache_hit": hit, "key": key[:16], "model": model.id, "settings": settings,
+                   "comparisons": comparisons}
