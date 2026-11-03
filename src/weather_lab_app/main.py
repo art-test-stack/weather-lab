@@ -166,7 +166,7 @@ def build() -> gr.Blocks:
                     "feature engineering, and an output type, then run on the selected window.\n"
                     "- **Benchmark:** Visualize and compare saved model configurations against the AROME baseline "
                     "on forecast windows up to 48 hours.\n"
-                    "- **Prospective (draft):** Review the point-in-time evaluation design for existing Benchmark configurations.")
+                    "- **Prospective Evaluation:** Read frozen predictions, delayed verification, coverage, and provenance.")
         if notice := fallback_notice(BOOT):
             gr.Markdown(f"**Note:** {notice}", elem_classes="note", elem_id="snapshot-fallback")
         a0 = forecast.initial_applied(DEFAULT_SUITE)
@@ -275,8 +275,8 @@ def build() -> gr.Blocks:
 
                 saved_panel = bench.build(benchmark_suite, results.RUNS[benchmark_suite], demo)
 
-            # ---------------- prospective evaluation design (read-only draft)
-            with gr.Tab("Prospective · draft", id="prospective"):
+            # ---------------- saved prospective evaluation
+            with gr.Tab("Prospective Evaluation", id="prospective"):
                 prospective.build(benchmark_suite)
 
         # ---------------- wiring
