@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gradio as gr
+import pandas as pd
 
 from weather_lab_app import results
 
@@ -20,7 +21,7 @@ def build(suite: str) -> None:
     gr.Markdown("### Existing Benchmark configurations only")
     if catalog:
         gr.Dataframe(
-            value=[
+            value=pd.DataFrame([
                 {
                     "Saved configuration": record["label"],
                     "Configuration ID": record["summary"].get("configuration_id", ""),
@@ -29,7 +30,7 @@ def build(suite: str) -> None:
                     "Conditioning": record["config"]["conditioning"],
                 }
                 for _, record in sorted(catalog.items(), key=lambda item: item[1]["label"])
-            ],
+            ]),
             interactive=False,
             label="Current saved Benchmark catalog (read-only; no new variants)",
         )
