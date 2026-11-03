@@ -87,8 +87,11 @@ def observation_frame(archive, cutoff=None, *, replay=False):
     selected = {}
     for rec in sorted(versions, key=lambda r: pd.Timestamp(r["collected_at"])):
         selected[rec["identity"]] = rec
-    rows = [row | {"observation_version": digest(encoded(rec)), "available_at": rec["collected_at"]}
-            for rec in selected.values() for row in rec["rows"]]
+    rows = []
+    for rec in selected.values():
+        version = digest(encoded(rec))
+        rows.extend(row | {"observation_version": version, "available_at": rec["collected_at"]}
+                    for row in rec["rows"])
     frame = pd.DataFrame(rows, columns=None if rows else ["station", "time", "t", "pmer", "u", "v",
                                                          "available_at", "observation_version"])
     frame["time"] = pd.to_datetime(frame.time, utc=True)
@@ -107,6 +110,7 @@ def forecast_frame(archive, cutoff=None, *, replay=False):
             continue
         if not replay and record["key"].startswith("historical/"):
             continue
+        version = digest(encoded(rec))
         for row in rec["rows"]:
             row = dict(row)
             if replay and rec.get("published_at"):
@@ -114,7 +118,7 @@ def forecast_frame(archive, cutoff=None, *, replay=False):
                 row["availability_basis"] = "official_archive_last_modified_retrospective"
             elif not replay:
                 row["available_at"] = rec["collected_at"]
-            rows.append(row | {"forecast_version": digest(encoded(rec))})
+            rows.append(row | {"forecast_version": version})
     cols = ["station", "run", "valid_time", "available_at", "variable", "value", "product",
             "availability_basis", "source_kind", "forecast_version"]
     frame = pd.DataFrame(rows, columns=None if rows else cols)
@@ -188,6 +192,8 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
         issued = forecast_frame(archive, origin, replay=replay)
         # Current issue only for future conditioning; all qualifying older issues remain for history.
         issued = issued[issued.run.le(run)]
+        source_records = sorted(set(obs.observation_version) | set(issued.forecast_version))
+        input_hash = digest(encoded({"observations": rows_json(obs), "issued": rows_json(issued)}))
         for station in coords:
             case_id = f"{cohort}/{station}/{run.isoformat()}/{origin.isoformat()}"
             common = {"case_id": case_id, "station": station, "origin": origin.isoformat(),
@@ -255,8 +261,8 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
                     "decision_cutoff": origin.isoformat(), "code_revision": git_revision(),
                     "code_sha256": code, "environment": runtime,
                     "uv_lock_sha256": sha256_file(ROOT / "uv.lock"),
-                    "source_records": sorted(set(obs.observation_version) | set(issued.forecast_version)),
-                    "input_sha256": digest(encoded({"observations": rows_json(obs), "issued": rows_json(issued)})),
+                    "source_records": source_records,
+                    "input_sha256": input_hash,
                     "availability_policy": "retrospective: source forecast availability evidence/assumption; observation bridge 3h" if replay
                                            else "actual collection cutoff; freeze strictly before valid time",
                     "inference": json.loads(json.dumps(info, default=str))}
@@ -273,8 +279,10 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
 def evaluate(archive, selected=None, *, asof=None):
     """Score identical support across selected configurations and raw AROME, per cohort/variable."""
     records = archive.records("predictions")
-    rows = [row | {"prediction_record": digest(encoded(rec["value"]))}
-            for rec in records for row in rec["value"]["rows"]]
+    rows = []
+    for rec in records:
+        version = digest(encoded(rec["value"]))
+        rows.extend(row | {"prediction_record": version} for row in rec["value"]["rows"])
     # Missing historical issues have an availability ledger, never fabricated forecasts.
     present = {(row["case_id"], row["model"]) for row in rows}
     for record in archive.records("availability"):
