@@ -1,5 +1,6 @@
 import gradio as gr
 import pytest
+import json
 
 from weather_lab.prospective_store import Archive
 from weather_lab_app import prospective as view
@@ -10,6 +11,8 @@ def populate(archive):
            "valid_time": "2026-11-03T05:00Z", "lead_h": 1, "issue": "2026-11-03T00:00Z", "cycle": 0}
     with archive.writer():
         archive.put("catalog", "model", {"label": "Existing configuration", "config": {}, "checkpoint": {"revision": "pinned"}})
+        archive.put("status", "catalog-complete", {"task": "catalog", "status": "ok",
+            "collected_at": "2026-11-01T00:00Z", "configurations": ["model"]})
         for model, point in [("arome-raw", 13.), ("model", 11.)]:
             archive.put("predictions", model, {"model": model, "case_id": "one", "cohort": row["cohort"],
                 "rows": [row | {"model": model, "point": point}], "provenance": {"code_revision": "frozen"}})
@@ -19,6 +22,7 @@ def populate(archive):
 
 @pytest.mark.parametrize("populated", [False, True])
 def test_gradio_empty_populated_and_read_only_callbacks(tmp_path, monkeypatch, populated):
+    monkeypatch.setattr("weather_lab.prospective.now_utc", lambda: "2026-11-06T00:00:00Z")
     archive = Archive(tmp_path)
     if populated:
         populate(archive)
@@ -44,3 +48,14 @@ def test_gradio_empty_populated_and_read_only_callbacks(tmp_path, monkeypatch, p
         assert "No frozen predictions" in output[0]
         assert not output[1].data
     assert sorted(str(p) for p in tmp_path.rglob("*")) == before
+
+
+def test_corrupt_archive_does_not_prevent_other_tabs_from_building(tmp_path):
+    archive = Archive(tmp_path)
+    populate(archive)
+    marker = next((tmp_path / "records/catalog").glob("*.json"))
+    ident = json.loads(marker.read_text())["sha256"]
+    (tmp_path / "objects" / (ident + ".json")).write_bytes(b"corrupt")
+    with gr.Blocks() as demo:
+        assert view.build("hourly-2026-v3", archive=archive) == {}
+    assert "archive unavailable" in str(demo.get_config_file())

@@ -7,6 +7,7 @@ Readers see only checksum-verified records whose commit marker exists.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import UTC, datetime
 import fcntl
 import hashlib
 import json
@@ -19,6 +20,11 @@ from weather_lab.publish import DEFAULT_BUCKET
 
 PREFIX = "prospective/v1"
 KINDS = {"forecasts", "observations", "predictions", "availability", "catalog", "evaluations", "status"}
+
+
+def now_utc():
+    # Whole-second truncation can incorrectly admit a collection just after an hourly cutoff.
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def encoded(value) -> bytes:

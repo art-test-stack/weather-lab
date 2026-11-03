@@ -3,6 +3,7 @@ import gzip
 import eccodes
 import pandas as pd
 import requests
+import pytest
 
 from weather_lab import prospective_collect as collect
 from weather_lab.prospective_store import Archive
@@ -87,6 +88,11 @@ def test_real_grib_collection_idempotency_missing_and_partial(tmp_path, monkeypa
     with other.writer():
         collect.collect_forecasts(other, "2026-11-02", "2026-11-03", tree=tree,
                                   session=Session(grib([1, 3])))
+        monkeypatch.setattr(collect, "now_utc", lambda: "2026-11-03T13:00:00Z")
+        collect.collect_forecasts(other, "2026-11-02", "2026-11-03", tree=tree,
+                                  session=Session(grib([1, 3])))
+    assert len(other.records("forecasts")) == 1
+    assert other.records("forecasts")[0]["value"]["collected_at"] == "2026-11-03T12:00:00Z"
     assert not other.records("forecasts")[0]["value"]["complete"]
 
 
@@ -110,3 +116,19 @@ def test_hourly_measurements_revisions_qc_and_delayed_publication(tmp_path, monk
     assert records[1]["rows"][0]["t"] == 11
     assert records[0]["rows"][0]["pmer"] is None  # QC 9, never interpolated
     assert len(records[0]["rows"]) == 1  # delayed missing hours are not labels
+
+
+def test_realtime_hourly_identity_units_and_nearest_time_are_checked():
+    station = {"id": "07149", "national_id": "91027002"}
+    raw = {"geo_id_insee": "91027002", "validity_time": "2026-11-03T03:00Z", "t": 283.15,
+           "pmer": 100000, "ff": 2, "dd": 180}
+    hour = pd.Timestamp(raw["validity_time"])
+    parsed = collect.parse_realtime([{"properties": raw}], station, hour, "2026-11-03T03:10Z")
+    assert parsed[0]["t"] == 10 and parsed[0]["pmer"] == 1000
+    assert parsed[0]["u"] == pytest.approx(0, abs=1e-8)
+    assert parsed[0]["v"] == 2
+    assert collect.parse_realtime([{"properties": raw}], station, hour + pd.Timedelta(hours=1), "2026-11-03T04:10Z") == []
+    with pytest.raises(ValueError, match="identity"):
+        collect.parse_realtime([{"properties": raw}], {**station, "national_id": "31069001"}, hour, "2026-11-03T03:10Z")
+    with pytest.raises(ValueError, match="units"):
+        collect.parse_realtime([{"properties": {**raw, "t": 10}}], station, hour, "2026-11-03T03:10Z")

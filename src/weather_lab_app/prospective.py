@@ -13,7 +13,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from weather_lab.common import STATION_NAMES
-from weather_lab.prospective import evaluate
+from weather_lab.prospective import catalog_records, evaluate
 from weather_lab.prospective_store import Archive, PREFIX
 from weather_lab.publish import DEFAULT_BUCKET
 from weather_lab_app.labels import model_style
@@ -43,7 +43,7 @@ def summarize(metrics, group):
 
 def read_view(archive, station="ALL", start="", end="", variable="t", selected=None,
               cohort="prospective-2026-11", cycle="ALL", horizon=48):
-    catalog = {r["key"]: r["value"] for r in archive.records("catalog")}
+    catalog = {r["key"]: r["value"] for r in catalog_records(archive)}
     status = []
     for kind in ("forecasts", "observations"):
         records = archive.records(kind)
@@ -131,10 +131,14 @@ def read_view(archive, station="ALL", start="", end="", variable="t", selected=N
 
 def build(suite: str, *, archive=None):
     archive = archive or Archive(archive_location())
-    catalog = {r["key"]: r["value"] for r in archive.records("catalog")}
-    cohorts = sorted({r["value"]["cohort"] for r in archive.records("predictions")}, reverse=True)
-    cohorts = cohorts or ["prospective-2026-11", "retrospective-2026-10"]
-    initial = read_view(archive, selected=list(catalog)[:4], cohort=cohorts[0])
+    try:
+        catalog = {r["key"]: r["value"] for r in catalog_records(archive)}
+        cohorts = sorted({r["value"]["cohort"] for r in archive.records("predictions")}, reverse=True)
+        cohorts = cohorts or ["prospective-2026-11", "retrospective-2026-10"]
+        initial = read_view(archive, selected=list(catalog)[:4], cohort=cohorts[0])
+    except (OSError, ValueError, KeyError) as exc:
+        gr.Markdown(f"Prospective archive unavailable: {exc}. Restore verified saved artifacts and reload.")
+        return {}
     gr.Markdown("## Prospective Evaluation\nSaved artifacts only. Refresh never collects data or runs models. "
                 "Historical replay remains separate from genuine prospective predictions.")
     with gr.Row():
@@ -163,7 +167,7 @@ def build(suite: str, *, archive=None):
     def render(*values):
         return read_view(archive, *values)
     def reload(*values):
-        current = {r["key"]: r["value"] for r in archive.records("catalog")}
+        current = {r["key"]: r["value"] for r in catalog_records(archive)}
         available = sorted({r["value"]["cohort"] for r in archive.records("predictions")}, reverse=True) or cohorts
         values = list(values)
         values[4] = [m for m in values[4] if m in current] or list(current)[:4]

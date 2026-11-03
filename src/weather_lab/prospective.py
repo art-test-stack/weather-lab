@@ -7,11 +7,11 @@ import numpy as np
 import pandas as pd
 
 from weather_lab import models
-from weather_lab.common import ROOT, environment, git_revision, now_utc, read_json, sha256_file
+from weather_lab.common import ROOT, environment, git_revision, read_json, sha256_file
 from weather_lab.forecast_config import ForecastConfig, build_adapter, check
 from weather_lab.hourly_benchmark import inputs
 from weather_lab.prospective_collect import PRODUCT, event, rows_json, stations
-from weather_lab.prospective_store import digest, encoded
+from weather_lab.prospective_store import digest, encoded, now_utc
 from weather_lab.saved_catalog import saved_configurations
 
 PAIR = ["cohort", "case_id", "station", "variable", "valid_time", "lead_h", "issue", "cycle"]
@@ -33,8 +33,19 @@ def configuration(record):
     return cfg
 
 
+def catalog_records(archive):
+    """A catalog becomes visible only after every configuration has been committed."""
+    commit = archive.get("status", "catalog-complete")
+    if commit is None:
+        return []
+    records = {r["key"]: r for r in archive.records("catalog")}
+    if not set(commit["configurations"]) <= records.keys():
+        raise ValueError("incomplete frozen Benchmark catalog")
+    return [records[key] for key in commit["configurations"]]
+
+
 def freeze_catalog(archive, suite):
-    existing = archive.records("catalog")
+    existing = catalog_records(archive)
     if existing:
         return [r["key"] for r in existing]
     records = []
@@ -63,7 +74,8 @@ def freeze_catalog(archive, suite):
         records.append(ident)
     if not records:
         raise ValueError("no saved Benchmark configurations installed; nothing substituted")
-    event(archive, "catalog", "ok", configurations=records, suite=suite)
+    archive.put("status", "catalog-complete", {"task": "catalog", "status": "ok", "collected_at": now_utc(),
+                "configurations": records, "suite": suite})
     return records
 
 
@@ -73,7 +85,7 @@ def observation_frame(archive, cutoff=None, *, replay=False):
     if cutoff is not None and not replay:
         versions = [r for r in versions if pd.Timestamp(r["collected_at"]) <= cutoff]
     selected = {}
-    for rec in sorted(versions, key=lambda r: r["collected_at"]):
+    for rec in sorted(versions, key=lambda r: pd.Timestamp(r["collected_at"])):
         selected[rec["identity"]] = rec
     rows = [row | {"observation_version": digest(encoded(rec)), "available_at": rec["collected_at"]}
             for rec in selected.values() for row in rec["rows"]]
@@ -161,7 +173,7 @@ def predict_config(cfg, record, batch, model_id, *, replay=False):
 
 def infer(archive, start, end, *, replay=False, predict=predict_config, clock=now_utc):
     start, end = pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)
-    catalog = archive.records("catalog")
+    catalog = catalog_records(archive)
     if not catalog:
         raise ValueError("freeze the existing saved Benchmark catalog before inference")
     coords = {s["id"]: (s["lat"], s["lon"]) for s in stations()}
@@ -232,6 +244,7 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
                     if not replay:
                         frame.loc[late, "point"] = np.nan
                     missing = ~np.isfinite(frame.point)
+                    frame.loc[missing, "point"] = np.nan
                     frame["exclusion"] = np.where(missing, "late_freeze_or_missing_prediction", "")
                     if missing.any():
                         status = "partial" if (~missing).any() else "unavailable"
@@ -257,7 +270,7 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
     return count
 
 
-def evaluate(archive, selected=None):
+def evaluate(archive, selected=None, *, asof=None):
     """Score identical support across selected configurations and raw AROME, per cohort/variable."""
     records = archive.records("predictions")
     rows = [row | {"prediction_record": digest(encoded(rec["value"]))}
@@ -280,7 +293,7 @@ def evaluate(archive, selected=None):
         selected = sorted(set(frame.model) - {"arome-raw"})
     required = set(selected) | {"arome-raw"}
     frame = frame[frame.model.isin(required)].copy()
-    obs = observation_frame(archive)
+    obs = observation_frame(archive, pd.Timestamp(asof or now_utc()))
     truth = obs.melt(id_vars=["station", "time", "observation_version"], value_vars=["t", "pmer"],
                      var_name="variable", value_name="observed")
     frame["valid_time"] = pd.to_datetime(frame.valid_time, utc=True)

@@ -4,8 +4,10 @@ from __future__ import annotations
 import base64
 from email.utils import parsedate_to_datetime
 import json
+import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -14,16 +16,26 @@ import yaml
 
 from weather_lab import arome
 from weather_lab.arome_fields import decode_station_records, step_values
-from weather_lab.common import ROOT, now_utc, sha256_file
+from weather_lab.common import ROOT, sha256_file
 from weather_lab.forecast_data import CONFIG as STATIONS_CONFIG
 from weather_lab.hourly_benchmark import configuration
 from weather_lab.hourly_observations import read_hourly
-from weather_lab.prospective_store import digest, encoded
+from weather_lab.prospective_store import digest, encoded, now_utc
 from weather_lab.rag_archive import OBS_BASE
 
 BASE = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net/pnt"
 PRODUCT = "meteofrance_arome_france"
 TEMP = ROOT / ".tmp/codex/prospective-collection"
+
+
+def http_session():
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
 
 
 def stations():
@@ -32,7 +44,7 @@ def stations():
 
 
 def rows_json(frame):
-    return json.loads(frame.to_json(orient="records", date_format="iso"))
+    return json.loads(frame.to_json(orient="records", date_format="iso", double_precision=15))
 
 
 def event(archive, task, status, **details):
@@ -42,10 +54,21 @@ def event(archive, task, status, **details):
 
 def collect_forecasts(archive, start, end, *, session=None, tree=None, decode=decode_station_records,
                       budget=500 * 2**20):
-    session = session or requests.Session()
+    session = session or http_session()
     tree = arome.archive_tree(session) if tree is None else tree
     start, end = pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)
     consumed, successes, failures = 0, 0, []
+    def ranged_get(url, **kwargs):
+        nonlocal consumed
+        response = session.get(url, **kwargs)
+        response.raise_for_status()
+        consumed += len(response.content)
+        if consumed > budget:
+            raise ValueError("prospective AROME download exceeds 500 MiB budget")
+        if "Range" in kwargs.get("headers", {}) and response.status_code != 206:
+            raise ValueError("AROME server did not honor GRIB byte range")
+        return response
+    ranges = SimpleNamespace(head=session.head, get=ranged_get)
     TEMP.mkdir(parents=True, exist_ok=True)
     for rid, models in sorted(tree.items()):
         run = pd.to_datetime(rid, utc=True)
@@ -58,7 +81,7 @@ def collect_forecasts(archive, start, end, *, session=None, tree=None, decode=de
             if archive.get("forecasts", key) is not None:
                 continue
             try:
-                messages, http = arome.scan_messages(url, session)
+                messages, http = arome.scan_messages(url, ranges)
                 parts, payload = [], bytearray()
                 for lead in range(max(1, low), high + 1):
                     for field in ("t", "pmer"):
@@ -66,12 +89,9 @@ def collect_forecasts(archive, start, end, *, session=None, tree=None, decode=de
                         if message is None:
                             continue
                         stop = message["offset"] + message["length"] - 1
-                        response = session.get(url, headers={"Range": f"bytes={message['offset']}-{stop}"}, timeout=120)
+                        response = ranges.get(url, headers={"Range": f"bytes={message['offset']}-{stop}"}, timeout=120)
                         response.raise_for_status()
                         raw = response.content
-                        consumed += len(raw)
-                        if consumed > budget:
-                            raise ValueError("prospective AROME download exceeds 500 MiB budget")
                         if response.status_code != 206 or len(raw) != message["length"]:
                             raise ValueError("AROME server did not honor exact GRIB byte range")
                         # Recheck the source identity after HEAD/scanning; reject changed objects.
@@ -105,7 +125,9 @@ def collect_forecasts(archive, start, end, *, session=None, tree=None, decode=de
                 if complete:
                     archive.put("forecasts", key, record)
                 else:
-                    archive.put("forecasts", key + "/partial/" + record["source_sha256"], record)
+                    partial = key + "/partial/" + record["source_sha256"]
+                    if archive.get("forecasts", partial) is None:
+                        archive.put("forecasts", partial, record)
                 successes += 1
             except (requests.RequestException, ValueError, KeyError) as exc:
                 if "budget" in str(exc):
@@ -118,12 +140,12 @@ def collect_forecasts(archive, start, end, *, session=None, tree=None, decode=de
 
 def collect_observations(archive, start, end, *, session=None, budget=500 * 2**20):
     """Version actual hourly station samples; publication delays remain genuine gaps."""
-    session = session or requests.Session()
+    session = session or http_session()
     start, end = pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True)
     if start.year < 2025 or end.year > 2026 or start > end:
         raise ValueError("this source period covers 2025–2026 only")
     TEMP.mkdir(parents=True, exist_ok=True)
-    consumed, count, failures = 0, 0, []
+    consumed, count, published, rejected, failures = 0, 0, 0, 0, []
     previous = archive.records("observations")
     with tempfile.TemporaryDirectory(dir=TEMP) as tmp:
         for department in sorted({s["department"] for s in stations()}):
@@ -143,6 +165,8 @@ def collect_observations(archive, start, end, *, session=None, budget=500 * 2**2
                 for station in (s for s in stations() if s["department"] == department):
                     frame, metadata = read_hourly(path, station["id"], station["national_id"], start, end)
                     frame = frame[frame.NUM_POSTE.notna()]
+                    published += len(frame)
+                    rejected += int(frame[["t", "pmer"]].isna().sum().sum())
                     for day, group in frame.groupby(frame.time.dt.strftime("%Y-%m-%d")):
                         rows = rows_json(group)
                         values_hash = digest(encoded(rows))
@@ -159,8 +183,96 @@ def collect_observations(archive, start, end, *, session=None, budget=500 * 2**2
                         count += 1
             except requests.RequestException as exc:
                 failures.append({"department": department, "reason": str(exc)})
-    event(archive, "observations", "partial" if failures else "ok", versions=count, failures=failures,
+    expected = len(pd.date_range(start, end, freq="h")) * len(stations())
+    event(archive, "observations", "partial" if failures or published < expected else "ok",
+          versions=count, failures=failures, expected_station_hours=expected, published_station_hours=published,
+          missing_station_hours=expected - published, missing_or_rejected_values=rejected,
           start=str(start), end=str(end), downloaded_bytes=consumed)
+    return count
+
+
+def parse_realtime(features, station, requested, collected):
+    """Strict hourly GeoJSON decoder; API's nearest-time replies are not relabelled."""
+    from weather_lab.data import wind_components
+
+    rows = []
+    for feature in features:
+        raw = feature["properties"]
+        if str(raw["geo_id_insee"]).zfill(8) != station["national_id"]:
+            raise ValueError("real-time observation station identity mismatch")
+        valid = pd.to_datetime(raw["validity_time"], utc=True)
+        if valid != requested:
+            continue
+        if valid > pd.Timestamp(collected):
+            raise ValueError("real-time observation valid time is in the future")
+        def value(name, scale=1., offset=0.):
+            number = raw.get(name)
+            if number is None:
+                return None
+            number = float(number) * scale + offset
+            if not np.isfinite(number):
+                raise ValueError("nonfinite real-time observation")
+            return number
+        t, pmer = value("t", offset=-273.15), value("pmer", scale=.01)
+        if (t is not None and not -60 <= t <= 60) or (pmer is not None and not 850 <= pmer <= 1100):
+            raise ValueError("real-time observation units or physical range invalid")
+        ff, dd = value("ff"), value("dd")
+        u, v = wind_components(np.array([ff if ff is not None else np.nan]),
+                               np.array([dd if dd is not None else np.nan]))
+        rows.append({"station": station["id"], "time": valid.isoformat(), "t": t, "pmer": pmer,
+                     "u": float(u[0]) if np.isfinite(u[0]) else None,
+                     "v": float(v[0]) if np.isfinite(v[0]) else None,
+                     "ff": ff, "dd": dd, "raw": raw, "quality_rule": "raw real-time measurement; no interpolation"})
+    if len(rows) > 1:
+        raise ValueError("duplicate real-time hourly observation")
+    return rows
+
+
+def collect_realtime(archive, *, session=None, now=None, token=None):
+    session = session or http_session()
+    now = pd.Timestamp(now or now_utc())
+    token = token or os.environ.get("METEOFRANCE_TOKEN")
+    application = os.environ.get("METEOFRANCE_APPLICATION_ID")
+    if not token and application:
+        response = session.post("https://portail-api.meteofrance.fr/token",
+            headers={"Authorization": "Basic " + application}, data={"grant_type": "client_credentials"}, timeout=60)
+        response.raise_for_status()
+        token = response.json()["access_token"]
+    if not token:
+        event(archive, "realtime_observations", "unavailable", reason="Météo-France observation credentials not configured")
+        return 0
+    url = "https://public-api.meteofrance.fr/public/DPObs/v2/station/horaire"
+    count, failures = 0, []
+    existing = archive.records("observations")
+    for station in stations():
+        for requested in pd.date_range(end=now.floor("h"), periods=24, freq="h"):
+            try:
+                params = {"id_station": station["national_id"], "date": requested.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                          "format": "geojson"}
+                response = session.get(url, params=params, headers={"Authorization": "Bearer " + token}, timeout=60)
+                response.raise_for_status()
+                features = response.json()
+                collected = now_utc()
+                rows = parse_realtime(features, station, requested, collected)
+                if not rows:
+                    failures.append({"station": station["id"], "time": str(requested), "reason": "hour not published"})
+                    continue
+                identity = f"realtime/{station['id']}/{requested.isoformat()}"
+                versions = [r["value"] for r in existing if r["value"]["identity"] == identity]
+                latest = max(versions, key=lambda r: r["collected_at"]) if versions else None
+                values_hash = digest(encoded(rows))
+                if latest and latest.get("values_sha256") == values_hash:
+                    continue
+                record = {"identity": identity, "rows": rows, "collected_at": collected,
+                          "values_sha256": values_hash, "source_url": url, "request": params,
+                          "source_sha256": digest(response.content), "raw_geojson": features,
+                          "source_body_base64": base64.b64encode(response.content).decode(),
+                          "source_kind": "genuine_hourly_station_observations", "retrospective": False}
+                archive.put("observations", identity + "/" + collected, record)
+                count += 1
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                failures.append({"station": station["id"], "time": str(requested), "reason": str(exc)})
+    event(archive, "realtime_observations", "partial" if failures else "ok", versions=count, failures=failures)
     return count
 
 
@@ -186,3 +298,23 @@ def backfill_saved(archive, start, end, source):
             archive.put("forecasts", key, record)
     event(archive, "backfill", "ok", source_artifact=source.name, start=str(lo), end=str(hi),
           limitation="Source availability assumptions retained; this is retrospective evidence only")
+
+
+def record_backfill_gaps(archive, start, end):
+    """Explicitly inventory absent three-hourly operational issues; never create forecasts."""
+    from weather_lab.prospective import catalog_records
+
+    found = {pd.Timestamp(r["value"]["run"]) for r in archive.records("forecasts")}
+    for run in pd.date_range(pd.Timestamp(start).ceil("3h"), pd.Timestamp(end).floor("3h"), freq="3h"):
+        if run in found:
+            continue
+        origin = run + pd.Timedelta(hours=3)
+        cohort = "retrospective-" + origin.strftime("%Y-%m")
+        for station in stations():
+            case_id = f"{cohort}/{station['id']}/{run.isoformat()}/{origin.isoformat()}"
+            for model in ["arome-raw", *[r["key"] for r in catalog_records(archive)]]:
+                record = {"case_id": case_id, "station": station["id"], "origin": origin.isoformat(),
+                          "issue": run.isoformat(), "cycle": run.hour, "cohort": cohort, "model": model,
+                          "status": "unavailable", "reason": "no genuine archived issued forecast found",
+                          "expected": 96, "predicted": 0}
+                archive.put("availability", f"missing-issue/{case_id}/{model}", record)

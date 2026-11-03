@@ -21,6 +21,8 @@ def fixture(archive):
            "adapter_version": 5, "preprocessing_version": 1}
     ident = digest(encoded(rec))
     archive.put("catalog", ident, rec)
+    archive.put("status", "catalog-complete", {"task": "catalog", "status": "ok",
+        "collected_at": "2026-11-01T00:00Z", "configurations": [ident]})
     times = pd.date_range(end=ORIGIN, periods=24 * 31, freq="h")
     obs = pd.DataFrame({"station": "07149", "time": times, "t": 10., "pmer": 1000., "u": 0., "v": 0.})
     # Future observation revisions must not replace the version actually available at decision.
@@ -93,7 +95,9 @@ def test_common_support_metrics_revisions_and_no_cross_cohort_pooling(tmp_path, 
             "rows": [{"station": "07149", "time": "2026-11-03T05:00Z", "t": 10., "pmer": None}]})
     metrics, coverage = p.evaluate(archive)
     assert metrics.empty and not coverage.paired.any()  # every selected model must have the same pair
-    metrics, coverage = p.evaluate(archive, ["first"])
+    early, early_coverage = p.evaluate(archive, ["first"], asof="2026-11-03T06:00Z")
+    assert early.empty and not early_coverage.paired.any()
+    metrics, coverage = p.evaluate(archive, ["first"], asof="2026-11-06T00:00Z")
     model = metrics[metrics.model.eq("first")].iloc[0]
     assert model.mae == model.rmse == point - 10
     assert model.gain == gain and model.absolute_gain == abs(gain)
@@ -121,7 +125,7 @@ def test_configuration_version_and_checkpoint_changes_refused():
 def test_retrospective_official_availability_is_distinct_from_live_collection(tmp_path):
     archive = Archive(tmp_path)
     with archive.writer():
-        archive.put("forecasts", "official", {"run": "2026-10-20T00:00Z", "collected_at": "2026-11-03T12:00Z",
+        archive.put("forecasts", "official", {"run": "2026-10-20T00:00Z", "collected_at": "2026-11-03T12:00:00.000001Z",
             "published_at": "2026-10-20T03:20Z", "rows": [{"station": "07149", "product": p.PRODUCT,
                 "run": "2026-10-20T00:00Z", "available_at": "2026-11-03T12:00Z", "valid_time": "2026-10-20T05:00Z",
                 "variable": "t", "value": 10., "availability_basis": "actual_first_collection", "source_kind": "issued_run"}]})
@@ -132,6 +136,78 @@ def test_retrospective_official_availability_is_distinct_from_live_collection(tm
     assert replay.iloc[0].available_at == pd.Timestamp("2026-10-20T03:20Z")
     assert "retrospective" in replay.iloc[0].availability_basis
     assert list(p.decisions(archive, cutoff, cutoff, True))[0][1] == cutoff
+    assert p.forecast_frame(archive, pd.Timestamp("2026-11-03T12:00Z")).empty
+    live = list(p.decisions(archive, pd.Timestamp("2026-11-03T12:00Z"), pd.Timestamp("2026-11-03T13:00Z")))
+    assert live[0][1] == pd.Timestamp("2026-11-03T13:00Z")
+
+
+def test_end_to_end_freeze_then_delayed_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "stations", lambda: [{"id": "07149", "lat": 48., "lon": 2.}])
+    archive = Archive(tmp_path)
+    def predict(cfg, record, batch, model, **kwargs):
+        point = np.broadcast_to(np.array([10., 1000.])[None, :, None], (1, 2, batch.horizon)).copy()
+        return ForecastBatch(model, "frozen", "point", batch.variables, point).to_frame(batch, "test"), {}
+    with archive.writer():
+        model = fixture(archive)
+        p.infer(archive, ORIGIN, ORIGIN, predict=predict, clock=lambda: "2026-11-03T04:30Z")
+        assert p.evaluate(archive, [model], asof="2026-11-03T04:30Z")[0].empty
+        truth = pd.DataFrame({"station": "07149", "time": pd.date_range(ORIGIN + pd.Timedelta(hours=1), periods=48, freq="h"),
+                              "t": 10., "pmer": 1000.})
+        archive.put("observations", "verification", {"identity": "07149/verification", "collected_at": "2026-11-06T00:00Z",
+                                                       "rows": rows_json(truth)})
+        monkeypatch.setattr(p, "now_utc", lambda: "2026-11-06T01:00:00Z")
+        result = p.score(archive)
+    table = pd.DataFrame(result["metrics"])
+    scores = table[table.model.eq(model)]
+    assert len(scores) == 94  # two variables, 47 common leads; raw AROME's last hour is missing
+    assert scores.mae.eq(0).all() and scores.gain.eq(2).all()
+    assert set(scores.cohort) == {"prospective-2026-11"}
+    assert len(archive.records("predictions")) == 2
+
+
+def test_catalog_partial_upload_is_invisible_and_retryable(tmp_path, monkeypatch):
+    import json
+
+    cfg = ForecastConfig.make("Timestral-28M", targets=("t", "pmer"), step_hours=1)
+    source = {"forecast_config": cfg.as_dict(), "checkpoint": {}, "adapter_version": 1, "preprocessing_version": 1}
+    saved = {}
+    for name in ("first", "second"):
+        path = tmp_path / name
+        path.mkdir()
+        (path / "run.json").write_text(json.dumps(source))
+        saved[str(path)] = {"label": name, "config": cfg.as_dict(), "summary": {}}
+    monkeypatch.setattr(p, "saved_configurations", lambda suite: saved)
+    archive = Archive(tmp_path / "archive")
+    original = archive.put
+    def fail_second(kind, key, value):
+        if kind == "catalog" and len(archive.records("catalog")) == 1:
+            raise OSError("interrupted")
+        return original(kind, key, value)
+    with archive.writer():
+        monkeypatch.setattr(archive, "put", fail_second)
+        with pytest.raises(OSError):
+            p.freeze_catalog(archive, "saved")
+        assert p.catalog_records(archive) == []
+        monkeypatch.setattr(archive, "put", original)
+        ids = p.freeze_catalog(archive, "saved")
+        assert len(p.catalog_records(archive)) == 2
+        assert p.freeze_catalog(archive, "saved") == ids
+
+
+def test_absent_historical_issues_are_coverage_gaps_not_forecasts(tmp_path, monkeypatch):
+    from weather_lab import prospective_collect as collection
+
+    monkeypatch.setattr(collection, "stations", lambda: [{"id": "07149"}])
+    archive = Archive(tmp_path)
+    with archive.writer():
+        model = fixture(archive)
+        collection.record_backfill_gaps(archive, pd.Timestamp("2026-10-01T00:00Z"), pd.Timestamp("2026-10-01T03:00Z"))
+    assert len(archive.records("availability")) == 4
+    assert archive.records("predictions") == []
+    metrics, coverage = p.evaluate(archive, [model], asof="2026-11-06T00:00Z")
+    assert metrics.empty and len(coverage) == 384
+    assert coverage.point.isna().all()
+    assert set(coverage.cohort) == {"retrospective-2026-10"}
 
 
 @pytest.mark.real_model
