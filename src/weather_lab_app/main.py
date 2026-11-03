@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from weather_lab_app import zerogpu, plots, forecast_state as forecast, forecast_view as view, benchmark as bench, results
+from weather_lab_app import zerogpu, plots, forecast_state as forecast, forecast_view as view, benchmark as bench, prospective, results
 
 import sys
 from pathlib import Path
@@ -165,7 +165,8 @@ def build() -> gr.Blocks:
                     "- **Forecast:** Choose a window, a model to evaluate against raw AROME, model parameters, "
                     "feature engineering, and an output type, then run on the selected window.\n"
                     "- **Benchmark:** Visualize and compare saved model configurations against the AROME baseline "
-                    "on forecast windows up to 48 hours.")
+                    "on forecast windows up to 48 hours.\n"
+                    "- **Prospective (draft):** Review the point-in-time evaluation design for existing Benchmark configurations.")
         if notice := fallback_notice(BOOT):
             gr.Markdown(f"**Note:** {notice}", elem_classes="note", elem_id="snapshot-fallback")
         a0 = forecast.initial_applied(DEFAULT_SUITE)
@@ -273,6 +274,10 @@ def build() -> gr.Blocks:
                     (s for s, r in results.RUNS.items() if not r.run.get("exploration")), DEFAULT_SUITE)
 
                 saved_panel = bench.build(benchmark_suite, results.RUNS[benchmark_suite], demo)
+
+            # ---------------- prospective evaluation design (read-only draft)
+            with gr.Tab("Prospective · draft", id="prospective"):
+                prospective.build(benchmark_suite)
 
         # ---------------- wiring
         # Draft controls, in DRAFT_KEYS order. Their edits only reach `draft_feedback` (never `applied`).
