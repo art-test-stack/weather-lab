@@ -16,6 +16,7 @@ from weather_lab.common import STATION_NAMES
 from weather_lab.prospective import evaluate
 from weather_lab.prospective_store import Archive, PREFIX
 from weather_lab.publish import DEFAULT_BUCKET
+from weather_lab_app.labels import model_style
 
 
 def archive_location():
@@ -41,7 +42,7 @@ def summarize(metrics, group):
 
 
 def read_view(archive, station="ALL", start="", end="", variable="t", selected=None,
-              cohort="prospective-2026-11", cycle="ALL"):
+              cohort="prospective-2026-11", cycle="ALL", horizon=48):
     catalog = {r["key"]: r["value"] for r in archive.records("catalog")}
     status = []
     for kind in ("forecasts", "observations"):
@@ -59,7 +60,8 @@ def read_view(archive, station="ALL", start="", end="", variable="t", selected=N
         return (note + "\n\n" + message, *[go.Figure() for _ in range(4)], pd.DataFrame(),
                 pd.DataFrame() if coverage is None else coverage, provenance, pd.DataFrame(events))
     if not archive.records("predictions"):
-        return empty("No frozen predictions collected yet. Nothing is substituted.")
+        missing = pd.DataFrame([r["value"] for r in archive.records("availability")])
+        return empty("No frozen predictions collected yet. Nothing is substituted.", missing)
     selected = list(selected) if selected is not None else list(catalog)
     if not selected:
         return empty("Select at least one saved configuration.")
@@ -74,7 +76,7 @@ def read_view(archive, station="ALL", start="", end="", variable="t", selected=N
     def filtered(frame):
         if frame.empty:
             return frame
-        keep = frame.variable.eq(variable) & frame.cohort.eq(cohort)
+        keep = frame.variable.eq(variable) & frame.cohort.eq(cohort) & frame.lead_h.le(horizon)
         if station != "ALL":
             keep &= frame.station.eq(station)
         if cycle != "ALL":
@@ -100,19 +102,27 @@ def read_view(archive, station="ALL", start="", end="", variable="t", selected=N
     if metrics.empty:
         return empty("No verified common support. Inspect missing inputs, observations and exclusions below.", diagnostics)
     labels = {key: rec["label"] for key, rec in catalog.items()} | {"arome-raw": "Raw AROME"}
+    colors = {"Raw AROME": model_style("arome-raw")[0]}
+    for rec in catalog.values():
+        c = rec["config"]
+        family = "t0" if c.get("model", "").startswith("t0") else "timestral"
+        style_id = f"{family}-dev {c.get('model', 'saved')} {c.get('prediction_target', 'weather')} {c.get('conditioning', 'none')} saved"
+        colors[rec["label"]] = model_style(style_id)[0]
     metrics["model"] = metrics.model.map(lambda m: labels.get(m, m))
     daily, lead, comparison = [summarize(metrics, ["model", dim] if dim else ["model"])
                                for dim in ("date", "lead_h", None)]
     day_plot = px.line(daily.melt(id_vars=["model", "date"], value_vars=["mae", "rmse"],
                                  var_name="metric", value_name="error"), x="date", y="error", color="model",
-                       line_dash="metric", title="Daily MAE / RMSE · valid date (UTC)")
-    lead_plot = px.line(lead, x="lead_h", y="mae", color="model", title="MAE by hours after decision")
+                       line_dash="metric", color_discrete_map=colors, title="Daily MAE / RMSE · valid date (UTC)")
+    lead_plot = px.line(lead, x="lead_h", y="mae", color="model", color_discrete_map=colors,
+                        title="MAE by hours after decision")
     gain_plot = px.line(lead.melt(id_vars=["model", "lead_h"], value_vars=["gain", "absolute_gain"],
                                   var_name="gain_type", value_name="gain_value"),
                         x="lead_h", y="gain_value", color="model", line_dash="gain_type",
-                        title="Signed G = MAE(AROME) − MAE(model), and |G|")
+                        color_discrete_map=colors, title="Signed G = MAE(AROME) − MAE(model), and |G|")
     gain_plot.add_hline(y=0, line_dash="dot")
-    comparison_plot = px.bar(comparison, x="model", y="mae", title="Configurations on identical support")
+    comparison_plot = px.bar(comparison, x="model", y="mae", color="model", color_discrete_map=colors,
+                             title="Configurations on identical support")
     for plot in (day_plot, lead_plot, gain_plot, comparison_plot):
         plot.update_yaxes(title="°C" if variable == "t" else "hPa")
     return (note, day_plot, lead_plot, gain_plot, comparison_plot, comparison, diagnostics,
@@ -136,6 +146,7 @@ def build(suite: str, *, archive=None):
     with gr.Row():
         cohort = gr.Dropdown(cohorts, value=cohorts[0], label="Evaluation cohort")
         cycle = gr.Dropdown(["ALL", *[str(h) for h in range(24)]], value="ALL", label="Issuance hour (UTC)")
+        horizon = gr.Slider(1, 48, value=48, step=1, label="Evaluate through lead (hours)")
     selected = gr.CheckboxGroup([(r["label"], k) for k, r in catalog.items()], value=list(catalog)[:4],
                                label="Saved Benchmark configurations (shared support)")
     refresh = gr.Button("Refresh saved evaluation")
@@ -147,7 +158,7 @@ def build(suite: str, *, archive=None):
     with gr.Accordion("Saved provenance and collection status", open=False):
         provenance = gr.Dataframe(value=initial[7], interactive=False, label="Provenance")
         events = gr.Dataframe(value=initial[8], interactive=False, label="Collection attempts")
-    controls = [station, start, end, variable, selected, cohort, cycle]
+    controls = [station, start, end, variable, selected, cohort, cycle, horizon]
     outputs = [status, *plots, table, coverage, provenance, events]
     def render(*values):
         return read_view(archive, *values)

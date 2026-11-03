@@ -1,5 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -68,3 +70,20 @@ def test_marker_and_download_corruption_rejected(tmp_path):
     bucket.files[object_path] = b"changed"
     with pytest.raises(ValueError, match="checksum"):
         Archive(tmp_path / "reader", api=bucket).sync()
+
+
+def test_local_concurrent_writers_cannot_replace_a_prediction(tmp_path):
+    barrier = Barrier(2)
+    def write(value):
+        archive = Archive(tmp_path)
+        barrier.wait()
+        try:
+            with archive.writer():
+                archive.put("predictions", "same-case/model", {"point": value})
+            return "committed"
+        except ValueError:
+            return "conflict"
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(write, [1, 2]))
+    assert sorted(results) == ["committed", "conflict"]
+    assert len(Archive(tmp_path).records("predictions")) == 1

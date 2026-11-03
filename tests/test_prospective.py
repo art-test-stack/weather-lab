@@ -38,7 +38,10 @@ def fixture(archive):
     return ident
 
 
-def test_inference_point_in_time_immutable_and_provenance(tmp_path, monkeypatch):
+@pytest.mark.parametrize("finished,missing", [("2026-11-03T04:30:00Z", 0),
+                                             ("2026-11-03T05:00:00Z", 1),
+                                             ("2026-11-03T06:30:00Z", 2)])
+def test_inference_point_in_time_immutable_and_provenance(tmp_path, monkeypatch, finished, missing):
     monkeypatch.setattr(p, "stations", lambda: [{"id": "07149", "lat": 48., "lon": 2.}])
     archive = Archive(tmp_path)
     seen = []
@@ -51,10 +54,10 @@ def test_inference_point_in_time_immutable_and_provenance(tmp_path, monkeypatch)
         return ForecastBatch(model, "frozen", "point", batch.variables, point).to_frame(batch, "test"), {}
     with archive.writer():
         fixture(archive)
-        count = p.infer(archive, ORIGIN, ORIGIN, predict=predict, clock=lambda: "2026-11-03T04:30:00Z")
+        count = p.infer(archive, ORIGIN, ORIGIN, predict=predict, clock=lambda: finished)
         assert count == 2
         assert p.infer(archive, ORIGIN, ORIGIN, predict=lambda *a: pytest.fail("regenerated prediction"),
-                       clock=lambda: "2026-11-03T04:30:00Z") == 0
+                       clock=lambda: finished) == 0
     assert len(seen) == 1
     record = next(r["value"] for r in archive.records("predictions") if r["value"]["model"] != "arome-raw")
     assert record["provenance"]["configuration"]["checkpoint"]["revision"] == models.CHECKPOINTS["Timestral-28M"].revision
@@ -62,6 +65,7 @@ def test_inference_point_in_time_immutable_and_provenance(tmp_path, monkeypatch)
     assert record["provenance"]["code_revision"]
     assert all(r["lead_h"] > 0 for r in record["rows"])
     assert record["cohort"] == "prospective-2026-11"
+    assert sum(row["point"] is None for row in record["rows"]) == 2 * missing
 
 
 def test_late_freeze_and_missing_inputs_are_explicit(tmp_path, monkeypatch):
@@ -77,12 +81,13 @@ def test_late_freeze_and_missing_inputs_are_explicit(tmp_path, monkeypatch):
     assert len(archive.records("availability")) == 2
 
 
-def test_common_support_metrics_revisions_and_no_cross_cohort_pooling(tmp_path):
+@pytest.mark.parametrize("point,gain", [(11., 2.), (15., -2.)])
+def test_common_support_metrics_revisions_and_no_cross_cohort_pooling(tmp_path, point, gain):
     archive = Archive(tmp_path)
     base = {"cohort": "prospective-2026-11", "station": "07149", "case_id": "case", "variable": "t",
             "valid_time": "2026-11-03T05:00Z", "lead_h": 1, "issue": "2026-11-03T00:00Z", "cycle": 0}
     with archive.writer():
-        for model, value in [("arome-raw", 13.), ("first", 11.), ("missing", None)]:
+        for model, value in [("arome-raw", 13.), ("first", point), ("missing", None)]:
             archive.put("predictions", model, {"rows": [{**base, "model": model, "point": value}]})
         archive.put("observations", "truth", {"identity": "07149/2026-11-03", "collected_at": "2026-11-04T04:00Z",
             "rows": [{"station": "07149", "time": "2026-11-03T05:00Z", "t": 10., "pmer": None}]})
@@ -90,12 +95,14 @@ def test_common_support_metrics_revisions_and_no_cross_cohort_pooling(tmp_path):
     assert metrics.empty and not coverage.paired.any()  # every selected model must have the same pair
     metrics, coverage = p.evaluate(archive, ["first"])
     model = metrics[metrics.model.eq("first")].iloc[0]
-    assert model.mae == model.rmse == 1
-    assert model.gain == model.absolute_gain == 2
+    assert model.mae == model.rmse == point - 10
+    assert model.gain == gain and model.absolute_gain == abs(gain)
     assert metrics.cohort.unique().tolist() == ["prospective-2026-11"]
     assert coverage.observation_version.notna().all()
     with archive.writer():
         score = p.score(archive)
+        assert p.score(archive) == score
+        assert len(archive.records("evaluations")) == 1
     assert score["prediction_records"] and score["observation_records"] and score["scorer_sha256"]
 
 
@@ -109,6 +116,22 @@ def test_configuration_version_and_checkpoint_changes_refused():
         p.configuration(changed)
     with pytest.raises(ValueError, match="checkpoint"):
         p.predict_config(cfg, {"checkpoint": {"revision": "newer"}}, None, "saved")
+
+
+def test_retrospective_official_availability_is_distinct_from_live_collection(tmp_path):
+    archive = Archive(tmp_path)
+    with archive.writer():
+        archive.put("forecasts", "official", {"run": "2026-10-20T00:00Z", "collected_at": "2026-11-03T12:00Z",
+            "published_at": "2026-10-20T03:20Z", "rows": [{"station": "07149", "product": p.PRODUCT,
+                "run": "2026-10-20T00:00Z", "available_at": "2026-11-03T12:00Z", "valid_time": "2026-10-20T05:00Z",
+                "variable": "t", "value": 10., "availability_basis": "actual_first_collection", "source_kind": "issued_run"}]})
+    cutoff = pd.Timestamp("2026-10-20T04:00Z")
+    assert p.forecast_frame(archive, cutoff).empty
+    replay = p.forecast_frame(archive, cutoff, replay=True)
+    assert len(replay) == 1
+    assert replay.iloc[0].available_at == pd.Timestamp("2026-10-20T03:20Z")
+    assert "retrospective" in replay.iloc[0].availability_basis
+    assert list(p.decisions(archive, cutoff, cutoff, True))[0][1] == cutoff
 
 
 @pytest.mark.real_model

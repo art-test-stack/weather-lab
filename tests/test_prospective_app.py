@@ -28,7 +28,7 @@ def test_gradio_empty_populated_and_read_only_callbacks(tmp_path, monkeypatch, p
     with gr.Blocks() as demo:
         handles = view.build("hourly-2026-v3", archive=archive)
     demo.get_config_file()
-    assert len(demo.fns) == 8  # refresh plus seven saved-only filters
+    assert len(demo.fns) == 9  # refresh plus eight saved-only filters
     output = handles["render"]("ALL", "", "", "t", ["model"], "prospective-2026-11", "ALL")
     if populated:
         assert len(output[1].data) == 4  # two metrics for model and reference

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from weather_lab import models
-from weather_lab.common import ROOT, git_revision, now_utc, read_json, sha256_file
+from weather_lab.common import ROOT, environment, git_revision, now_utc, read_json, sha256_file
 from weather_lab.forecast_config import ForecastConfig, build_adapter, check
 from weather_lab.hourly_benchmark import inputs
 from weather_lab.prospective_collect import PRODUCT, event, rows_json, stations
@@ -34,6 +34,9 @@ def configuration(record):
 
 
 def freeze_catalog(archive, suite):
+    existing = archive.records("catalog")
+    if existing:
+        return [r["key"] for r in existing]
     records = []
     for path, item in saved_configurations(suite).items():
         source = read_json(ROOT / path / "run.json")
@@ -80,9 +83,8 @@ def observation_frame(archive, cutoff=None, *, replay=False):
     frame["available_at"] = pd.to_datetime(frame.available_at, utc=True)
     if cutoff is not None:
         frame = frame[frame.time.le(cutoff)]
-    if frame.duplicated(["station", "time"]).any():
-        raise ValueError("duplicate prospective observation station/time")
-    return frame
+    # Qualified archive revisions can supersede an earlier real-time station sample.
+    return frame.sort_values("available_at", kind="stable").drop_duplicates(["station", "time"], keep="last")
 
 
 def forecast_frame(archive, cutoff=None, *, replay=False):
@@ -95,7 +97,10 @@ def forecast_frame(archive, cutoff=None, *, replay=False):
             continue
         for row in rec["rows"]:
             row = dict(row)
-            if not replay:
+            if replay and rec.get("published_at"):
+                row["available_at"] = rec["published_at"]
+                row["availability_basis"] = "official_archive_last_modified_retrospective"
+            elif not replay:
                 row["available_at"] = rec["collected_at"]
             rows.append(row | {"forecast_version": digest(encoded(rec))})
     cols = ["station", "run", "valid_time", "available_at", "variable", "value", "product",
@@ -114,7 +119,7 @@ def decisions(archive, start, end, replay=False):
     """One hourly-grid origin per discovered issue; late execution is recorded, never backdated."""
     frame = forecast_frame(archive, replay=replay)
     for run, rows in frame.groupby("run"):
-        origin = (run + pd.Timedelta(hours=3) if replay else rows.available_at.min().ceil("h"))
+        origin = rows.available_at.min().ceil("h")
         if start <= origin <= end:
             yield run, origin
 
@@ -160,6 +165,8 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
     if not catalog:
         raise ValueError("freeze the existing saved Benchmark catalog before inference")
     coords = {s["id"]: (s["lat"], s["lon"]) for s in stations()}
+    code = {p.name: sha256_file(p) for p in sorted((ROOT / "src/weather_lab").glob("*.py"))}
+    runtime = environment()
     count = 0
     for run, origin in decisions(archive, start, end, replay):
         if not replay and origin > pd.Timestamp(clock()):
@@ -228,15 +235,16 @@ def infer(archive, start, end, *, replay=False, predict=predict_config, clock=no
                     frame["exclusion"] = np.where(missing, "late_freeze_or_missing_prediction", "")
                     if missing.any():
                         status = "partial" if (~missing).any() else "unavailable"
-                except (ValueError, KeyError, RuntimeError, OSError) as exc:
+                except Exception as exc:
                     finished, reason, status = clock(), f"{type(exc).__name__}: {exc}", "unavailable"
                     frame = pd.DataFrame(expected).assign(exclusion=reason)
                 provenance = {"configuration": record, "started_at": started, "finished_at": finished,
                     "decision_cutoff": origin.isoformat(), "code_revision": git_revision(),
+                    "code_sha256": code, "environment": runtime,
                     "uv_lock_sha256": sha256_file(ROOT / "uv.lock"),
                     "source_records": sorted(set(obs.observation_version) | set(issued.forecast_version)),
                     "input_sha256": digest(encoded({"observations": rows_json(obs), "issued": rows_json(issued)})),
-                    "availability_policy": "historical replay assumes observation/run plus 3h" if replay
+                    "availability_policy": "retrospective: source forecast availability evidence/assumption; observation bridge 3h" if replay
                                            else "actual collection cutoff; freeze strictly before valid time",
                     "inference": json.loads(json.dumps(info, default=str))}
                 rec = {**common, "model": model, "status": status, "reason": reason,
@@ -254,6 +262,17 @@ def evaluate(archive, selected=None):
     records = archive.records("predictions")
     rows = [row | {"prediction_record": digest(encoded(rec["value"]))}
             for rec in records for row in rec["value"]["rows"]]
+    # Missing historical issues have an availability ledger, never fabricated forecasts.
+    present = {(row["case_id"], row["model"]) for row in rows}
+    for record in archive.records("availability"):
+        rec = record["value"]
+        if not record["key"].startswith("missing-issue/") or (rec["case_id"], rec["model"]) in present:
+            continue
+        for variable in ("t", "pmer"):
+            for lead in range(1, 49):
+                rows.append({k: rec[k] for k in ("cohort", "case_id", "station", "model", "issue", "cycle")} |
+                    {"variable": variable, "lead_h": lead, "point": None, "prediction_record": None,
+                     "valid_time": (pd.Timestamp(rec["origin"]) + pd.Timedelta(hours=lead)).isoformat()})
     if not rows:
         return pd.DataFrame(), pd.DataFrame()
     frame = pd.DataFrame(rows)

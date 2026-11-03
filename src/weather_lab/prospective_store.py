@@ -114,7 +114,7 @@ class Archive:
         if self.api is None:
             return
         entries = list(self.api.list_bucket_tree(DEFAULT_BUCKET, prefix=PREFIX, recursive=True))
-        files = []
+        objects, markers = [], []
         for entry in entries:
             relative = entry.path.removeprefix(PREFIX + "/")
             if not re.fullmatch(r"(?:objects/[0-9a-f]{64}|records/(?:" +
@@ -122,8 +122,34 @@ class Archive:
                 continue
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            files.append((entry.path, str(destination)))
-        if files:
-            self.api.download_bucket_files(DEFAULT_BUCKET, files, raise_on_missing_files=True)
+            if relative.startswith("objects/"):
+                if not destination.exists() or digest(destination.read_bytes()) != destination.stem:
+                    objects.append((entry.path, str(destination)))
+            elif not destination.exists():
+                markers.append((entry.path, destination))
+        if objects:
+            self.api.download_bucket_files(DEFAULT_BUCKET, objects, raise_on_missing_files=True)
+        for _, path in objects:
+            if digest(Path(path).read_bytes()) != Path(path).stem:
+                raise ValueError("prospective object checksum mismatch")
+        # Download markers separately; local readers must never see a partial download.
+        temp_root = ROOT / ".tmp/codex/prospective-store"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as tmp:
+            staged = [(remote, str(Path(tmp) / str(i))) for i, (remote, _) in enumerate(markers)]
+            if staged:
+                self.api.download_bucket_files(DEFAULT_BUCKET, staged, raise_on_missing_files=True)
+            for (_, source), (_, destination) in zip(staged, markers):
+                marker = json.loads(Path(source).read_bytes())
+                ident = marker["sha256"]
+                if not re.fullmatch(r"[0-9a-f]{64}", ident):
+                    raise ValueError("invalid prospective object digest")
+                payload = (self.root / "objects" / (ident + ".json")).read_bytes()
+                record = json.loads(payload)
+                if digest(payload) != ident or self._marker(record["kind"], record["key"]) != destination:
+                    raise ValueError("prospective remote commit identity/checksum mismatch")
+                pending = destination.with_suffix(".pending")
+                pending.write_bytes(Path(source).read_bytes())
+                pending.replace(destination)
         for kind in KINDS:
             self.records(kind)
