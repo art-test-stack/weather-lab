@@ -164,9 +164,8 @@ def build() -> gr.Blocks:
         gr.Markdown("The tabs are:\n\n"
                     "- **Forecast:** Choose a window, a model to evaluate against raw AROME, model parameters, "
                     "feature engineering, and an output type, then run on the selected window.\n"
-                    "- **Benchmark:** Visualize and compare saved model configurations against the AROME baseline "
-                    "on forecast windows up to 48 hours.\n"
-                    "- **Prospective Evaluation:** Read frozen predictions, delayed verification, coverage, and provenance.")
+                    "- **Benchmark:** Compare saved Benchmark or collected evaluation results against AROME "
+                    "on forecast windows up to 48 hours.")
         if notice := fallback_notice(BOOT):
             gr.Markdown(f"**Note:** {notice}", elem_classes="note", elem_id="snapshot-fallback")
         a0 = forecast.initial_applied(DEFAULT_SUITE)
@@ -265,19 +264,17 @@ def build() -> gr.Blocks:
 
             # ---------------- benchmark
             with gr.Tab("Benchmark", id="benchmark"):
-                gr.Markdown("### ⚠️ DATA LOADING\n"
-                            "Wait 30 seconds to 1 minute for the benchmark results to load on the page.\n\n"
-                            "Once the data and plots have loaded, the page layout may not adjust correctly, "
-                            "preventing you from scrolling to the bottom. To fix this, open and close a "
-                            "drop-down menu, such as one below a plot.", elem_classes="benchmark-loading")
                 benchmark_suite = "hourly-2026-v3" if "hourly-2026-v3" in results.RUNS else next(
                     (s for s, r in results.RUNS.items() if not r.run.get("exploration")), DEFAULT_SUITE)
-
-                saved_panel = bench.build(benchmark_suite, results.RUNS[benchmark_suite], demo)
-
-            # ---------------- saved prospective evaluation
-            with gr.Tab("Prospective Evaluation", id="prospective"):
-                prospective.build(benchmark_suite)
+                benchmark_source = gr.Radio([("Saved Benchmark", "saved"), ("Collected evaluation", "collected")],
+                                             value="saved", label="Results source")
+                with gr.Group() as saved_group:
+                    saved_panel = bench.build(benchmark_suite, results.RUNS[benchmark_suite], demo)
+                with gr.Group(visible=False) as collected_group:
+                    collected_panel = prospective.build(benchmark_suite)
+                benchmark_source.input(
+                    lambda source: (gr.update(visible=source == "saved"), gr.update(visible=source == "collected")),
+                    benchmark_source, [saved_group, collected_group], queue=False, show_progress="hidden")
 
         # ---------------- wiring
         # Draft controls, in DRAFT_KEYS order. Their edits only reach `draft_feedback` (never `applied`).
@@ -320,7 +317,7 @@ def build() -> gr.Blocks:
         # handles for tests (event-graph checks): the draft controls and the applied outputs
         demo.wl = {"draft": draft_in, "applied": applied, "run": e_btn, "render": render_out, "status": status,
                    "submission": submission, "captured_request": captured_request,
-                   "saved_benchmark": saved_panel,
+                   "saved_benchmark": saved_panel, "collected_evaluation": collected_panel, "benchmark_source": benchmark_source,
                    "advanced": [resid_vars, atmos_fields, tend_lags, systems, band, err_mode, show_old]}
     return demo
 

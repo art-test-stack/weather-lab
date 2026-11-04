@@ -294,7 +294,7 @@ def forecast_windows(table: pd.DataFrame, variable: str, names: dict | None = No
         name = (names or {}).get(model, model_name(model))
         group = model_rows.groupby("origin", sort=True).agg(
             mae=("mae", "mean"), locations=("station", "nunique"), pairs=("n", "sum")).reset_index()
-        fig.add_trace(go.Scatter(x=group.origin, y=group.mae, mode="lines", name=name, legendgroup=model,
+        fig.add_trace(go.Scatter(x=group.origin, y=group.mae, mode="lines+markers" if len(group) == 1 else "lines", name=name, legendgroup=model,
             line={"color": color, "dash": dash, "width": width}, connectgaps=False,
             customdata=list(zip(group.locations, group.pairs)),
             hovertemplate="Origin %{x}<br>Mean location 48-hour MAE %{y:.3f} " + unit(variable)
@@ -326,7 +326,7 @@ def correction_gains(table: pd.DataFrame, corrected: list[str], variable: str,
         for fig, magnitude in ((signed, False), (absolute, True)):
             label = "|Gain|" if magnitude else "Gain"
             fig.add_trace(go.Scatter(x=group.origin, y=group.gain.abs() if magnitude else group.gain,
-                mode="lines", name=name, legendgroup=model, connectgaps=False,
+                mode="lines+markers" if len(group) == 1 else "lines", name=name, legendgroup=model, connectgaps=False,
                 line={"color": color, "dash": dash, "width": width}, customdata=group.locations,
                 hovertemplate="Origin %{x}<br>" + label + " %{y:.3f} " + unit(variable)
                     + "<br>%{customdata} matched locations · 48 identical hourly pairs per location"
