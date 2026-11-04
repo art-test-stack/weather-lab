@@ -24,6 +24,13 @@ dependencies = [
 weather-lab = "weather_lab.cli:main"
 weather-lab-app = "weather_lab_app.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=9.1.1"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not real_model'"
+markers = ["real_model: explicit local inference using pinned checkpoint files"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

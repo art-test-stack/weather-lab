@@ -348,6 +348,9 @@ def main(argv: list[str] | None = None) -> None:
     cp.add_argument("--export-combined", metavar="DIR", help="write one run directory with all candidates (for the app)")
     cp.set_defaults(func=cmd_compare)
     p.add_argument("--offline", action="store_true", help="no Hub requests (same as WEATHER_LAB_OFFLINE=1)")
+    from weather_lab.prospective_cli import parser as prospective_parser
+
+    prospective_parser(sub)
     args = p.parse_args(argv)
     if args.offline:
         import os

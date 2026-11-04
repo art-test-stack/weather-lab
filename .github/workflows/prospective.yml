@@ -1,0 +1,62 @@
+name: Prospective evaluation (manual until reviewed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Operation (setup first; no paid inference)
+        type: choice
+        options: [cycle, observations, backfill, setup, score]
+        default: cycle
+      start:
+        description: Inclusive UTC origin/date; required for backfill
+        type: string
+      end:
+        description: Inclusive UTC origin/date; required for backfill
+        type: string
+      allow_large_downloads:
+        description: Allow explicit full checkpoint/index setup (about 2 GB weights plus indexes)
+        type: boolean
+        default: false
+  # INACTIVE pending review. Uncomment only after reviewing credentials, storage and runtime.
+  # schedule:
+  #   - cron: '17 * * * *'  # poll every hour; discover actual issues, retry publication delays
+  #   - cron: '43 6,12,18 * * *'  # preceding-day observations, with delayed-publication retries
+
+permissions:
+  contents: read
+
+# ALL prospective writers (including manual backfill/setup) must share this group.
+concurrency:
+  group: prospective-bucket-writer
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    uses: ./.github/workflows/prospective-stage.yml
+    with:
+      stage: collect
+      mode: ${{ inputs.mode || (github.event.schedule == '43 6,12,18 * * *' && 'observations' || 'cycle') }}
+      start: ${{ inputs.start || '' }}
+      end: ${{ inputs.end || '' }}
+      allow_large_downloads: ${{ inputs.allow_large_downloads || false }}
+    secrets: inherit
+  inference:
+    needs: collect
+    if: inputs.mode == 'cycle' || inputs.mode == 'backfill' || (github.event_name == 'schedule' && github.event.schedule != '43 6,12,18 * * *')
+    uses: ./.github/workflows/prospective-stage.yml
+    with:
+      stage: inference
+      mode: ${{ inputs.mode || 'cycle' }}
+      start: ${{ inputs.start || '' }}
+      end: ${{ inputs.end || '' }}
+      allow_large_downloads: ${{ inputs.allow_large_downloads || false }}
+    secrets: inherit
+  scoring:
+    needs: [collect, inference]
+    if: always() && needs.collect.result == 'success' && (needs.inference.result == 'success' || needs.inference.result == 'skipped')
+    uses: ./.github/workflows/prospective-stage.yml
+    with:
+      stage: scoring
+      mode: ${{ inputs.mode || 'cycle' }}
+    secrets: inherit
