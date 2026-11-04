@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import json
 
 import pandas as pd
 
@@ -64,6 +65,8 @@ def command(args):
     from weather_lab.rag_store import Store
 
     api = None
+    if args.action == "rag-snapshot" and args.remote:
+        raise ValueError("RAG snapshots are staged locally; synchronize the saved archive separately first")
     if args.remote:
         from huggingface_hub import HfApi
 
@@ -99,6 +102,19 @@ def command(args):
             engine.infer(archive, start, end, replay=args.retrospective)
         elif args.action == "score":
             engine.score(archive)
+        elif args.action == "rag-snapshot":
+            from weather_lab.rag_snapshot import build
+
+            identities = args.base_index or sorted({r["value"]["config"].get("retrieval_index")
+                for r in engine.catalog_records(archive)} - {None, ""})
+            if not identities:
+                raise ValueError("No pinned RAG indexes in the saved catalog; specify --base-index")
+            store = Store()
+            for identity in identities:
+                parent = store._path("indexes", identity)
+                if not (parent / "artifact.json").is_file():
+                    raise FileNotFoundError("Install the pinned parent index through explicit catalog setup first")
+                print(json.dumps(build(archive, parent, args.cutoff or now), indent=2, sort_keys=True), flush=True)
         elif args.action == "backfill":
             if not args.start or not args.end:
                 raise ValueError("backfill requires explicit --start and --end")
@@ -118,7 +134,7 @@ def command(args):
 
 def parser(sub):
     root = sub.add_parser("prospective", help="explicit saved Benchmark collection, frozen inference and delayed scoring")
-    root.add_argument("action", choices=["sync", "catalog", "models", "forecasts", "observations", "realtime", "infer", "score", "backfill"])
+    root.add_argument("action", choices=["sync", "catalog", "models", "forecasts", "observations", "realtime", "infer", "score", "backfill", "rag-snapshot"])
     root.add_argument("--archive-root", default=str(ROOT / "data/prospective/v1"))
     root.add_argument("--remote", action="store_true", help="sync/persist through the configured Hugging Face bucket")
     root.add_argument("--serialized-writer", action="store_true", help="caller holds the shared workflow concurrency slot")
@@ -128,4 +144,6 @@ def parser(sub):
     root.add_argument("--suite", default="hourly-2026-v3")
     root.add_argument("--source-artifact", default="0aac87538da2016cf7d4a8265088de1da1f6b0feb8c63dbeb74a49b45322399b")
     root.add_argument("--allow-large-downloads", action="store_true", help="explicit checkpoint/index setup exceeding 500 MiB")
+    root.add_argument("--base-index", action="append", help="pinned parent SHA-256 for rag-snapshot; repeat or default to catalog indexes")
+    root.add_argument("--cutoff", help="UTC data-availability cutoff for the local RAG snapshot")
     root.set_defaults(func=command)

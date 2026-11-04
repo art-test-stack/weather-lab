@@ -1,9 +1,10 @@
 # Prospective evaluation
 
 This workflow collects evidence, freezes predictions, and scores delayed hourly
-measurements. The Gradio **Prospective Evaluation** tab reads the saved archive.
+measurements. In Gradio, choose **Benchmark → Results source → Collected evaluation**
+to read the saved archive with the same plotting functions and axes as Benchmark.
 It never collects data, loads a checkpoint, performs inference, or writes scores.
-Forecast and Benchmark retain their existing event chains and saved results.
+Forecast and the original saved Benchmark retain their existing event chains and saved results.
 
 ## Review and activation
 
@@ -152,6 +153,13 @@ cumulative horizon selection. Pair counts weight aggregates; |G| is taken after
 aggregation. Coverage includes missing observations/predictions, common-support
 exclusions and explicitly absent historical issues. It never pools variables or
 cohorts, and a performance decrease alone is never presented as proof of leakage.
+The collected view uses a compact configuration selector and limits station choices
+to Paris-Orly and Toulouse-Blagnac (or both). Its **Evaluation period** selector
+labels historical replay and prospective forecasts explicitly. Calendar pickers
+enable only verified saved dates for the selected configurations, station, variable,
+period, cycle and lead limit; the final date cannot precede the first. Control edits
+only update draft settings/date choices. Plots and metric tables change only when
+**Refresh saved evaluation** is clicked. Long legends use a bounded scrolling area.
 The archive keeps point predictions for these metrics, with no invented
 probabilistic bands or deterministic probabilistic scores.
 
@@ -209,8 +217,53 @@ be recovered by collecting data later. No old record is relabelled prospective.
 The Space reads the bucket mount at `/data/prospective/v1` when present. Else it
 reads local `data/prospective/v1`, or `WEATHER_LAB_PROSPECTIVE_ARCHIVE` if set.
 Outside a mounted Space, explicitly run `prospective sync --remote` to populate
-the local read-only view. Opening/refreshing the tab never synchronizes the bucket.
+the local read-only view. Opening the source or refreshing results never synchronizes the bucket.
 The initial empty state is expected until collection and inference have run.
+
+## Local RAG snapshot staging
+
+```bash
+uv run --frozen weather-lab prospective rag-snapshot --cutoff 2026-11-03T20:00:00Z
+# Optionally select a pinned parent; repeat --base-index for several parents.
+uv run --frozen weather-lab prospective rag-snapshot --base-index <parent-sha256>
+```
+
+The builder uses the already-installed pinned weather/error indexes from the saved
+catalog. It performs no downloads or model inference. Only fully verified
+**prospective** cases qualify, with evidence that a forecast was frozen before its
+first verifying hour. Historical replays are excluded. Duplicate model results at
+the same station/decision contribute one weather memory case; AROME-error memory
+also retains the issue identity.
+
+Weather memory contains measured context and measured continuations, never model
+outputs. Query history is reconstructed from observation revisions actually known
+at the original decision. Continuations must be completely observed by the chosen
+snapshot cutoff. Error memory additionally requires genuine issued AROME available
+at that decision, vintage-checked forecast history and the same issue as the saved
+raw reference. Missing or delayed labels and inputs remain explicit exclusions.
+
+The snapshot appends new payloads and embeddings to the verified parent arrays,
+using the parent's unchanged scale, query dimensions, methods and retrieval
+parameters. It records candidate/source hashes, actual case availability and the
+selection cutoff. Parent bytes and every configured index ID remain unchanged.
+An availability receipt is written only after the new artifact is committed and
+verified, so a snapshot built later cannot be represented as available earlier.
+Identical data, cutoff and code reuse the same content-addressed snapshot and its
+first availability receipt.
+
+Artifacts are staged under
+`data/evidence/prospective-rag-snapshots/indexes/<sha256>/`, separately from the
+active index cache. They use a version-2 staging format; current frozen version-1
+adapters reject them. **No snapshot is activated or substituted into a saved
+configuration.** Activation requires a separately reviewed loader/configuration
+version that records the selected snapshot and its actual availability for future
+predictions. Existing predictions retain their original index IDs.
+
+When no eligible new cases exist, the command reports the exclusions and creates
+no index. The local October preview contains only retrospective cases, so both
+pinned parents correctly produce zero eligible additions at present. Small real
+index fixtures test successful weather/error extensions, delayed publication,
+original query revisions, duplicate cases, parent preservation and inactive staging.
 
 ## Validation and current limits
 
